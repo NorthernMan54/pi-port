@@ -66,10 +66,16 @@ _HWDEC_ARGS = ["-c:v", "h264_rkmpp"] if FFMPEG_BIN != "ffmpeg" else []
 _motion_state = {}   # deviceID -> {"tracks": {trackerID: {...}}, "next_tracker_id": int}
 _motion_lock = threading.Lock()
 _motion_poll_stop = {}  # deviceID -> threading.Event, signals the poll loop to stop
+_motion_poll_thread = {}  # deviceID -> threading.Thread, joined on stop
 _event_id_counter = itertools.count(int(time.time()))  # monotonic, avoids same-second collisions across tracks
 MOTION_POLL_INTERVAL_S = 1.5
-# Consecutive empty ticks before a track is declared lost (~30s); YOLOv5s often
-# drops lying-down subjects.
+# Consecutive empty ticks before a track is declared lost (~30s at the poll
+# interval). Raised from 3 (~4.5s) deliberately: a shorter tolerance reported one
+# continuous hard-to-classify presence as repeated separate visits. Tradeoff,
+# stated plainly: a genuine departure now takes up to ~30s of true absence to
+# register as "leave". YOLOv5s also often drops lying-down subjects.
+# NOTE: this is only effective if track state survives a UiStreamControl refresh
+# (see _stop_motion_detector's preserve_tracks) -- wiping state resets the count.
 MOTION_MISS_TOLERANCE_TICKS = 20
 # Min IOU (same objectType) to match a detection to an existing track.
 IOU_MATCH_THRESHOLD = 0.3
@@ -406,8 +412,27 @@ def _process_line_crossings(ws, device_id, tracker_id, tr, new_center):
                           line["id"], tracker_id, device_id)
 
 
+def _dedupe_detections(detections, iou_thresh=0.4):
+    """Collapse same-type detections that heavily overlap into one (highest
+    score wins). Per-class NMS in detector.py uses NMS_THRESH 0.45, but two
+    boxes for ONE object can still survive it (e.g. a full-body box plus a
+    partial/torso box with IoU just under the gate) -- observed live as two
+    `person detected` ticks 1ms apart at scores 0.67/0.51 for the same person.
+    Left alone, each unmatched detection opens its own track, so one object
+    produces two tracks, two event streams, and no clean matched pair -- which
+    is fatal for line crossing (it needs a matched pair to get a movement
+    segment)."""
+    out = []
+    for d in sorted(detections, key=lambda d: -d["score"]):
+        if any(d["objectType"] == k["objectType"] and _iou(d["coord"], k["coord"]) >= iou_thresh
+               for k in out):
+            continue
+        out.append(d)
+    return out
+
+
 def _motion_tick(ws, device_id):
-    detections = _classify_frame_detections(device_id)
+    detections = _dedupe_detections(_classify_frame_detections(device_id))
     with _motion_lock:
         dev = _motion_state.setdefault(device_id, {"tracks": {}, "next_tracker_id": 1})
         tracks = dev["tracks"]
@@ -516,23 +541,60 @@ def _motion_tick(ws, device_id):
                       "for deviceID=%s -- ignoring (not smart-detect-worthy)", device_id)
 
 
-def _stop_motion_detector(device_id):
-    with _motion_lock:
-        _motion_state.pop(device_id, None)
+def _stop_motion_detector(device_id, preserve_tracks=False):
+    """Stop this device's poll loop.
+
+    preserve_tracks=True keeps `_motion_state` (open tracks, prev_center) so a
+    UiStreamControl refresh does not silently abandon an in-flight track. Only a
+    genuine teardown (stream stop / un-adopt) should discard track state -- and
+    when a track IS discarded with an open event, emit a `leave` first so the
+    controller closes it instead of leaving a dangling event.
+    """
+    if not preserve_tracks:
+        with _motion_lock:
+            dev = _motion_state.get(device_id)
+            open_tracks = list((dev or {}).get("tracks", {}).items())
+            _motion_state.pop(device_id, None)
+        # Emit leave for anything still open (a discarded track with no leave
+        # leaves an orphaned event on the controller).
+        for tracker_id, tr in open_tracks:
+            try:
+                _send_smart_detect_event(None, device_id, edge_type="leave",
+                                          event_id=tr["event_id"], stationary=True,
+                                          object_type=tr["objectType"], coord=tr["coord"],
+                                          confidence=tr["score"],
+                                          first_shown_ms=tr["first_shown_ms"],
+                                          tracker_id=tracker_id)
+                log.info("emitted leave for discarded track tracker_id=%s deviceID=%s "
+                          "(detector stopping)", tracker_id, device_id)
+            except Exception:
+                log.exception("failed to emit leave for discarded tracker_id=%s deviceID=%s",
+                              tracker_id, device_id)
     ev = _motion_poll_stop.pop(device_id, None)
     if ev:
         ev.set()
+    # Join the loop. Without this the old thread can still be INSIDE
+    # _motion_tick() when a replacement loop starts (stop_event.wait() is only
+    # checked between ticks), so both could mutate the same device's track state.
+    # (Observed live as miss_count resetting: miss 5 -> miss 1 -> miss 1.)
+    t = _motion_poll_thread.pop(device_id, None)
+    if t and t.is_alive():
+        t.join(timeout=MOTION_POLL_INTERVAL_S + 5.0)
 
 
-def _start_motion_detector(ws, device_id, ip, port, uri):
+def _start_motion_detector(ws, device_id, ip, port, uri, preserve_tracks=False):
     # Runs the classifier periodically on the latest frame; no scene-diff pre-filter
     # (unreliable, and NPU inference is cheap).
-    _stop_motion_detector(device_id)
+    _stop_motion_detector(device_id, preserve_tracks=preserve_tracks)
     stop_event = threading.Event()
     _motion_poll_stop[device_id] = stop_event
 
     def _poll_loop():
         while not stop_event.wait(MOTION_POLL_INTERVAL_S):
+            # Superseded by a newer loop -> this one must not touch shared state.
+            if _motion_poll_stop.get(device_id) is not stop_event:
+                log.info("motion poll loop superseded for deviceID=%s -- exiting", device_id)
+                return
             try:
                 _motion_tick(ws, device_id)
             except Exception:
@@ -540,7 +602,9 @@ def _start_motion_detector(ws, device_id, ip, port, uri):
 
     log.info("starting real motion detector (periodic classification, every %.1fs) for deviceID=%s",
               MOTION_POLL_INTERVAL_S, device_id)
-    threading.Thread(target=_poll_loop, daemon=True).start()
+    t = threading.Thread(target=_poll_loop, daemon=True)
+    _motion_poll_thread[device_id] = t
+    t.start()
 
 
 def _record_snapshot_filename(filename, device_id, kind, coord=None):
@@ -990,7 +1054,12 @@ def handle_function(ws, msg, device_info):
                 _start_stream(device_id, payload["ip"], payload["port"], payload["uri"],
                               payload.get("width", DETECT_IMG_SIZE),
                               payload.get("height", DETECT_IMG_SIZE))
-                _start_motion_detector(ws, device_id, payload["ip"], payload["port"], payload["uri"])
+                # Preserve tracks: the controller re-issues UiStreamControl freely
+                # (viewing sessions, config pushes), and wiping state here would
+                # silently abandon an open event and reset prev_center, so a
+                # crossing could never accumulate a movement segment.
+                _start_motion_detector(ws, device_id, payload["ip"], payload["port"],
+                                       payload["uri"], preserve_tracks=True)
                 reply_status = "started"
             except Exception:
                 log.exception("failed to start RTSP pull for deviceID=%s", device_id)

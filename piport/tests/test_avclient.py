@@ -365,5 +365,98 @@ class TestStreamClocks(Base):
         self.assertNotIn("D", av._stream_started_monotonic_ms)
 
 
+class TestDetectionDedupe(Base):
+    def test_overlapping_same_type_collapse_to_one(self):
+        dets = [
+            {"objectType": "person", "score": 0.67, "coord": [100, 100, 200, 400]},
+            {"objectType": "person", "score": 0.51, "coord": [110, 110, 195, 390]},
+        ]
+        out = av._dedupe_detections(dets)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["score"], 0.67)
+
+    def test_distinct_objects_survive(self):
+        dets = [
+            {"objectType": "person", "score": 0.67, "coord": [0, 0, 100, 100]},
+            {"objectType": "person", "score": 0.60, "coord": [500, 500, 100, 100]},
+        ]
+        self.assertEqual(len(av._dedupe_detections(dets)), 2)
+
+    def test_different_types_not_merged(self):
+        # A person box overlapping an animal box is genuinely two objects.
+        dets = [
+            {"objectType": "person", "score": 0.67, "coord": [100, 100, 200, 400]},
+            {"objectType": "animal", "score": 0.51, "coord": [110, 110, 195, 390]},
+        ]
+        self.assertEqual(len(av._dedupe_detections(dets)), 2)
+
+
+class TestMotionLoopLifecycle(Base):
+    def setUp(self):
+        super().setUp()
+        av._motion_poll_stop.clear()
+        av._motion_poll_thread.clear()
+        # Make ticks observable without running the detector.
+        self.ticks = []
+        self._orig_tick = av._motion_tick
+        av._motion_tick = lambda ws, dev: self.ticks.append(dev)
+        self.addCleanup(lambda: setattr(av, "_motion_tick", self._orig_tick))
+        self._orig_interval = av.MOTION_POLL_INTERVAL_S
+        av.MOTION_POLL_INTERVAL_S = 0.05
+        self.addCleanup(lambda: setattr(av, "MOTION_POLL_INTERVAL_S", self._orig_interval))
+        self.addCleanup(lambda: av._stop_motion_detector("D"))
+
+    def test_restart_does_not_leave_overlapping_loops(self):
+        # A stream restart calls _start_motion_detector again; the previous loop
+        # must be stopped AND joined, or both mutate the same track state.
+        av._start_motion_detector(None, "D", "ip", 1, "uri")
+        av._start_motion_detector(None, "D", "ip", 1, "uri")  # simulate restart
+        self.assertEqual(len(av._motion_poll_stop), 1)
+        self.assertEqual(len(av._motion_poll_thread), 1)
+        live = av._motion_poll_thread["D"]
+        self.assertTrue(live.is_alive())
+        av._stop_motion_detector("D")
+        # _stop pops the handle as part of joining it, so assert on the captured
+        # thread, not on the (now-absent) dict entry.
+        self.assertFalse(live.is_alive())
+        self.assertNotIn("D", av._motion_poll_stop)
+        self.assertNotIn("D", av._motion_poll_thread)
+
+    def test_superseded_loop_exits(self):
+        av._start_motion_detector(None, "D", "ip", 1, "uri")
+        first = av._motion_poll_thread["D"]
+        av._start_motion_detector(None, "D", "ip", 1, "uri")
+        time.sleep(0.2)
+        self.assertFalse(first.is_alive())  # old loop bailed out, not still ticking
+        av._stop_motion_detector("D")
+
+    def test_preserve_tracks_keeps_open_tracks(self):
+        # A UiStreamControl refresh must not abandon an in-flight track, or a
+        # line crossing can never accumulate a movement segment.
+        av._motion_state["D"] = {"tracks": {1: {"event_id": 1, "objectType": "person",
+                                                 "coord": [0, 0, 10, 10], "score": 0.9,
+                                                 "first_shown_ms": 1, "miss_count": 0,
+                                                 "prev_center": (5, 5), "crossed_lines": {}}},
+                                  "next_tracker_id": 2}
+        av._start_motion_detector(None, "D", "ip", 1, "uri", preserve_tracks=True)
+        self.assertIn("D", av._motion_state)
+        self.assertIn(1, av._motion_state["D"]["tracks"])
+        av._stop_motion_detector("D")
+
+    def test_discard_emits_leave_for_open_tracks(self):
+        sent = []
+        self._orig_send = av._send_smart_detect_event
+        av._send_smart_detect_event = lambda ws, dev, **kw: sent.append((dev, kw["edge_type"]))
+        self.addCleanup(lambda: setattr(av, "_send_smart_detect_event", self._orig_send))
+        av._motion_state["D"] = {"tracks": {7: {"event_id": 42, "objectType": "person",
+                                                 "coord": [0, 0, 10, 10], "score": 0.9,
+                                                 "first_shown_ms": 1, "miss_count": 0,
+                                                 "prev_center": (5, 5), "crossed_lines": {}}},
+                                  "next_tracker_id": 8}
+        av._stop_motion_detector("D")  # preserve_tracks defaults to False
+        self.assertEqual(sent, [("D", "leave")])
+        self.assertNotIn("D", av._motion_state)
+
+
 if __name__ == "__main__":
     unittest.main()

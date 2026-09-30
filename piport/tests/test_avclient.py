@@ -458,5 +458,26 @@ class TestMotionLoopLifecycle(Base):
         self.assertNotIn("D", av._motion_state)
 
 
+class HwDecoderSelection(unittest.TestCase):
+    def test_codec_maps_to_rkmpp_decoder(self):
+        old = av.FFMPEG_BIN
+        av.FFMPEG_BIN = "/usr/local/ffmpeg-rkmpp/bin/ffmpeg"
+        try:
+            self.assertEqual(av._hwdec_args("hevc"), ["-c:v", "hevc_rkmpp"])
+            self.assertEqual(av._hwdec_args("h264"), ["-c:v", "h264_rkmpp"])
+            self.assertEqual(av._hwdec_args(None), ["-c:v", "h264_rkmpp"])
+            self.assertEqual(av._hwdec_args("mjpeg"), [])
+        finally:
+            av.FFMPEG_BIN = old
+
+    def test_system_ffmpeg_uses_software_decode(self):
+        old = av.FFMPEG_BIN
+        av.FFMPEG_BIN = "ffmpeg"
+        try:
+            self.assertEqual(av._hwdec_args("hevc"), [])
+        finally:
+            av.FFMPEG_BIN = old
+
+
 if __name__ == "__main__":
     unittest.main()

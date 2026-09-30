@@ -58,7 +58,32 @@ _stream_started_monotonic_ms = {}
 # fills); fall back to system ffmpeg.
 FFMPEG_BIN = ("/usr/local/ffmpeg-rkmpp/bin/ffmpeg"
               if os.path.exists("/usr/local/ffmpeg-rkmpp/bin/ffmpeg") else "ffmpeg")
-_HWDEC_ARGS = ["-c:v", "h264_rkmpp"] if FFMPEG_BIN != "ffmpeg" else []
+_HWDEC_CODECS = {"h264": "h264_rkmpp", "hevc": "hevc_rkmpp"}
+_FFPROBE_BIN = os.path.join(os.path.dirname(FFMPEG_BIN), "ffprobe") \
+    if FFMPEG_BIN != "ffmpeg" and os.path.exists(os.path.join(os.path.dirname(FFMPEG_BIN), "ffprobe")) \
+    else "ffprobe"
+
+
+def _probe_codec(url, timeout=8):
+    """Video codec_name of the RTSP stream (e.g. 'h264', 'hevc'), or None if unknown."""
+    try:
+        out = subprocess.run(
+            [_FFPROBE_BIN, "-v", "error", "-rtsp_transport", "tcp", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name", "-of", "csv=p=0", url],
+            capture_output=True, timeout=timeout, text=True).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.splitlines()[0].strip().lower() if out else None
+
+
+def _hwdec_args(codec):
+    """Input decoder args: rkmpp decoder matching the stream codec; empty (ffmpeg's
+    auto-selected software decoder) without ffmpeg-rockchip or for an unknown codec.
+    Unknown/failed probe assumes h264, the historical default."""
+    if FFMPEG_BIN == "ffmpeg":
+        return []
+    dec = _HWDEC_CODECS.get(codec or "h264")
+    return ["-c:v", dec] if dec else []
 
 # Real motion detection: periodic YOLOv5s/RKNN classification of the latest frame
 # (no scene-diff pre-filter); objects tracked by IOU within objectType, each with
@@ -177,18 +202,20 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
     _stream_dims[device_id] = (width or DETECT_IMG_SIZE, height or DETECT_IMG_SIZE)
     url = f"rtsp://{ip}:{port}/{uri}"
     out_path = os.path.join(_STREAM_DIR, f"{device_id}.jpg")
-    encode_args = ["-c:v", "mjpeg_rkmpp"] if _HWDEC_ARGS else []
+    codec = _probe_codec(url)
+    hwdec_args = _hwdec_args(codec)
+    encode_args = ["-c:v", "mjpeg_rkmpp"] if FFMPEG_BIN != "ffmpeg" else []
     size = DETECT_IMG_SIZE
     cmd = [
         FFMPEG_BIN, "-loglevel", "warning", "-rtsp_transport", "tcp",
-        *_HWDEC_ARGS, "-i", url,
+        *hwdec_args, "-i", url,
         "-filter_complex",
         f"[0:v]split=2[snapin][detin];"
         f"[snapin]fps=1/2[snap];[detin]fps=2,scale={size}:{size}[det]",
         "-map", "[snap]", *encode_args, "-update", "1", "-y", out_path,
         "-map", "[det]", "-pix_fmt", "rgb24", "-f", "rawvideo", "-",
     ]
-    log.info("starting merged RTSP pull for deviceID=%s: %s", device_id, url)
+    log.info("starting merged RTSP pull for deviceID=%s: %s (codec=%s)", device_id, url, codec)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     _active_streams[device_id] = proc
     # Origin for this device's clockMonotonic/clockStream (ms since the pull began).

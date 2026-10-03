@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
+from urllib.parse import parse_qsl, urlsplit
 
 import requests
 import urllib3
@@ -48,6 +49,10 @@ _msg_id_counter = itertools.count(1)
 _active_streams = {}
 # tmpfs dir ffmpeg writes each camera's snapshot JPEG into (never persistent).
 _STREAM_DIR = config.stream_dir()
+# Version "installed" by a simulated UpdateFirmwareRequest (ack + fake reboot, no
+# flash) -- mirrors real ubnt_avclient's custom.skipFirmwareUpdate //etc/fakeFwVersion.
+# Read on every reconnect; `--state-dir` relocates it (see main()).
+PINNED_FW_FILE = os.path.join(HERE, "fw_version.json")
 # deviceID -> consecutive unexpected-death count since the last UiStreamControl start.
 _stream_restart_count = {}
 # deviceID -> time.monotonic()*1000 when its RTSP pull started; the origin for
@@ -1064,6 +1069,42 @@ def _send_feature_flags_event(ws, device_id):
     }, response_expected=False)
 
 
+def _pinned_fw_version():
+    """Version persisted by a simulated UpdateFirmwareRequest, or None."""
+    try:
+        with open(PINNED_FW_FILE) as f:
+            version = json.load(f).get("version")
+        return str(version) if version else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _pin_fw_version(version):
+    try:
+        config.atomic_write_json(PINNED_FW_FILE, {"version": version})
+    except OSError:
+        log.warning("failed to persist pinned firmware version %s", version, exc_info=True)
+
+
+def _version_from_update_uri(uri):
+    """Target version out of the controller's update URL, or None.
+
+    service.js `internalUpdatePath` builds
+    `/internal/update/<platform>/<product>/<firmware|software>/<version>/<mac>`;
+    the non-camera `getUpdateUrl` form is the same fields as a query string.
+    """
+    if not uri:
+        return None
+    try:
+        parts = urlsplit(uri)
+    except ValueError:
+        return None
+    segments = [s for s in parts.path.split("/") if s]
+    if len(segments) >= 3 and segments[-3] in ("firmware", "software"):
+        return segments[-2]
+    return dict(parse_qsl(parts.query)).get("version") or None
+
+
 def handle_function(ws, msg, device_info):
     fn = msg.get("functionName")
     payload = msg.get("payload") or {}
@@ -1181,6 +1222,40 @@ def handle_function(ws, msg, device_info):
         if msg.get("responseExpected"):
             send_msg(ws, fn, {}, in_response_to=msg_id)
         log.info("closing this connection to force a fresh, honestly-unadopted reconnect")
+        ws.close()
+        return
+
+    if fn == "UpdateFirmwareRequest":
+        # The controller (service.js updateFirmware, AIPORT branch) sends this over
+        # the classic avclient as {uri, timeoutMs, md5?, fwPath?} with
+        # responseExpected=false. A real device downloads+flashes then reboots; we
+        # never fetch or flash -- we pin the target version (which is a path segment
+        # of uri), report progress, and reconnect as if rebooted so the controller
+        # picks the new fwVersion up from ubnt_avclient_hello/camera-firmware.
+        # Vendor firmware has the same no-op path: custom.skipFirmwareUpdate +
+        # /etc/fakeFwVersion ("SkipFirmwareUpdate with fwVersion = %s").
+        uri = str(payload.get("uri") or "")
+        target = _version_from_update_uri(uri)
+        log.info("UpdateFirmwareRequest uri=%s timeoutMs=%s -> pinning version %s "
+                  "(no flash)",
+                  uri, payload.get("timeoutMs"), target or "<unparsed>")
+        # Status the controller's handleEventUpdateFirmwareStatus consumes:
+        # FW_DOWNLOADING then FW_UPDATING -> isDownloadingFW/isUpdating.
+        send_msg(ws, "EventUpdateFirmwareStatus", {"status": "FW_DOWNLOADING"},
+                 response_expected=False)
+        send_msg(ws, "EventUpdateFirmwareStatus", {"status": "FW_UPDATING"},
+                 response_expected=False)
+        if msg.get("responseExpected"):
+            send_msg(ws, fn, {}, in_response_to=msg_id)
+        if target:
+            _pin_fw_version(target)
+        else:
+            log.warning("could not parse a version from update uri %r -- acking "
+                          "without pinning", uri)
+        # Let the status frames flush, then drop the socket: main()'s reconnect
+        # loop re-reads the pin and reports the new version.
+        time.sleep(1.0)
+        log.info("simulated post-update reboot: closing avclient connection")
         ws.close()
         return
 
@@ -1337,13 +1412,14 @@ def main():
     args.iface = config.resolve_iface(args.iface, cfg)
 
     if args.state_dir:
-        global ADOPT_STATE_FILE, CERT_PATH, KEY_PATH, _STREAM_DIR
+        global ADOPT_STATE_FILE, CERT_PATH, KEY_PATH, _STREAM_DIR, PINNED_FW_FILE
         os.makedirs(args.state_dir, exist_ok=True)
         ADOPT_STATE_FILE = os.path.join(args.state_dir, "adopt_state.json")
         CERT_PATH = os.path.join(args.state_dir, "server.crt")
         KEY_PATH = os.path.join(args.state_dir, "server.key")
         # RAM-only handoff; http_api.py derives the same dir from --state-dir.
         _STREAM_DIR = config.stream_dir(args.state_dir)
+        PINNED_FW_FILE = os.path.join(args.state_dir, "fw_version.json")
 
     mac_nosep = config.resolve_mac(args.iface, args.mac, cfg).lower()
     ip = config.resolve_ip(args.iface, cfg, args.bind_ip)
@@ -1362,7 +1438,15 @@ def main():
     # Single-use token: present on first connect after adopt, omitted on later reconnects.
     used_tokens = set()
 
+    pinned = _pinned_fw_version()
+    if pinned:
+        log.info("using pinned firmware version %s (from %s); delete that file to unpin",
+                  pinned, PINNED_FW_FILE)
+
     while True:
+        # A simulated update pins a version for the next (fake-reboot) reconnect;
+        # otherwise report the configured --version.
+        device_info["version"] = _pinned_fw_version() or args.version
         # Read adopt state if present but don't block; dial args.host pre-adopt.
         try:
             with open(ADOPT_STATE_FILE) as f:

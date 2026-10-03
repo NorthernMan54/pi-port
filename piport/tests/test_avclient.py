@@ -458,6 +458,84 @@ class TestMotionLoopLifecycle(Base):
         self.assertNotIn("D", av._motion_state)
 
 
+class TestFirmwareUpdate(unittest.TestCase):
+    """UpdateFirmwareRequest is acked and its target version pinned, never flashed."""
+
+    def setUp(self):
+        self._orig_pin = av.PINNED_FW_FILE
+        self._tmp = tempfile.mkdtemp()
+        av.PINNED_FW_FILE = os.path.join(self._tmp, "fw_version.json")
+        self.addCleanup(lambda: setattr(av, "PINNED_FW_FILE", self._orig_pin))
+        self.addCleanup(shutil.rmtree, self._tmp, True)
+        self._orig_sleep = av.time.sleep
+        av.time.sleep = lambda *_: None
+        self.addCleanup(lambda: setattr(av.time, "sleep", self._orig_sleep))
+
+    def test_parse_path_form(self):
+        self.assertEqual(
+            av._version_from_update_uri(
+                "https://10.0.0.1:7444/internal/update/aiport/uvc/firmware/5.2.0/FCECDA000001"),
+            "5.2.0")
+
+    def test_parse_query_form(self):
+        self.assertEqual(
+            av._version_from_update_uri(
+                "https://10.0.0.1:7444/internal/update?platform=aiport&product=uvc"
+                "&updateType=firmware&version=5.2.0&mac=FCECDA000001"),
+            "5.2.0")
+
+    def test_parse_rejects_custom_uri(self):
+        self.assertIsNone(av._version_from_update_uri("https://example.com/fw.bin"))
+        self.assertIsNone(av._version_from_update_uri(""))
+
+    def test_pin_round_trip(self):
+        self.assertIsNone(av._pinned_fw_version())
+        av._pin_fw_version("9.9.9")
+        self.assertEqual(av._pinned_fw_version(), "9.9.9")
+
+    def test_handler_pins_and_reboots(self):
+        ws = _FakeWS()
+        av.handle_function(ws, {
+            "functionName": "UpdateFirmwareRequest",
+            "messageId": "m1",
+            "payload": {"uri": "https://c:7444/internal/update/aiport/uvc/firmware/6.0.0/AA",
+                        "timeoutMs": 30000},
+        }, {})
+        self.assertEqual(av._pinned_fw_version(), "6.0.0")
+        names = [json.loads(m)["functionName"] for m in ws.sent]
+        self.assertEqual(names, ["EventUpdateFirmwareStatus", "EventUpdateFirmwareStatus"])
+        statuses = [json.loads(m)["payload"]["status"] for m in ws.sent]
+        self.assertEqual(statuses, ["FW_DOWNLOADING", "FW_UPDATING"])
+        self.assertTrue(ws.closed)
+
+    def test_handler_with_unparsable_uri_acks_without_pinning(self):
+        ws = _FakeWS()
+        av.handle_function(ws, {
+            "functionName": "UpdateFirmwareRequest",
+            "messageId": "m2",
+            "responseExpected": True,
+            "payload": {"uri": "https://example.com/fw.bin"},
+        }, {})
+        self.assertIsNone(av._pinned_fw_version())
+        self.assertTrue(ws.closed)
+        acks = [json.loads(m) for m in ws.sent
+                if json.loads(m)["functionName"] == "UpdateFirmwareRequest"]
+        self.assertEqual(len(acks), 1)
+        self.assertEqual(acks[0]["inResponseTo"], "m2")
+
+
+class _FakeWS:
+    def __init__(self):
+        self.sent = []
+        self.closed = False
+
+    def send(self, data):
+        self.sent.append(data)
+
+    def close(self, *a, **k):
+        self.closed = True
+
+
 class HwDecoderSelection(unittest.TestCase):
     def test_codec_maps_to_rkmpp_decoder(self):
         old = av.FFMPEG_BIN

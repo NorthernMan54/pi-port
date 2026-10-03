@@ -103,6 +103,12 @@ class TestLoadConfig(unittest.TestCase):
         self.assertEqual(cfg["platform"], "UVC AI Port")
         self.assertEqual(cfg["sysid"], "0xa5f1")
 
+    def test_discovery_platform_is_the_sku(self):
+        # Network's fingerprint catalogue knows the AI Port as "UP-AI-Port", not
+        # the canonical Protect type "UVC AI Port".
+        self.assertEqual(config.DEFAULTS["discovery_platform"], "UP-AI-Port")
+        self.assertEqual(config.DEFAULTS["platform"], "UVC AI Port")
+
 
 class TestFirmwarePin(unittest.TestCase):
     """A simulated update pins a version; every stage reports it over the configured one."""

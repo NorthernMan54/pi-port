@@ -115,9 +115,11 @@ def main():
                           "(e.g. aikey-emu's) on the same host")
     ap.add_argument("--mac", default=None, help="override MAC (hex, with or without colons)")
     ap.add_argument("--hostname", default=cfg["hostname"])
-    ap.add_argument("--platform", default=cfg["platform"],
-                     help="discovery platform TLV 0x0C. Must be 'UVC AI Port' -- the "
-                          "controller's service.js SKU string for sysid 0xa5f1")
+    ap.add_argument("--platform", default=cfg.get("discovery_platform") or cfg["platform"],
+                     help="discovery platform TLV 0x0C. Must be the SKU string Network's "
+                          "fingerprint catalogue knows ('UP-AI-Port'), not the canonical "
+                          "Protect type; defaults to [identity] discovery_platform, then "
+                          "[identity] platform")
     ap.add_argument("--sysid", type=lambda s: int(s, 0), default=config.sysid_int(cfg),
                      help="CONFIRMED from the real controller's service.js AI_PORT_SYSIDS map")
     ap.add_argument("--fw-version", default=cfg["discovery_fw_version"])

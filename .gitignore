@@ -12,6 +12,7 @@ server.key
 adopt_state.json
 adopt_state.json.tmp
 fw_version.json
+device_name
 run_all.log
 
 # Model binaries and conversion build artifacts (regenerated per README)

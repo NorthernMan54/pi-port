@@ -524,6 +524,19 @@ class TestFirmwareUpdate(unittest.TestCase):
         self.assertEqual(len(acks), 1)
         self.assertEqual(acks[0]["inResponseTo"], "m2")
 
+    def test_change_device_settings_persists_name(self):
+        ws = _FakeWS()
+        av.handle_function(ws, {
+            "functionName": "ChangeDeviceSettings",
+            "messageId": "m3",
+            "responseExpected": True,
+            "payload": {"name": "Front Door", "timezone": "Europe/Berlin"},
+        }, {})
+        self.assertEqual(config.device_name(av.STATE_DIR), "Front Door")
+        reply = json.loads(ws.sent[-1])
+        self.assertEqual(reply["functionName"], "ChangeDeviceSettings")
+        self.assertEqual(reply["payload"]["name"], "Front Door")
+
 
 class _FakeWS:
     def __init__(self):

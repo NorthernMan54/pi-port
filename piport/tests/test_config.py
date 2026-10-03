@@ -134,6 +134,11 @@ class TestFirmwarePin(unittest.TestCase):
         config.atomic_write_json(self.pin, {})
         self.assertIsNone(config.pinned_fw_version(self.d))
 
+    def test_device_name_default_and_round_trip(self):
+        self.assertEqual(config.device_name(self.d), "AI Port")
+        config.set_device_name(self.d, "Front Door")
+        self.assertEqual(config.device_name(self.d), "Front Door")
+
 
 if __name__ == "__main__":
     unittest.main()

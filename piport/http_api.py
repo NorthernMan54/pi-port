@@ -107,7 +107,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "mac": cfg["mac"],
             "type": cfg["platform"],
             "sysid": f"0x{cfg['sysid']:04x}",
-            "name": cfg["hostname"],
+            "name": config.device_name(STATE_DIR),
             "model": cfg["platform"],
             "firmwareVersion": config.effective_fw_version(cfg["fw_version"], STATE_DIR),
             "adopted": adopted,

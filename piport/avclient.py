@@ -1179,6 +1179,22 @@ def handle_function(ws, msg, device_info):
         ws.close()
         return
 
+    if fn == "ChangeDeviceSettings":
+        # Protect pushes the user's rename here; persist it (discovery is a separate
+        # process) so the discovery TLV 0x0B reports the same name Network shows.
+        name = payload.get("name")
+        if isinstance(name, str) and name:
+            try:
+                config.set_device_name(STATE_DIR, name)
+                log.info("ChangeDeviceSettings: device renamed to %r", name)
+            except OSError:
+                log.warning("failed to persist device name %r", name, exc_info=True)
+        if msg.get("responseExpected"):
+            send_msg(ws, fn, {"name": config.device_name(STATE_DIR),
+                              "timezone": payload.get("timezone") or ""},
+                     in_response_to=msg_id)
+        return
+
     # Unknown function: ack if a response is expected.
     if msg.get("responseExpected"):
         send_msg(ws, fn, {}, in_response_to=msg_id)
@@ -1244,7 +1260,7 @@ def run(host, port, device_info, token=None):
         send_msg(ws, "ubnt_avclient_hello", {
             "mac": device_info["mac_nosep"],
             "model": device_info["type"],
-            "name": device_info.get("hostname", "piport"),
+            "name": config.device_name(STATE_DIR),
             "fwVersion": device_info["version"],
             "connectionHost": device_info.get("console_host") or device_info["ip"],
             "connectionSecurePort": port,

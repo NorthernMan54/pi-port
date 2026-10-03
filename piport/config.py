@@ -31,6 +31,9 @@ DEFAULTS = {
     # SKU "UP-AI-Port" (not the canonical type), so the beacon must advertise the
     # SKU or Network can't attribute the device. Protect accepts either.
     "discovery_platform": "UP-AI-Port",
+    # Device name Protect shows / renames; advertised in discovery TLV 0x0B so
+    # Network shows the same name (Protect pushes renames via ChangeDeviceSettings).
+    "name": "AI Port",
     "sysid": "0xa5f1",
     "fw_version": "5.1.12.67",
     # Discovery advertises a longer fw string than ucp4/avclient's "version".
@@ -254,3 +257,23 @@ def pin_fw_version(state_dir, version):
     """Persist the version a simulated UpdateFirmwareRequest 'installed'."""
     atomic_write_json(os.path.join(state_dir or HERE, "fw_version.json"),
                       {"version": version})
+
+
+def device_name(state_dir=None, default=None):
+    """The device's advertised name (discovery TLV 0x0B), or the configured
+    default. Protect pushes the user's rename via ChangeDeviceSettings; persisting
+    it here lets the discovery responder report the same name Network shows."""
+    try:
+        with open(os.path.join(state_dir or HERE, "device_name")) as f:
+            name = f.read().strip()
+        return name or (default or DEFAULTS["name"])
+    except OSError:
+        return default or DEFAULTS["name"]
+
+
+def set_device_name(state_dir, name):
+    path = os.path.join(state_dir or HERE, "device_name")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(name)
+    os.replace(tmp, path)

@@ -8,14 +8,20 @@ import pi_ssh
 UNVR_HOST = os.environ.get("UNVR_HOST")
 if not UNVR_HOST:
     sys.exit("UNVR_HOST is unset")
+# Protect/UOS web login (NOT SSH). This lab's local admin is "opencode"; the
+# historical "Token" hardcode 403s. Override with UNVR_USER.
+UNVR_USER = os.environ.get("UNVR_USER", "opencode")
 # AI Port lives in the `aiports` collection (NOT `aiprocessors`, which is AI-Key
 # specific). Optional AIPORT_ID narrows to one row; otherwise the whole
 # collection is watched.
 AIPORTS_API = os.environ.get("AIPORTS_API", "/proxy/protect/api/aiports")
 AIPORT_ID = os.environ.get("AIPORT_ID")
-# Pi-side log to tail. Default is this project's own log; set ORANGEPI_LOG to
-# another path, or to a full command (e.g. "journalctl -u aiport-instance-main -n 200").
-PI_LOG = os.environ.get("ORANGEPI_LOG", "tail -n 200 /root/piport/run_all.log")
+# Pi-side log to tail. systemd captures the stack's stdout to journald (there is
+# no run_all.log on the Pi); override with ORANGEPI_LOG (a path or a full
+# command), and/or AIPORT_INSTANCE for a non-default instance name.
+AIPORT_INSTANCE = os.environ.get("AIPORT_INSTANCE", "main")
+PI_LOG = os.environ.get("ORANGEPI_LOG",
+                        f"journalctl -u aiport-instance-{AIPORT_INSTANCE} -n 200 --no-pager")
 
 ctx = ssl.create_default_context()
 ctx.check_hostname = False
@@ -23,7 +29,7 @@ ctx.verify_mode = ssl.CERT_NONE
 cj = http.cookiejar.CookieJar()
 opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj),
                                       urllib.request.HTTPSHandler(context=ctx))
-body = json.dumps({"username": "Token", "password": os.environ["UNVR_PASS"]}).encode()
+body = json.dumps({"username": UNVR_USER, "password": os.environ["UNVR_PASS"]}).encode()
 req = urllib.request.Request(f"https://{UNVR_HOST}/api/auth/login", data=body, method="POST",
                               headers={"Content-Type": "application/json"})
 resp = opener.open(req, timeout=10)

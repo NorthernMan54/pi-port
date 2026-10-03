@@ -33,6 +33,8 @@ CERT_PATH = os.path.join(HERE, "server.crt")
 KEY_PATH = os.path.join(HERE, "server.key")
 # RAM-only snapshot dir avclient.py's ffmpeg writes; same dir http_api.py serves.
 STREAM_DIR = config.stream_dir()
+# --state-dir (or None for the shared piport/ path); the firmware pin lives here.
+STATE_DIR = None
 
 # UCP4 record header (8 bytes): type u8, format u8, compressed u8, reserved u8,
 # length u32 BE. The controller's own parser reads it exactly this way
@@ -169,12 +171,15 @@ def handle_action(head, body, device_info):
     if action == "getInfo":
         # Controller getInfo schema (service.js); an empty fwVersion disables
         # firmware-gated features, and a non-null hwrev beats an empty column.
+        # Report a pinned (simulated-update) version if one exists: the X-Version
+        # header and this reply both feed the controller's device firmwareVersion.
+        fw = config.effective_fw_version(device_info["version"], STATE_DIR)
         now_ms = int(time.time() * 1000)
         return {
             "mac": device_info["mac_nosep"],
             "type": device_info["type"],
-            "fwVersion": device_info["version"],
-            "version": device_info["version"],
+            "fwVersion": fw,
+            "version": fw,
             "hwrev": 1,
             # Read live so ResetToDefaults can't leave this claiming still-adopted.
             "adopted": _read_current_token() is not None,
@@ -250,7 +255,7 @@ def run(host: str, port: int, token: str, send_token_header: bool, device_info: 
         "X-Adopted": "true" if adopted else "false",
         "X-Ip": device_info["ip"],
         "X-Device-Id": device_info["device_id"],
-        "X-Version": device_info["version"],
+        "X-Version": config.effective_fw_version(device_info["version"], STATE_DIR),
         "X-Guid": device_info["guid"],
     }
     if send_token_header:
@@ -347,13 +352,14 @@ def main():
     args.iface = config.resolve_iface(args.iface, cfg)
 
     if args.state_dir:
-        global ADOPT_STATE_FILE, CERT_PATH, KEY_PATH, STREAM_DIR
+        global ADOPT_STATE_FILE, CERT_PATH, KEY_PATH, STREAM_DIR, STATE_DIR
         os.makedirs(args.state_dir, exist_ok=True)
         ADOPT_STATE_FILE = os.path.join(args.state_dir, "adopt_state.json")
         CERT_PATH = os.path.join(args.state_dir, "server.crt")
         KEY_PATH = os.path.join(args.state_dir, "server.key")
         # Same RAM-only dir avclient.py writes and http_api.py serves.
         STREAM_DIR = config.stream_dir(args.state_dir)
+        STATE_DIR = args.state_dir
 
     mac_nosep = config.resolve_mac(args.iface, args.mac, cfg).lower()
     ip = config.resolve_ip(args.iface, cfg, args.bind_ip)

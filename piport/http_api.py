@@ -27,6 +27,8 @@ KEY_PATH = os.path.join(HERE, "server.key")
 ADOPT_STATE_FILE = os.path.join(HERE, "adopt_state.json")
 # RAM-only dir shared with avclient.py (writes snapshots); served from /api/1.2/snapshot.
 STREAM_DIR = config.stream_dir()
+# --state-dir (or None for the shared piport/ path); the firmware pin lives here.
+STATE_DIR = None
 
 
 def ensure_cert():
@@ -107,7 +109,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "sysid": f"0x{cfg['sysid']:04x}",
             "name": cfg["hostname"],
             "model": cfg["platform"],
-            "firmwareVersion": cfg["fw_version"],
+            "firmwareVersion": config.effective_fw_version(cfg["fw_version"], STATE_DIR),
             "adopted": adopted,
             "isAdopted": adopted,
             "guid": cfg["guid"],
@@ -144,7 +146,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         cfg = self.server.aiport_config
         mac_colons = ":".join(cfg["mac"][i:i + 2] for i in range(0, 12, 2))
         self._json(200, {
-            "fw": cfg["fw_version"],
+            "fw": config.effective_fw_version(cfg["fw_version"], STATE_DIR),
             "board": {"hwaddr": mac_colons},
             "features": {
                 "smartDetect": ["person", "vehicle", "animal", "lineCrossing", "liveviewTracking"],
@@ -265,7 +267,7 @@ def main():
     args.iface = config.resolve_iface(args.iface, cfg)
 
     if args.state_dir:
-        global ADOPT_STATE_FILE, CERT_PATH, KEY_PATH, STREAM_DIR
+        global ADOPT_STATE_FILE, CERT_PATH, KEY_PATH, STREAM_DIR, STATE_DIR
         os.makedirs(args.state_dir, exist_ok=True)
         ADOPT_STATE_FILE = os.path.join(args.state_dir, "adopt_state.json")
         CERT_PATH = os.path.join(args.state_dir, "server.crt")
@@ -273,6 +275,7 @@ def main():
         # Both processes must derive the same RAM-only stream dir from the
         # same --state-dir.
         STREAM_DIR = config.stream_dir(args.state_dir)
+        STATE_DIR = args.state_dir
 
     ensure_cert()
 

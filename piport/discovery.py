@@ -22,6 +22,8 @@ import config
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ADOPT_STATE_FILE = os.path.join(HERE, "adopt_state.json")
+# --state-dir (or None for the shared piport/ path); the firmware pin lives here.
+STATE_DIR = None
 
 log = logging.getLogger("aiport-discovery-beacon")
 
@@ -129,9 +131,10 @@ def main():
     args.iface = config.resolve_iface(args.iface, cfg)
 
     if args.state_dir:
-        global ADOPT_STATE_FILE
+        global ADOPT_STATE_FILE, STATE_DIR
         os.makedirs(args.state_dir, exist_ok=True)
         ADOPT_STATE_FILE = os.path.join(args.state_dir, "adopt_state.json")
+        STATE_DIR = args.state_dir
 
     mac = bytes.fromhex(config.resolve_mac(args.iface, args.mac, cfg))
     ip = config.resolve_ip(args.iface, cfg, args.bind_ip)
@@ -194,7 +197,8 @@ def main():
 
         uptime_s = int(time.time() - start)
         resp = build_response(resp_version, resp_command, mac, ip_bytes, args.hostname,
-                               args.fw_version, args.platform, args.sysid, uptime_s,
+                               config.effective_fw_version(args.fw_version, STATE_DIR),
+                               args.platform, args.sysid, uptime_s,
                                args.device_id)
         try:
             sock.sendto(resp, addr)

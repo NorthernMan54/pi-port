@@ -223,3 +223,24 @@ def stream_dir(state_dir=None):
     else:
         key = "default"
     return os.path.join(base, "aiport-streams", key)
+
+
+def pinned_fw_version(state_dir=None):
+    """Firmware version pinned by a simulated UpdateFirmwareRequest, or None.
+
+    avclient.py writes ``fw_version.json`` here on the update (ack + fake reboot,
+    no flash); every stage must pass the same ``--state-dir`` to read it. Without
+    one, all stages share the piport/ directory.
+    """
+    path = os.path.join(state_dir or HERE, "fw_version.json")
+    try:
+        with open(path) as f:
+            version = json.load(f).get("version")
+        return str(version) if version else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def effective_fw_version(configured, state_dir=None):
+    """The version to report: a pinned update version if present, else configured."""
+    return pinned_fw_version(state_dir) or configured

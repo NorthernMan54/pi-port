@@ -16,6 +16,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import ucp4_client  # noqa: E402
+import config  # noqa: E402
 
 
 class TestPackRecord(unittest.TestCase):
@@ -124,6 +125,32 @@ class TestGetSnapshot(unittest.TestCase):
         reply = ucp4_client.handle_action({"action": "getSnapshot"}, {}, {})
         self.assertIsInstance(reply, ucp4_client.ErrorReply)
         self.assertNotEqual(reply.error_code, 0)
+
+
+class TestPinnedGetInfo(unittest.TestCase):
+    """ucp4 getInfo reports a pinned (simulated-update) version over the configured one."""
+
+    DEVICE = {"mac_nosep": "fcecda000001", "type": "UVC AI Port", "version": "5.1.12.67",
+              "guid": "5c2659d4-48f3-16c4-ed83-2fefbad37066", "device_id": "d",
+              "ip": "10.0.0.1"}
+
+    def setUp(self):
+        self._orig = ucp4_client.STATE_DIR
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, True)
+        ucp4_client.STATE_DIR = self.d
+        self.addCleanup(lambda: setattr(ucp4_client, "STATE_DIR", self._orig))
+
+    def test_configured_when_unpinned(self):
+        reply = ucp4_client.handle_action({"action": "getInfo"}, {}, dict(self.DEVICE))
+        self.assertEqual(reply["fwVersion"], "5.1.12.67")
+
+    def test_pinned_wins(self):
+        config.atomic_write_json(os.path.join(self.d, "fw_version.json"),
+                                 {"version": "5.9.9.9"})
+        reply = ucp4_client.handle_action({"action": "getInfo"}, {}, dict(self.DEVICE))
+        self.assertEqual(reply["fwVersion"], "5.9.9.9")
+        self.assertEqual(reply["version"], "5.9.9.9")
 
 
 if __name__ == "__main__":

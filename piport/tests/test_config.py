@@ -2,6 +2,7 @@
 # Copyright (C) 2026 hutchx86
 """Unit tests for config.py's pure logic (no hardware, no network)."""
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -101,6 +102,31 @@ class TestLoadConfig(unittest.TestCase):
         cfg = config.load_config("/nonexistent/path/aiport.cfg")
         self.assertEqual(cfg["platform"], "UVC AI Port")
         self.assertEqual(cfg["sysid"], "0xa5f1")
+
+
+class TestFirmwarePin(unittest.TestCase):
+    """A simulated update pins a version; every stage reports it over the configured one."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.d, True)
+        self.pin = os.path.join(self.d, "fw_version.json")
+
+    def test_missing_falls_back_to_configured(self):
+        self.assertIsNone(config.pinned_fw_version(self.d))
+        self.assertEqual(config.effective_fw_version("5.1.12.67", self.d), "5.1.12.67")
+
+    def test_round_trip(self):
+        config.atomic_write_json(self.pin, {"version": "5.9.9.9"})
+        self.assertEqual(config.pinned_fw_version(self.d), "5.9.9.9")
+        self.assertEqual(config.effective_fw_version("5.1.12.67", self.d), "5.9.9.9")
+
+    def test_malformed_or_empty_is_unpinned(self):
+        with open(self.pin, "w") as f:
+            f.write("{not json")
+        self.assertIsNone(config.pinned_fw_version(self.d))
+        config.atomic_write_json(self.pin, {})
+        self.assertIsNone(config.pinned_fw_version(self.d))
 
 
 if __name__ == "__main__":

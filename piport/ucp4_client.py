@@ -37,10 +37,7 @@ STREAM_DIR = config.stream_dir()
 STATE_DIR = None
 
 # UCP4 record header (8 bytes): type u8, format u8, compressed u8, reserved u8,
-# length u32 BE. The controller's own parser reads it exactly this way
-# (`getUint8(1)`=format, `getUint8(2)`=compressed, `getUint32(4)`=length); a
-# JSON record is byte-identical to the older "version + 4 reserved + u16 length"
-# reading of the same 8 bytes, so existing traffic is unaffected.
+# length u32 BE (the controller reads length at offset 4, matching this layout).
 RECORD_TYPE_HEAD = 1
 RECORD_TYPE_BODY = 2
 RECORD_FORMAT_JSON = 1
@@ -169,10 +166,8 @@ def handle_action(head, body, device_info):
     log.info("<<< controller action=%r head=%s body=%s", action, head, body)
 
     if action == "getInfo":
-        # Controller getInfo schema (service.js); an empty fwVersion disables
-        # firmware-gated features, and a non-null hwrev beats an empty column.
-        # Report a pinned (simulated-update) version if one exists: the X-Version
-        # header and this reply both feed the controller's device firmwareVersion.
+        # Report a pinned (simulated-update) version if present; an empty fwVersion
+        # disables firmware-gated features, and a non-null hwrev beats an empty column.
         fw = config.effective_fw_version(device_info["version"], STATE_DIR)
         now_ms = int(time.time() * 1000)
         return {
@@ -201,11 +196,8 @@ def handle_action(head, body, device_info):
         return {}
 
     if action == "getSnapshot":
-        # Protect fetches a paired camera's overview/timeline thumbnail from the
-        # AI Port (not the camera) once the camera is paired and the AI Port
-        # advertises supportUcp4. The device must reply with the JPEG as a raw
-        # (format=3) body; `{}` makes the controller fall back to the REST
-        # snapshot path and, on failure, leaves the event without a thumbnail.
+        # Reply with the JPEG as a raw (format=3) body; `{}` makes the controller
+        # fall back to REST and, on failure, leaves the event without a thumbnail.
         data = _read_snapshot_jpeg()
         if data:
             log.info("getSnapshot: replying with %d-byte JPEG from %s", len(data), STREAM_DIR)

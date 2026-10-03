@@ -244,3 +244,9 @@ def pinned_fw_version(state_dir=None):
 def effective_fw_version(configured, state_dir=None):
     """The version to report: a pinned update version if present, else configured."""
     return pinned_fw_version(state_dir) or configured
+
+
+def pin_fw_version(state_dir, version):
+    """Persist the version a simulated UpdateFirmwareRequest 'installed'."""
+    atomic_write_json(os.path.join(state_dir or HERE, "fw_version.json"),
+                      {"version": version})

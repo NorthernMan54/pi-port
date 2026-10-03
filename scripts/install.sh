@@ -49,12 +49,8 @@ RKNN_DEST="$PIPORT_DIR/models/yolov5s_relu.rknn"
 SYSTEMD_DIR="/etc/systemd/system"
 RKNNRT_URL="https://raw.githubusercontent.com/airockchip/rknn-toolkit2/v2.3.2/rknpu2/runtime/Linux/librknn_api/aarch64/librknnrt.so"
 
-# Known-good NPU model: RKNN 2.3.2 / rk3588, input [1,3,640,640], outputs
-# [1,255,80,80]/[1,255,40,40]/[1,255,20,20] -- the 3 raw sigmoid heads
-# detector.py decodes. Not committed to the emulator repo (binary); it lives in
-# the separate AGPL-3.0 model repo below. An empty URL disables the default
-# download. Note the model derives from Ultralytics YOLOv5s (AGPL-3.0) via
-# Rockchip's model zoo (Apache-2.0) and is distributed under AGPL-3.0.
+# Known-good NPU model (RKNN 2.3.2/rk3588, 3 sigmoid heads); not committed --
+# it lives in the separate AGPL-3.0 model repo. Empty URL disables the download.
 DEFAULT_RKNN_URL="https://raw.githubusercontent.com/hutchx86/pi-port-models/v1/yolov5s_relu.rknn"
 DEFAULT_RKNN_SHA256="f4fd0122ecca3117323b8268d270e6cc293e364d6a9dda8e83293d64c8377a3c"
 
@@ -159,9 +155,8 @@ if [ "$NO_NPU" -eq 0 ]; then
         done
     fi
 
-    # An explicit --rknn-sha256 must match whatever source supplied the model,
-    # or we stop rather than silently installing a different artifact. Remove a
-    # rejected file so a later re-run doesn't mistake it for a good install.
+    # An explicit --rknn-sha256 must match the supplied model; drop a rejected file
+    # so a later re-run doesn't mistake it for a good install.
     if [ -n "$RKNN_SHA256" ] && [ -f "$RKNN_DEST" ]; then
         if ! verify_sha256 "$RKNN_DEST" "$RKNN_SHA256"; then
             rm -f "$RKNN_DEST"
@@ -299,9 +294,8 @@ else
     "$PY" "$PIPORT_DIR/instance_manager.py" "${im_args[@]}"
 fi
 
-# A DHCP timeout leaves the unit enabled but with no address (dhclient exits 0),
-# so surface the interface's real IP rather than trusting systemctl's "active".
-# Poll briefly: a restart recreates the macvlan before dhclient leases an IP.
+# dhclient exits 0 on timeout, so poll for a real IP instead of trusting
+# systemctl "active"; a restart recreates the macvlan before the lease appears.
 inst_ip=""
 for _ in $(seq 1 20); do
     inst_ip="$(ip -4 -o addr show dev "$INSTANCE_IFACE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1 || true)"

@@ -3,7 +3,5 @@ websockets>=12.0
 requests>=2.31
 numpy
 
-# rknn-toolkit-lite2 is NOT listed here -- install it separately with:
-#   pip install rknn-toolkit-lite2
-# See piport/README.md ("Object detection") for the required matching system
-# librknnrt.so upgrade (the stock OS version is too old for newer rknn-toolkit2).
+# rknn-toolkit-lite2 is installed separately: pip install rknn-toolkit-lite2
+# (see piport/README.md for the matching librknnrt.so upgrade it requires).

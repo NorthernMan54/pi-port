@@ -11,6 +11,7 @@ server.key
 /piport/instances/
 adopt_state.json
 adopt_state.json.tmp
+fw_version.json
 run_all.log
 
 # Model binaries and conversion build artifacts (regenerated per README)

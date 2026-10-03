@@ -49,10 +49,8 @@ _msg_id_counter = itertools.count(1)
 _active_streams = {}
 # tmpfs dir ffmpeg writes each camera's snapshot JPEG into (never persistent).
 _STREAM_DIR = config.stream_dir()
-# Version "installed" by a simulated UpdateFirmwareRequest (ack + fake reboot, no
-# flash) -- mirrors real ubnt_avclient's custom.skipFirmwareUpdate //etc/fakeFwVersion.
-# Read on every reconnect; `--state-dir` relocates it (see main()).
-PINNED_FW_FILE = os.path.join(HERE, "fw_version.json")
+# --state-dir (or None for the shared piport/ path); the firmware pin lives here.
+STATE_DIR = None
 # deviceID -> consecutive unexpected-death count since the last UiStreamControl start.
 _stream_restart_count = {}
 # deviceID -> time.monotonic()*1000 when its RTSP pull started; the origin for
@@ -90,22 +88,16 @@ def _hwdec_args(codec):
     dec = _HWDEC_CODECS.get(codec or "h264")
     return ["-c:v", dec] if dec else []
 
-# Real motion detection: periodic YOLOv5s/RKNN classification of the latest frame
-# (no scene-diff pre-filter); objects tracked by IOU within objectType, each with
-# its own trackerID/eventId and enter/moving/leave lifecycle.
+# Real detection: per-tick YOLOv5s/RKNN classify the latest frame; objects are
+# IOU-tracked per objectType with their own trackerID/eventId and enter/move/leave.
 _motion_state = {}   # deviceID -> {"tracks": {trackerID: {...}}, "next_tracker_id": int}
 _motion_lock = threading.Lock()
 _motion_poll_stop = {}  # deviceID -> threading.Event, signals the poll loop to stop
 _motion_poll_thread = {}  # deviceID -> threading.Thread, joined on stop
 _event_id_counter = itertools.count(int(time.time()))  # monotonic, avoids same-second collisions across tracks
 MOTION_POLL_INTERVAL_S = 1.5
-# Consecutive empty ticks before a track is declared lost (~30s at the poll
-# interval). Raised from 3 (~4.5s) deliberately: a shorter tolerance reported one
-# continuous hard-to-classify presence as repeated separate visits. Tradeoff,
-# stated plainly: a genuine departure now takes up to ~30s of true absence to
-# register as "leave". YOLOv5s also often drops lying-down subjects.
-# NOTE: this is only effective if track state survives a UiStreamControl refresh
-# (see _stop_motion_detector's preserve_tracks) -- wiping state resets the count.
+# Empty ticks before a track closes (~30s at 1.5s polls); a real departure takes
+# that long to register. Needs track state to survive UiStreamControl refreshes.
 MOTION_MISS_TOLERANCE_TICKS = 20
 # Min IOU (same objectType) to match a detection to an existing track.
 IOU_MATCH_THRESHOLD = 0.3
@@ -171,9 +163,8 @@ def send_msg(ws, functionName, payload, to="ubnt_avclient", in_response_to=None,
         "timeStamp": datetime.now(timezone.utc).isoformat(),
         "payload": payload,
         "responseExpected": response_expected,
-        # ds's serde requires `inResponseTo` on EVERY message, including unsolicited
-        # pushes -- omitting it made ds drop EventSmartDetect with "missing field
-        # `inResponseTo`". 0 = "not a response".
+        # ds requires inResponseTo on every message (it drops EventSmartDetect
+        # without it); 0 = "not a response".
         "inResponseTo": in_response_to if in_response_to is not None else 0,
     }
     # Controller sends/expects plain JSON as BINARY frames (opcode 0x2), not text.
@@ -195,12 +186,8 @@ def _stop_stream(device_id):
         _latest_frame.pop(device_id, None)
 
 
-# Single decode: one ffmpeg pulls RTSP and splits it (post-decode) into a
-# 1/2-fps JPEG snapshot and 2-fps 640x640 raw RGB. Decoding twice was
-# measurably wasteful -- the CPU-side H.264 slice/NAL parsing RKVDEC needs fed
-# dominates cost (a `dec0:N` thread at ~27% of a core per 1080p25 stream), not
-# the hardware macroblock decode. `mjpeg_rkmpp` accepts software frames, unlike
-# the hw-only `scale_rkrga` filter.
+# One ffmpeg pulls RTSP and splits post-decode into a JPEG snapshot and 640x640
+# RGB; decoding twice was wasteful (CPU-side NAL parsing dominates, not the NPU).
 def _start_stream(device_id, ip, port, uri, width=None, height=None):
     _stop_stream(device_id)
     os.makedirs(_STREAM_DIR, exist_ok=True)
@@ -243,17 +230,12 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
         stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
         log.info("merged RTSP pull for deviceID=%s exited rc=%s stderr_tail=%s",
                   device_id, rc, stderr[-500:])
-        # Only auto-restart on an UNEXPECTED death: _stop_stream() pops the device
-        # before killing it, so still finding `proc` here means the pull died on its
-        # own (e.g. Protect's relay "End of file"). No retry cap -- this project
-        # stays up rather than giving up on a device.
+        # Only restart on an unexpected death: _stop_stream() pops the device first,
+        # so finding `proc` here means it died on its own. No retry cap.
         if _active_streams.get(device_id) is proc:
             _active_streams.pop(device_id, None)
-            # Retry fast (0.5s) for the first few attempts: Protect rebuilds its
-            # ingest pipeline for a newly-consumed camera (~2-3s), so a fixed 2s
-            # backoff often lost the race (pairing failed on the first Save). 2s
-            # after that so we don't spawn ffmpeg in a tight loop. The counter
-            # resets on a fresh UiStreamControl start.
+            # 0.5s for the first attempts: Protect rebuilds its ingest in ~2-3s and
+            # a fixed 2s backoff lost the race. Counter resets on UiStreamControl.
             count = _stream_restart_count.get(device_id, 0) + 1
             _stream_restart_count[device_id] = count
             backoff = 0.5 if count <= 6 else 2.0
@@ -605,10 +587,8 @@ def _stop_motion_detector(device_id, preserve_tracks=False):
     ev = _motion_poll_stop.pop(device_id, None)
     if ev:
         ev.set()
-    # Join the loop. Without this the old thread can still be INSIDE
-    # _motion_tick() when a replacement loop starts (stop_event.wait() is only
-    # checked between ticks), so both could mutate the same device's track state.
-    # (Observed live as miss_count resetting: miss 5 -> miss 1 -> miss 1.)
+    # Join the loop: stop_event is checked only between ticks, so an old thread
+    # could still be inside _motion_tick() and mutate the same track state.
     t = _motion_poll_thread.pop(device_id, None)
     if t and t.is_alive():
         t.join(timeout=MOTION_POLL_INTERVAL_S + 5.0)
@@ -697,9 +677,8 @@ def _resolve_snapshot_device(requested_filename, what, requested_device_id=None)
 
 
 def _fallback_record(device_id, what):
-    # Only smart-detect object snapshots are crops; a general "snapshot" (and
-    # FullFoV/motion) is the full frame, even if a stale coord is on file for
-    # this camera.
+    # Only smart-detect object snapshots are crops; a general/FullFoV snapshot is
+    # the full frame even if a stale coord is on file.
     w = str(what or "").lower()
     kind = "object" if ("smartdetect" in w and "fullfov" not in w) else "fullfov"
     coord = _last_object_coord_by_device.get(device_id) if kind == "object" else None
@@ -992,14 +971,8 @@ def _send_line_detect_event(ws, device_id, line, edge_type, event_id, direction,
     send_msg(ws, "EventSmartDetect", payload, response_expected=False)
 
 
-# Per-connection dedupe of the idempotent capability/status events. Protect
-# re-applies smart-detect settings (to the paired camera too) on every
-# EventFeatureFlagsUpdated / EventAIPortStatus it receives; G3-class paired
-# cameras have no onboard detector and answer ChangeSmartDetectSettings with
-# "Service Unavailable", and statusUpdateSmartServices resets its applied-guard
-# on that failure -- so resending these events on every UiStreamControl /
-# reconnect turns one benign rejection into a retry loop. Emit on change only;
-# both are cleared when the controller connection is re-established.
+# Dedupe the idempotent capability/status events: Protect re-applies smart-detect
+# settings on every resend, and a G3 camera's "Service Unavailable" reply loops.
 _last_status_sent = {}
 _feature_flags_sent = set()
 
@@ -1022,36 +995,8 @@ def _send_status_event(ws, device_id, plug, streaming, smart_ready, audio_ready)
 
 
 def _send_feature_flags_event(ws, device_id):
-    # Capability declaration for a paired camera.
-    #
-    # The controller's handleFeaturesFlagUpdate() does a WHOLESALE replace of the
-    # camera's featureFlags with the allowlisted subset taken verbatim from this
-    # map (`.map(key => [key, r[key]])`) -- a key we omit deserialises to
-    # undefined/false/null and WIPES the camera's real value. So this payload
-    # mirrors what a genuine AI Port sends, using the real device's own key names
-    # (see ubnt_avclient's ComposeFeatureFlags) and this hardware's genuine
-    # values (AI Port fw 5.1.12 /etc/features.conf).
-    #
-    # deserializeFromCamera() maps device key -> camera flag:
-    #   motionDetect        -> motionAlgorithms
-    #   privacyMask         -> hasPrivacyMask
-    #   privacyMasks        -> privacyMaskCapability
-    #   squareEventThumbnail-> hasSquareEventThumbnail
-    #   excludeZone         -> excludeZones
-    #   smartDetect         -> smartDetectTypes / hasSmartDetect / hasLineCrossing
-    #                          / hasLineCrossingCounting / hasLiveviewTracking
-    #   (hasMotionZones, hasIcrSensitivity are hardcoded true server-side)
-    #
-    # We previously sent motionDetect:["stable"] (clobbering the camera's real
-    # "enhanced", and rewriting recordingSettings.motionAlgorithm with it) and
-    # omitted privacyMask/privacyMasks/squareEventThumbnail entirely (wiping
-    # them). Verified live: a paired camera had motionAlgorithms ["stable"],
-    # hasPrivacyMask false, privacyMaskCapability.maxMasks null,
-    # hasSquareEventThumbnail false -- none of which match the hardware.
-    #
-    # Only smartDetect is genuinely AI-Port-owned. Constant per pairing -> send
-    # once per controller connection (re-sending only re-triggers Protect's
-    # settings push).
+    # Must mirror the AI Port's real key names/values: the controller WHOLESALE
+    # replaces the paired camera's flags, so an omitted key wipes the real value.
     if device_id in _feature_flags_sent:
         return
     _feature_flags_sent.add(device_id)
@@ -1067,23 +1012,6 @@ def _send_feature_flags_event(ws, device_id):
         "speaker": True,
         "ledStatus": True,
     }, response_expected=False)
-
-
-def _pinned_fw_version():
-    """Version persisted by a simulated UpdateFirmwareRequest, or None."""
-    try:
-        with open(PINNED_FW_FILE) as f:
-            version = json.load(f).get("version")
-        return str(version) if version else None
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-def _pin_fw_version(version):
-    try:
-        config.atomic_write_json(PINNED_FW_FILE, {"version": version})
-    except OSError:
-        log.warning("failed to persist pinned firmware version %s", version, exc_info=True)
 
 
 def _version_from_update_uri(uri):
@@ -1122,10 +1050,8 @@ def handle_function(ws, msg, device_info):
                 _start_stream(device_id, payload["ip"], payload["port"], payload["uri"],
                               payload.get("width", DETECT_IMG_SIZE),
                               payload.get("height", DETECT_IMG_SIZE))
-                # Preserve tracks: the controller re-issues UiStreamControl freely
-                # (viewing sessions, config pushes), and wiping state here would
-                # silently abandon an open event and reset prev_center, so a
-                # crossing could never accumulate a movement segment.
+                # Preserve tracks across UiStreamControl re-issues, else an open
+                # event is abandoned and prev_center resets (line crossing breaks).
                 _start_motion_detector(ws, device_id, payload["ip"], payload["port"],
                                        payload["uri"], preserve_tracks=True)
                 reply_status = "started"
@@ -1226,14 +1152,8 @@ def handle_function(ws, msg, device_info):
         return
 
     if fn == "UpdateFirmwareRequest":
-        # The controller (service.js updateFirmware, AIPORT branch) sends this over
-        # the classic avclient as {uri, timeoutMs, md5?, fwPath?} with
-        # responseExpected=false. A real device downloads+flashes then reboots; we
-        # never fetch or flash -- we pin the target version (which is a path segment
-        # of uri), report progress, and reconnect as if rebooted so the controller
-        # picks the new fwVersion up from ubnt_avclient_hello/camera-firmware.
-        # Vendor firmware has the same no-op path: custom.skipFirmwareUpdate +
-        # /etc/fakeFwVersion ("SkipFirmwareUpdate with fwVersion = %s").
+        # Pin the version from uri and fake a reboot; never fetch/flash (the vendor
+        # does the same via custom.skipFirmwareUpdate). Applied on the reconnect.
         uri = str(payload.get("uri") or "")
         target = _version_from_update_uri(uri)
         log.info("UpdateFirmwareRequest uri=%s timeoutMs=%s -> pinning version %s "
@@ -1248,7 +1168,7 @@ def handle_function(ws, msg, device_info):
         if msg.get("responseExpected"):
             send_msg(ws, fn, {}, in_response_to=msg_id)
         if target:
-            _pin_fw_version(target)
+            config.pin_fw_version(STATE_DIR, target)
         else:
             log.warning("could not parse a version from update uri %r -- acking "
                           "without pinning", uri)
@@ -1293,12 +1213,8 @@ def _adopt_token():
 
 
 def run(host, port, device_info, token=None):
-    # `connectionHost` is the controller this device is connected to (NOT the
-    # device's own IP): Protect builds camera-upload URLs from it
-    # (`api.getCameraUploadPathAndToken`: `https://${camera.connectionHost ||
-    # nvr.host}:<cameraHttps>/internal/camera-upload/<token>`). Reporting our own
-    # IP made Protect tell us to upload snapshots to ourselves on :7444, which
-    # nothing listens on, so paired cameras had no live/overview thumbnail.
+    # connectionHost must be the controller's (Protect builds camera-upload URLs
+    # from it), not ours -- self-IP left paired cameras without thumbnails.
     device_info = {**device_info, "console_host": host}
     # New controller connection = fresh state: forget what this session already
     # reported so the controller gets one full status/capability snapshot.
@@ -1412,14 +1328,14 @@ def main():
     args.iface = config.resolve_iface(args.iface, cfg)
 
     if args.state_dir:
-        global ADOPT_STATE_FILE, CERT_PATH, KEY_PATH, _STREAM_DIR, PINNED_FW_FILE
+        global ADOPT_STATE_FILE, CERT_PATH, KEY_PATH, _STREAM_DIR, STATE_DIR
         os.makedirs(args.state_dir, exist_ok=True)
         ADOPT_STATE_FILE = os.path.join(args.state_dir, "adopt_state.json")
         CERT_PATH = os.path.join(args.state_dir, "server.crt")
         KEY_PATH = os.path.join(args.state_dir, "server.key")
         # RAM-only handoff; http_api.py derives the same dir from --state-dir.
         _STREAM_DIR = config.stream_dir(args.state_dir)
-        PINNED_FW_FILE = os.path.join(args.state_dir, "fw_version.json")
+        STATE_DIR = args.state_dir
 
     mac_nosep = config.resolve_mac(args.iface, args.mac, cfg).lower()
     ip = config.resolve_ip(args.iface, cfg, args.bind_ip)
@@ -1438,15 +1354,15 @@ def main():
     # Single-use token: present on first connect after adopt, omitted on later reconnects.
     used_tokens = set()
 
-    pinned = _pinned_fw_version()
+    pinned = config.pinned_fw_version(STATE_DIR)
     if pinned:
-        log.info("using pinned firmware version %s (from %s); delete that file to unpin",
-                  pinned, PINNED_FW_FILE)
+        log.info("using pinned firmware version %s; delete the state fw_version.json to unpin",
+                  pinned)
 
     while True:
         # A simulated update pins a version for the next (fake-reboot) reconnect;
         # otherwise report the configured --version.
-        device_info["version"] = _pinned_fw_version() or args.version
+        device_info["version"] = config.effective_fw_version(args.version, STATE_DIR)
         # Read adopt state if present but don't block; dial args.host pre-adopt.
         try:
             with open(ADOPT_STATE_FILE) as f:

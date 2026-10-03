@@ -19,6 +19,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import avclient as av  # noqa: E402
+import config  # noqa: E402
 
 _FFMPEG = shutil.which(av.FFMPEG_BIN) or (av.FFMPEG_BIN if os.path.exists(av.FFMPEG_BIN) else None)
 
@@ -118,8 +119,8 @@ class TestZoneFiltering(Base):
         self.assertFalse(av._is_excluded("OTHER", [4, 4, 2, 2]))  # no zones -> not excluded
 
         av._detect_zones["M2"] = [SQUARE]
-        self.assertFalse(av._is_outside_detect_zones("M2", [4, 4, 2, 2]))  # inside
-        self.assertTrue(av._is_outside_detect_zones("M2", [40, 40, 2, 2]))  # outside
+        self.assertFalse(av._is_outside_detect_zones("M2", [4, 4, 2, 2]))
+        self.assertTrue(av._is_outside_detect_zones("M2", [40, 40, 2, 2]))
         self.assertFalse(av._is_outside_detect_zones("M3", [40, 40, 2, 2]))  # unset -> no restriction
 
 
@@ -219,7 +220,7 @@ class TestSnapshotResolution(Base):
         av._active_streams["AA:BB:CC"] = object()
         rec, how = av._resolve_snapshot_device(None, "snapshot", "aa:bb:cc")
         self.assertEqual((rec["device_id"], how), ("AA:BB:CC", "request deviceID"))
-        self.assertEqual(rec["kind"], "fullfov")  # general snapshot = full frame
+        self.assertEqual(rec["kind"], "fullfov")
 
     def test_general_snapshot_not_cropped_by_stale_coord(self):
         # A general "snapshot" must not reuse a stale per-object coord as a crop.
@@ -462,10 +463,10 @@ class TestFirmwareUpdate(unittest.TestCase):
     """UpdateFirmwareRequest is acked and its target version pinned, never flashed."""
 
     def setUp(self):
-        self._orig_pin = av.PINNED_FW_FILE
+        self._orig_state = av.STATE_DIR
         self._tmp = tempfile.mkdtemp()
-        av.PINNED_FW_FILE = os.path.join(self._tmp, "fw_version.json")
-        self.addCleanup(lambda: setattr(av, "PINNED_FW_FILE", self._orig_pin))
+        av.STATE_DIR = self._tmp
+        self.addCleanup(lambda: setattr(av, "STATE_DIR", self._orig_state))
         self.addCleanup(shutil.rmtree, self._tmp, True)
         self._orig_sleep = av.time.sleep
         av.time.sleep = lambda *_: None
@@ -489,9 +490,9 @@ class TestFirmwareUpdate(unittest.TestCase):
         self.assertIsNone(av._version_from_update_uri(""))
 
     def test_pin_round_trip(self):
-        self.assertIsNone(av._pinned_fw_version())
-        av._pin_fw_version("9.9.9")
-        self.assertEqual(av._pinned_fw_version(), "9.9.9")
+        self.assertIsNone(config.pinned_fw_version(av.STATE_DIR))
+        config.pin_fw_version(av.STATE_DIR, "9.9.9")
+        self.assertEqual(config.pinned_fw_version(av.STATE_DIR), "9.9.9")
 
     def test_handler_pins_and_reboots(self):
         ws = _FakeWS()
@@ -501,7 +502,7 @@ class TestFirmwareUpdate(unittest.TestCase):
             "payload": {"uri": "https://c:7444/internal/update/aiport/uvc/firmware/6.0.0/AA",
                         "timeoutMs": 30000},
         }, {})
-        self.assertEqual(av._pinned_fw_version(), "6.0.0")
+        self.assertEqual(config.pinned_fw_version(av.STATE_DIR), "6.0.0")
         names = [json.loads(m)["functionName"] for m in ws.sent]
         self.assertEqual(names, ["EventUpdateFirmwareStatus", "EventUpdateFirmwareStatus"])
         statuses = [json.loads(m)["payload"]["status"] for m in ws.sent]
@@ -516,7 +517,7 @@ class TestFirmwareUpdate(unittest.TestCase):
             "responseExpected": True,
             "payload": {"uri": "https://example.com/fw.bin"},
         }, {})
-        self.assertIsNone(av._pinned_fw_version())
+        self.assertIsNone(config.pinned_fw_version(av.STATE_DIR))
         self.assertTrue(ws.closed)
         acks = [json.loads(m) for m in ws.sent
                 if json.loads(m)["functionName"] == "UpdateFirmwareRequest"]

@@ -71,7 +71,7 @@ def main():
     if args.debug:
         common += ["--debug"]
 
-    beacon_args = [sys.executable, os.path.join(HERE, "discovery.py"),
+    discovery_args = [sys.executable, os.path.join(HERE, "discovery.py"),
                    "--iface", args.iface, "--bind-ip", args.bind_ip, "--hostname", args.hostname,
                    *common]
     http_args = [sys.executable, os.path.join(HERE, "http_api.py"),
@@ -87,21 +87,21 @@ def main():
                     *common]
 
     if args.mac:
-        for a in (beacon_args, http_args, wss_args, classic_args):
+        for a in (discovery_args, http_args, wss_args, classic_args):
             a += ["--mac", args.mac]
 
     if args.state_dir:
-        for a in (beacon_args, http_args, wss_args, classic_args):
+        for a in (discovery_args, http_args, wss_args, classic_args):
             a += ["--state-dir", args.state_dir]
     if args.device_id:
         # All stages must share one device-id, else multi-instance discover/info breaks.
         http_args += ["--device-id", args.device_id]
         wss_args += ["--device-id", args.device_id]
         classic_args += ["--device-id", args.device_id]
-        beacon_args += ["--device-id", args.device_id]
+        discovery_args += ["--device-id", args.device_id]
 
     procs = [
-        subprocess.Popen(beacon_args),
+        subprocess.Popen(discovery_args),
         subprocess.Popen(http_args),
         subprocess.Popen(wss_args),
         subprocess.Popen(classic_args),

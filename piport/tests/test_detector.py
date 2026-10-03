@@ -74,10 +74,8 @@ class TestPostProcess(unittest.TestCase):
         self.assertGreaterEqual(len(scores), 1)
         self.assertIn(0, list(classes))
         self.assertGreater(float(max(scores)), 0.9)
-        # the mapped label for class 0 is "person"
         self.assertEqual(self.labels[0], "person")
         self.assertEqual(detector._map_object_type(self.labels[0]), "person")
-        # box is (x1, y1, x2, y2) with x1 <= x2, y1 <= y2
         x1, y1, x2, y2 = boxes[0]
         self.assertLessEqual(x1, x2)
         self.assertLessEqual(y1, y2)

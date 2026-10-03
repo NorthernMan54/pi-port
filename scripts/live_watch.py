@@ -11,14 +11,12 @@ if not UNVR_HOST:
 # Protect/UOS web login (NOT SSH). This lab's local admin is "opencode"; the
 # historical "Token" hardcode 403s. Override with UNVR_USER.
 UNVR_USER = os.environ.get("UNVR_USER", "opencode")
-# AI Port lives in the `aiports` collection (NOT `aiprocessors`, which is AI-Key
-# specific). Optional AIPORT_ID narrows to one row; otherwise the whole
-# collection is watched.
+# AI Port lives in `aiports` (not `aiprocessors`, which is AI-Key); AIPORT_ID
+# narrows to one row, otherwise the whole collection is watched.
 AIPORTS_API = os.environ.get("AIPORTS_API", "/proxy/protect/api/aiports")
 AIPORT_ID = os.environ.get("AIPORT_ID")
-# Pi-side log to tail. systemd captures the stack's stdout to journald (there is
-# no run_all.log on the Pi); override with ORANGEPI_LOG (a path or a full
-# command), and/or AIPORT_INSTANCE for a non-default instance name.
+# Pi-side log to tail (journald; there is no run_all.log); override with
+# ORANGEPI_LOG, and/or AIPORT_INSTANCE for a non-default instance name.
 AIPORT_INSTANCE = os.environ.get("AIPORT_INSTANCE", "main")
 PI_LOG = os.environ.get("ORANGEPI_LOG",
                         f"journalctl -u aiport-instance-{AIPORT_INSTANCE} -n 200 --no-pager")

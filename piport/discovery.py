@@ -25,7 +25,7 @@ ADOPT_STATE_FILE = os.path.join(HERE, "adopt_state.json")
 # --state-dir (or None for the shared piport/ path); the firmware pin lives here.
 STATE_DIR = None
 
-log = logging.getLogger("aiport-discovery-beacon")
+log = logging.getLogger("aiport-discovery")
 
 DISCOVERY_PORT = 10001
 # The controller's adopt-candidate scan destination (not broadcast).

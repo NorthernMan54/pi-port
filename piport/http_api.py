@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 
-log = logging.getLogger("aiport-adopt-http")
+log = logging.getLogger("aiport-http-api")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CERT_PATH = os.path.join(HERE, "server.crt")
@@ -199,10 +199,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(200, {"statusCode": 200})
 
     def _serve_snapshot(self):
-        # The controller requests a paired camera's snapshot from the AI Port
-        # (no camera id in the request), so the freshest complete frame is the
-        # best available match. A torn/mid-write JPEG would be rejected by the
-        # controller and leave the event without a thumbnail.
+        # The request carries no camera id, so serve the freshest complete frame;
+        # a torn JPEG would be rejected and leave the event without a thumbnail.
         name, data = _freshest_jpeg(STREAM_DIR)
         if not name:
             log.warning("snapshot requested but no complete captured frame available in %s",

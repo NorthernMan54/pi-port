@@ -1,4 +1,4 @@
-# Pi Port — a DIY UniFi Protect "AI Port" on an Orange Pi (RK3588)
+# pi-port — a DIY UniFi Protect "AI Port" on an Orange Pi (RK3588)
 
 <div align="center">
 
@@ -7,12 +7,11 @@
 
 **A reverse-engineering / interoperability proof of concept that makes a stock
 Orange Pi 5 Plus (RK3588) present itself to a real UniFi Protect console as
-genuine AI Port hardware (catalog model `UVC AI Port`, sysid `0xa5f1`) —
-discovery, adoption, camera pairing, video relay, NPU object detection, and
-detection events with thumbnails.**
-
-It talks the vendor wire protocol only: no firmware modification, no controller
-database writes, no Ubiquiti code or binaries.
+genuine AI Port hardware (catalog model `UVC AI Port`, sysid `0xa5f1`).**
+**It speaks the vendor wire protocol only — discovery, adoption, camera pairing,
+video relay, NPU object detection and detection events with thumbnails — with no
+firmware modification, no controller database writes and no Ubiquiti code or
+binaries.**
 
 </div>
 
@@ -309,13 +308,24 @@ Device identity, network mode and the console address live in
   branch and is not verified on real hardware.
 - **Planned:** stress-testing multiple cameras beyond the four-camera live setup.
 
+## Changelog
+
+- **Unreleased** — the console's firmware-update push (`UpdateFirmwareRequest`)
+  is answered by pinning the target version and faking the reboot instead of
+  flashing; every interface reports the pinned version.
+- **2026-09** — Line Crossing; paired-camera snapshot retrieval over UCP4; the
+  `connectionHost` upload fix; event/feature-flag dedupe; multi-instance systemd
+  units and the web UI; one-shot `install.sh`.
+- **2026-08** — initial protocol stack: discovery, adoption, both WebSocket
+  connections, NPU detection and `EventSmartDetect` with thumbnails.
+
 ## Troubleshooting
 
 <details>
 <summary><b>Troubleshooting / operational notes</b></summary>
 
 **A partial restart leaves stale connections.** Restart the full four-process
-stack (beacon/discovery, adopt HTTP, ucp4, avclient) — a partial restart leaves
+stack (discovery, adopt HTTP, ucp4, avclient) — a partial restart leaves
 untouched connections in stale state. `run_all.py` starts all four together.
 
 **`pkill -f 'run_all.py'` kills itself.** The pattern matches the killing command
@@ -363,7 +373,7 @@ components and their licenses are listed in [CREDITS.md](CREDITS.md).
 <summary><b>Disclaimer</b></summary>
 
 **This is a proof-of-concept project, not a production-ready system.** Large
-parts were produced with LLMs (Claude Code and DeepSeek) under human supervision,
+parts were produced with LLMs under human supervision,
 review, and real-hardware testing — review and verify everything yourself.
 **This software is provided "as is", without warranty of any kind.** It binds
 privileged ports, manipulates network interfaces (macvlan/DHCP), and runs

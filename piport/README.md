@@ -26,7 +26,7 @@ additions. All of the following was confirmed live against a real console.
 
 3. **Outbound mTLS WebSocket -- `ucp4` binary envelope**, to `<console-ip>:7442` (8-byte
    header + JSON envelope, as chime/AI Key). Handles adoption bookkeeping and generic RPCs
-   (`getInfo`, `networkStatus`, `sshService`). It does **not** carry camera commands:
+   (`getInfo`, `networkStatus`, `changeUserPassword`, …). It does **not** carry camera commands:
    `registerDeviceWebSocket` only adds a connection to the camera-command routing pool for
    connections that do **not** negotiate `ucp4`, which is why pairing needs a second
    connection.

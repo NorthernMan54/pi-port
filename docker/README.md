@@ -27,10 +27,10 @@ docker run --rm --network host --cap-add NET_ADMIN \
     -e AIPORT_CONSOLE_HOST=<console-ip> piport-cpu
 ```
 
-Or with Compose (`docker/compose.yaml`, single instance, host networking):
+Or with the Compose stack at the **repo root** (`compose.yaml`, host networking):
 
 ```bash
-AIPORT_CONSOLE_HOST=<console-ip> docker compose -f docker/compose.yaml up -d --build
+AIPORT_CONSOLE_HOST=<console-ip> docker compose up -d --build
 ```
 
 Then adopt "AI Port" in Protect and pair a camera to it, exactly as on the Pi.
@@ -47,18 +47,22 @@ box and network you control.
 
 ## Importing into Komodo
 
-`docker/compose.yaml` is the Komodo Stack file. Create a **Stack** in Komodo whose
-source is this repo (Resource Sync, or a Git-based stack pointing at
-`docker/compose.yaml`), set the stack environment, and deploy:
+The repo-root `compose.yaml` is the Komodo Stack file (Komodo clones the repo and runs
+compose from the clone root, which is exactly the build context). Create a **Stack**
+with source **Git Repo** = `hutchx86/pi-port`, branch `main`, file `compose.yaml`, then
+set the stack environment and deploy:
 
 | Variable | Meaning |
 | --- | --- |
 | `AIPORT_CONSOLE_HOST` | The Protect console IP to dial before adoption |
 | `AIPORT_CONSOLE_PORT` | Console port (default `7442`) |
 | `AIPORT_MAC` | Optional fixed MAC; blank derives a Ubiquiti-OUI MAC |
-| `AIPORT_DEVICE_ID` | Per-instance identity -- unique when running several |
+| `AIPORT_DEVICE_ID` | Device identity (one instance per host; see Networking) |
 | `AIPORT_HOSTNAME` / `AIPORT_NAME` | DHCP hostname / Protect device name |
 | `AIPORT_IFACE` | Pin an interface; blank auto-detects the default-route NIC |
+
+Set `extra_args = "--build"` (Komodo stack config) so each deploy rebuilds the image
+after a code change -- otherwise compose reuses the existing `piport-cpu` image.
 
 Komodo builds the image from the repo (context = repo root), so the stack needs no
 pre-built image and no manual model fetch -- the CPU model is downloaded during build
@@ -78,18 +82,20 @@ the mounted file.
 The L2 discovery beacon (`UDP/10001`) must be broadcast-visible on the console's LAN,
 and the console must reach the container's `:443` at a real, stable LAN IP. Docker's
 default bridge breaks both (it source-NATs traffic and serves DNS through a stub at
-`127.0.0.11`), so use:
+`127.0.0.11`), so the stack uses `network_mode: host`: the container shares the host's
+IP, DNS and interfaces and is **not** a distinct LAN device.
 
-- `compose.yaml` -- `network_mode: host`, simplest, single instance. The container
-  shares the host's IP and DNS and is **not** a distinct LAN device.
-- `compose.macvlan.yaml` -- one container per instance, each with its own MAC and LAN
-  IP, matching `instance_manager.py` on the Pi. Illustrative; replace the placeholder
-  NIC/IP/MAC/device-id. The host cannot reach macvlan container IPs without an extra
-  macvlan shim interface (the console on the LAN can).
+Consequences to plan for:
 
-For several concurrent instances on one host, one container per instance (each with
-its own macvlan attachment, `AIPORT_MAC`, and `AIPORT_DEVICE_ID`) is preferred over
-running `instance_manager.py` inside a container.
+- The host must be on the **same L2 LAN as the Protect console**.
+- The emulator binds the host's `:443` and `UDP/10001`; both must be free (a
+  Traefik/Caddy/nginx on `:443` will clash).
+- **One instance per host.** A second container would collide on `:443`/`UDP/10001`
+  (host networking shares one network namespace). Run additional instances on another
+  host -- not via macvlan or `instance_manager.py` inside a container.
+
+The multi-instance macvlan machinery (`instance_manager.py`) is an RK3588-board feature,
+not part of this Docker image.
 
 ## Model
 
@@ -126,7 +132,6 @@ Untested:
   emulation, so the emulated build's `RUN` steps cannot execute -- the base image and
   wheels resolve, but the actual Pi run is unverified).
 - Real cameras / real RTSP frames through the live capture pipeline.
-- macvlan networking end to end.
 - CPU contention between `onnxruntime` and software `ffmpeg` decode under a 4-camera
   load. The RK3588 variant does not have this: decode and inference run on separate
   hardware blocks (RKVDEC + NPU).

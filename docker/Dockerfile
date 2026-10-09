@@ -12,7 +12,7 @@
 #   docker build -f docker/Dockerfile -t piport-cpu .
 #   docker buildx build --platform linux/amd64,linux/arm64 -f docker/Dockerfile -t piport-cpu .
 #
-# Run needs host (or macvlan) networking and root: see docker/README.md.
+# Run needs host networking and root (it binds :443/:10001): see docker/README.md.
 
 FROM python:3.11-slim
 

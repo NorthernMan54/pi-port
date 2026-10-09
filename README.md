@@ -125,7 +125,8 @@ piport/            the emulator (RK3588 / Orange Pi)
   sysinfo_server.py  dev-box CPU/mem/GPU/NPU status page (+ webui.html)
   models/            anchors + COCO labels (model binaries fetched, not stored)
   instance_manager.py / run_all.py  multi-instance orchestration
-docker/            CPU Docker image + Compose/Komodo stack (x86_64 + arm64)
+compose.yaml       CPU stack / Komodo Stack (host net; x86_64 + arm64)
+docker/            CPU Dockerfile + smoke test + notes (x86_64 + arm64)
 scripts/           install.sh (one-shot installer), fetch_models.py, helpers
 rknn_convert/      YOLOv5s -> RKNN conversion recipe (x86 build host)
 docs/images/       README diagram
@@ -233,16 +234,17 @@ instances.
 `docker/` builds one CPU image (onnxruntime, no NPU) for `linux/amd64` (x86_64
 servers) and `linux/arm64` (Raspberry Pi 4/5, any arm64 box). Only the detector
 backend differs from the RK3588 build: `detector.py` selects `onnxruntime` at
-runtime. It ships a Compose stack for a **Komodo** instance plus a host-network
-smoke test:
+runtime. The repo-root `compose.yaml` is the single-instance stack (host
+networking) and the **Komodo** Stack file:
 
 ```bash
 docker build -f docker/Dockerfile -t piport-cpu .
-AIPORT_CONSOLE_HOST=<console-ip> docker compose -f docker/compose.yaml up -d --build
+AIPORT_CONSOLE_HOST=<console-ip> docker compose up -d --build
 ./docker/run-smoke-test.sh   # no console/camera needed
 ```
 
-See [`docker/README.md`](docker/README.md) for Komodo import, macvlan, and the
+One instance per host (`network_mode: host` shares the host's `:443`/`UDP-10001`).
+See [`docker/README.md`](docker/README.md) for Komodo import and the
 confirmed/untested matrix.
 
 ### Model assets (not tracked)

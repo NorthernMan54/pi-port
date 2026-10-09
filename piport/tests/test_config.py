@@ -109,6 +109,25 @@ class TestLoadConfig(unittest.TestCase):
         self.assertEqual(config.DEFAULTS["discovery_platform"], "UP-AI-Port")
         self.assertEqual(config.DEFAULTS["platform"], "UVC AI Port")
 
+    def test_env_overrides_win_over_file(self):
+        # Container-friendly override: env must beat a mounted cfg value, and a
+        # blank env var must not clobber it.
+        with tempfile.NamedTemporaryFile("w", suffix=".cfg", delete=False) as f:
+            f.write("[console]\nhost = 10.0.0.1\n[identity]\nhostname = fromfile\n")
+            path = f.name
+        saved = os.environ.get("AIPORT_CONSOLE_HOST")
+        self.addCleanup(lambda: os.environ.__setitem__("AIPORT_CONSOLE_HOST", saved)
+                        if saved is not None else os.environ.pop("AIPORT_CONSOLE_HOST", None))
+        try:
+            os.environ["AIPORT_CONSOLE_HOST"] = "10.9.9.9"
+            os.environ["AIPORT_HOSTNAME"] = ""  # blank -> file wins
+            cfg = config.load_config(path)
+            self.assertEqual(cfg["host"], "10.9.9.9")
+            self.assertEqual(cfg["hostname"], "fromfile")
+        finally:
+            os.environ.pop("AIPORT_HOSTNAME", None)
+            os.unlink(path)
+
 
 class TestFirmwarePin(unittest.TestCase):
     """A simulated update pins a version; every stage reports it over the configured one."""

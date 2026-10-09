@@ -1,12 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 hutchx86
-"""Real object detection on the RK3588 NPU.
+"""YOLOv5 object detection with a runtime-selected backend.
 
-Model: YOLOv5s (ReLU) INT8, converted from Rockchip's rknn_model_zoo v2.3.2
-with rknn-toolkit2 on an x86_64 host. Post-processing (box decode, filtering,
-NMS) is adapted from that repo's yolov5 reference script. Runs via
-rknn-toolkit-lite2 against the board's librknnrt.so.
+Two backends, same ``Detector`` interface and identical output, so callers
+(``avclient.py``) need no changes:
+
+  * ``rknn`` -- RK3588 NPU via ``rknn-toolkit-lite2``, the INT8
+    ``yolov5s_relu.rknn`` built from Rockchip's rknn_model_zoo v2.3.2
+    (box decode, filtering and NMS adapted from that repo's yolov5 script).
+  * ``onnx`` -- generic CPU via ``onnxruntime`` (x86_64 and arm64: Pi 4/5 and
+    any CPU-only server), no NPU. Two ONNX layouts are auto-detected:
+    Ultralytics YOLOv5 (default ``models/yolov5n.onnx``, decode/sigmoid baked
+    into the graph) and Rockchip ``yolov5s_relu.onnx`` (three raw heads).
+
+Backend choice (``AIPORT_BACKEND`` = ``auto``/``rknn``/``onnx``): in ``auto``
+the NPU is used when rknnlite and its model are present, otherwise the CPU
+ONNX backend. ``AIPORT_MODEL_PATH`` overrides the model file (``.rknn`` selects
+the NPU, ``.onnx`` the CPU).
 """
+import importlib.util
 import logging
 import os
 import threading
@@ -21,7 +33,8 @@ log = logging.getLogger("aiport-detector")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.path.join(HERE, "models")
-MODEL_PATH = os.path.join(MODELS_DIR, "yolov5s_relu.rknn")
+RKNN_MODEL_PATH = os.path.join(MODELS_DIR, "yolov5s_relu.rknn")
+ONNX_MODEL_PATH = os.path.join(MODELS_DIR, "yolov5n.onnx")
 LABELS_PATH = os.path.join(MODELS_DIR, "coco_80_labels_list.txt")
 ANCHORS_PATH = os.path.join(MODELS_DIR, "anchors_yolov5.txt")
 
@@ -61,6 +74,9 @@ def _load_labels():
     with open(LABELS_PATH) as f:
         return [line.strip() for line in f if line.strip()]
 
+
+# --- Rockchip raw-head layout ([1,255,H,W] x3) -----------------------------
+# Used by the rknn backend and by the onnx backend on the Rockchip ONNX.
 
 def _box_process(position, anchors):
     grid_h, grid_w = position.shape[2:4]
@@ -122,6 +138,21 @@ def _nms_boxes(boxes, scores):
     return np.array(keep)
 
 
+def _nms_per_class(boxes, classes, scores):
+    nboxes, nclasses, nscores = [], [], []
+    for c in set(classes.tolist()):
+        idx = np.where(classes == c)
+        b, s = boxes[idx], scores[idx]
+        keep = _nms_boxes(b, s)
+        if len(keep):
+            nboxes.append(b[keep])
+            nclasses.append(np.full(len(keep), c))
+            nscores.append(s[keep])
+    if not nboxes:
+        return None, None, None
+    return np.concatenate(nboxes), np.concatenate(nclasses), np.concatenate(nscores)
+
+
 def _post_process(outputs, anchors):
     boxes, scores, classes_conf = [], [], []
     reshaped = [o.reshape([len(anchors[0]), -1] + list(o.shape[-2:])) for o in outputs]
@@ -141,24 +172,73 @@ def _post_process(outputs, anchors):
     boxes, classes, scores = _filter_boxes(boxes, scores, classes_conf)
     if boxes.shape[0] == 0:
         return None, None, None
+    return _nms_per_class(boxes, classes, scores)
 
-    nboxes, nclasses, nscores = [], [], []
-    for c in set(classes):
-        idx = np.where(classes == c)
-        b, s = boxes[idx], scores[idx]
-        keep = _nms_boxes(b, s)
-        if len(keep):
-            nboxes.append(b[keep])
-            nclasses.append(np.full(len(keep), c))
-            nscores.append(s[keep])
-    if not nboxes:
+
+# --- Ultralytics layout ([1,N,5+num_classes], decode baked in) -------------
+
+def _xywh2xyxy(xywh):
+    xyxy = np.copy(xywh)
+    xyxy[:, 0] = xywh[:, 0] - xywh[:, 2] / 2
+    xyxy[:, 1] = xywh[:, 1] - xywh[:, 3] / 2
+    xyxy[:, 2] = xywh[:, 0] + xywh[:, 2] / 2
+    xyxy[:, 3] = xywh[:, 1] + xywh[:, 3] / 2
+    return xyxy
+
+
+def _post_process_ultralytics(output):
+    pred = output[0]  # (N, 5+num_classes): xywh(px), obj, class scores
+    obj = pred[:, 4]
+    class_conf = pred[:, 5:]
+    classes = np.argmax(class_conf, axis=1)
+    scores = obj * class_conf[np.arange(class_conf.shape[0]), classes]
+    keep = scores >= OBJ_THRESH
+    if not np.any(keep):
         return None, None, None
-    return np.concatenate(nboxes), np.concatenate(nclasses), np.concatenate(nscores)
+    boxes = _xywh2xyxy(pred[keep, :4])
+    return _nms_per_class(boxes, classes[keep], scores[keep])
 
 
-class Detector:
+def _has_onnxruntime():
+    return importlib.util.find_spec("onnxruntime") is not None
+
+
+def _resolve_backend():
+    """Pick 'rknn' (NPU) or 'onnx' (CPU). AIPORT_BACKEND forces one; otherwise
+    an explicit AIPORT_MODEL_PATH extension decides, else prefer the NPU when
+    rknnlite and its model are present, else CPU onnxruntime."""
+    forced = os.environ.get("AIPORT_BACKEND", "auto").strip().lower()
+    if forced in ("rknn", "onnx"):
+        return forced
+    model = os.environ.get("AIPORT_MODEL_PATH")
+    if model:
+        if model.endswith(".rknn"):
+            return "rknn"
+        if model.endswith(".onnx"):
+            return "onnx"
+    if RKNNLite is not None and os.path.exists(RKNN_MODEL_PATH):
+        return "rknn"
+    if _has_onnxruntime() and os.path.exists(ONNX_MODEL_PATH):
+        return "onnx"
+    # Nothing usable; report the most actionable reason.
+    if RKNNLite is not None and not os.path.exists(RKNN_MODEL_PATH):
+        raise RuntimeError(
+            f"no detector model found: {RKNN_MODEL_PATH} is missing (run "
+            f"scripts/fetch_models.py --convert, or set AIPORT_MODEL_PATH)")
+    if _has_onnxruntime() and not os.path.exists(ONNX_MODEL_PATH):
+        raise RuntimeError(
+            f"no detector model found: {ONNX_MODEL_PATH} is missing (run "
+            f"scripts/fetch_models.py, or set AIPORT_MODEL_PATH)")
+    raise RuntimeError(
+        "no detector backend available: install rknn-toolkit-lite2 (RK3588 NPU) "
+        "or onnxruntime (CPU) -- see requirements.txt / docker/README.md")
+
+
+class _RknnBackend:
     """One shared RKNNLite behind a lock -- the NPU serializes inference
     anyway, so it's as fast as one instance per camera."""
+
+    name = "rknn"
 
     def __init__(self):
         if RKNNLite is None:
@@ -166,27 +246,86 @@ class Detector:
                 "rknnlite is not installed -- install rknn-toolkit-lite2 on the device "
                 "(see requirements.txt); detector.py imports without it only for unit tests")
         self._lock = threading.Lock()
-        self._labels = _load_labels()
         self._anchors = _load_anchors()
+        self.model_path = os.environ.get("AIPORT_MODEL_PATH") or RKNN_MODEL_PATH
         self._rknn = RKNNLite()
-        ret = self._rknn.load_rknn(MODEL_PATH)
+        ret = self._rknn.load_rknn(self.model_path)
         if ret != 0:
             raise RuntimeError(f"load_rknn failed: {ret}")
         ret = self._rknn.init_runtime()
         if ret != 0:
             raise RuntimeError(f"init_runtime failed: {ret}")
-        log.info("Detector initialized (%s)", MODEL_PATH)
+
+    def raw(self, frame_rgb):
+        # RKNNLite needs an explicit batch dim: (1,H,W,3), not (H,W,3).
+        batched = frame_rgb[np.newaxis, ...]
+        with self._lock:
+            return self._rknn.inference(inputs=[batched])
+
+    def boxes(self, raw_outputs):
+        return _post_process(raw_outputs, self._anchors)
+
+
+class _OnnxBackend:
+    """One shared onnxruntime InferenceSession behind a lock (CPU)."""
+
+    name = "onnx"
+
+    def __init__(self):
+        try:
+            import onnxruntime as ort  # imported here so the NPU path doesn't need it
+        except ImportError as exc:
+            raise RuntimeError(
+                "onnxruntime is not installed -- pip install onnxruntime, or run the "
+                "CPU Docker image (see docker/README.md)") from exc
+        self._lock = threading.Lock()
+        self._labels = _load_labels()
+        self._anchors = _load_anchors()
+        self.model_path = os.environ.get("AIPORT_MODEL_PATH") or ONNX_MODEL_PATH
+        self._session = ort.InferenceSession(self.model_path, providers=["CPUExecutionProvider"])
+        inp = self._session.get_inputs()[0]
+        self._input_name = inp.name
+        # Ultralytics release ONNX is fp16; honour the graph's input dtype.
+        self._in_dtype = np.float16 if "float16" in inp.type else np.float32
+        shapes = [o.shape for o in self._session.get_outputs()]
+        # Single [1,N,5+classes] output => Ultralytics; else raw heads.
+        if len(shapes) == 1 and len(shapes[0]) == 3 and shapes[0][-1] == 5 + len(self._labels):
+            self._mode = "ultralytics"
+        else:
+            self._mode = "raw_heads"
+
+    def raw(self, frame_rgb):
+        # NHWC uint8 -> NCHW float [1,3,H,W], scaled to [0,1].
+        chw = frame_rgb.transpose(2, 0, 1).astype(np.float32) / 255.0
+        batched = chw[np.newaxis, ...].astype(self._in_dtype)
+        with self._lock:
+            outputs = self._session.run(None, {self._input_name: batched})
+        return [np.asarray(o, dtype=np.float32) for o in outputs]
+
+    def boxes(self, raw_outputs):
+        if self._mode == "ultralytics":
+            return _post_process_ultralytics(raw_outputs[0])
+        return _post_process(raw_outputs, self._anchors)
+
+
+class Detector:
+    """YOLOv5 detection with the rknn (NPU) or onnx (CPU) backend selected at
+    construction. ``detect()`` output is identical for both."""
+
+    def __init__(self):
+        backend = _resolve_backend()
+        self._labels = _load_labels()
+        self._backend = _RknnBackend() if backend == "rknn" else _OnnxBackend()
+        log.info("Detector initialized (backend=%s, model=%s)",
+                 self._backend.name, self._backend.model_path)
 
     def detect(self, frame_rgb):
         """frame_rgb: HxWx3 uint8 RGB, already resized to IMG_SIZE (plain
         stretch, no letterboxing). Returns {"objectType", "score", "box":
         (x1,y1,x2,y2)} in IMG_SIZE pixel space, score-descending, mapped to
         AI Port's person/vehicle/animal vocabulary."""
-        # RKNNLite needs an explicit batch dim: (1,H,W,3), not (H,W,3).
-        batched = frame_rgb[np.newaxis, ...]
-        with self._lock:
-            outputs = self._rknn.inference(inputs=[batched])
-        boxes, classes, scores = _post_process(outputs, self._anchors)
+        raw = self._backend.raw(frame_rgb)
+        boxes, classes, scores = self._backend.boxes(raw)
         if boxes is None:
             return []
         results = []

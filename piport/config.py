@@ -55,9 +55,29 @@ DEFAULTS = {
     "debug": "false",
 }
 
+# Environment overrides applied after aiport.cfg (a container-friendly way to set
+# identity/console without mounting a file; e.g. `docker run -e AIPORT_CONSOLE_HOST=...`).
+# The detector's own AIPORT_BACKEND / AIPORT_MODEL_PATH / AIPORT_OBJ_THRESH are read
+# directly in detector.py and are intentionally not duplicated here.
+ENV_OVERRIDES = {
+    "AIPORT_MAC": "mac",
+    "AIPORT_HOSTNAME": "hostname",
+    "AIPORT_NAME": "name",
+    "AIPORT_DEVICE_ID": "device_id",
+    "AIPORT_IFACE": "iface",
+    "AIPORT_PARENT_IFACE": "parent_iface",
+    "AIPORT_NETWORK_MODE": "mode",
+    "AIPORT_NETWORK_IP": "ip",
+    "AIPORT_NETWORK_GATEWAY": "gateway",
+    "AIPORT_CONSOLE_HOST": "host",
+    "AIPORT_CONSOLE_PORT": "port",
+    "AIPORT_DEBUG": "debug",
+}
+
 
 def load_config(path=None):
-    """Parse aiport.cfg into merged settings; a missing file falls back to DEFAULTS."""
+    """Parse aiport.cfg into merged settings; a missing file falls back to DEFAULTS.
+    Non-empty ENV_OVERRIDES win over the file."""
     cfg = dict(DEFAULTS)
     path = path or DEFAULT_CONFIG_PATH
     parser = configparser.ConfigParser(interpolation=None)
@@ -66,6 +86,10 @@ def load_config(path=None):
         for section in parser.sections():
             for key, value in parser.items(section):
                 cfg[key] = value.strip()
+    for env_name, key in ENV_OVERRIDES.items():
+        value = os.environ.get(env_name)
+        if value:
+            cfg[key] = value
     return cfg
 
 

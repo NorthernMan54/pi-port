@@ -21,6 +21,35 @@ except Exception as exc:  # numpy missing, etc.
 
 
 @unittest.skipIf(detector is None, f"detector unavailable ({_IMPORT_ERR})")
+class TestBackendSelection(unittest.TestCase):
+    """AIPORT_BACKEND / AIPORT_MODEL_PATH choose the backend without importing
+    onnxruntime or rknnlite (only the string decision is under test)."""
+
+    def setUp(self):
+        self._saved = {k: os.environ.get(k) for k in ("AIPORT_BACKEND", "AIPORT_MODEL_PATH")}
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_forced(self):
+        os.environ["AIPORT_BACKEND"] = "rknn"
+        self.assertEqual(detector._resolve_backend(), "rknn")
+        os.environ["AIPORT_BACKEND"] = "onnx"
+        self.assertEqual(detector._resolve_backend(), "onnx")
+
+    def test_model_path_extension(self):
+        os.environ.pop("AIPORT_BACKEND", None)
+        os.environ["AIPORT_MODEL_PATH"] = "/some/model.rknn"
+        self.assertEqual(detector._resolve_backend(), "rknn")
+        os.environ["AIPORT_MODEL_PATH"] = "/some/model.onnx"
+        self.assertEqual(detector._resolve_backend(), "onnx")
+
+
+@unittest.skipIf(detector is None, f"detector unavailable ({_IMPORT_ERR})")
 class TestMapObjectType(unittest.TestCase):
     def test_mapping(self):
         self.assertEqual(detector._map_object_type("person"), "person")
@@ -102,6 +131,33 @@ class TestNMS(unittest.TestCase):
 
     def test_rk3588(self):
         self._check(detector)
+
+
+@unittest.skipIf(detector is None, f"detector unavailable ({_IMPORT_ERR})")
+class TestUltralytics(unittest.TestCase):
+    """The Ultralytics [1,N,85] ONNX output (xywh + obj + class scores, decode
+    baked in) used by the CPU backend must dedupe via NMS and decode xywh."""
+
+    def test_duplicate_suppressed(self):
+        import numpy as np
+        out = np.zeros((1, 3, 85), dtype=np.float32)
+        for row in (0, 1):  # two identical strong class-0 (person) boxes
+            out[0, row, :4] = [320, 320, 100, 100]
+            out[0, row, 4] = 0.9
+            out[0, row, 5] = 0.9
+        boxes, classes, scores = detector._post_process_ultralytics(out)
+        self.assertIsNotNone(boxes)
+        self.assertEqual(len(boxes), 1)
+        self.assertEqual(int(classes[0]), 0)
+        self.assertAlmostEqual(float(scores[0]), 0.81, places=5)
+        # xywh (320,320,100,100) -> xyxy (270,270,370,370)
+        self.assertAlmostEqual(float(boxes[0][0]), 270.0, places=4)
+        self.assertAlmostEqual(float(boxes[0][2]), 370.0, places=4)
+
+    def test_empty(self):
+        import numpy as np
+        boxes, classes, scores = detector._post_process_ultralytics(np.zeros((1, 2, 85), np.float32))
+        self.assertIsNone(boxes)
 
 
 if __name__ == "__main__":

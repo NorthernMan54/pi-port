@@ -1,0 +1,22 @@
+# Build context is the repo root (see docker/Dockerfile).
+.git
+.github
+docker/
+rknn_convert/
+# Superseded duplicated CPU tree (only present if checked out from the old branch)
+piport/x86/
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.venv
+**/instances/
+*.log
+*.pem
+*.key
+*.crt
+server.crt
+server.key
+adopt_state.json
+adopt_state.json.tmp
+fw_version.json
+device_name

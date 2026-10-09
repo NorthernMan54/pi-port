@@ -23,3 +23,10 @@ jobs:
         run: pip install -r piport/requirements.txt
       - name: Unit tests
         run: cd piport && python3 -m unittest discover -s tests -v
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build CPU image (amd64)
+        run: docker build -f docker/Dockerfile -t piport-cpu .

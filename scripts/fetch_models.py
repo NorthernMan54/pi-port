@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 hutchx86
-"""Fetch YOLOv5s model assets this project uses, and optionally convert to RKNN.
+"""Fetch the YOLOv5 model assets this project uses, and optionally convert to RKNN.
 
 Downloads the open Rockchip YOLOv5s model (ONNX + anchors + COCO labels +
-calibration subset) so the emulator's NPU detector has its data. Model
-binaries are not stored in this repo (see README).
+calibration subset) for the RK3588 NPU detector and the small Ultralytics
+YOLOv5n ONNX for the CPU (onnxruntime) detector. Model binaries are not stored
+in this repo (see README).
 
   python3 scripts/fetch_models.py            # download assets
   python3 scripts/fetch_models.py --convert  # also build the .rknn (needs rknn-toolkit2, x86)
 """
 import argparse
+import hashlib
 import os
 import subprocess
 import sys
@@ -20,6 +22,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ZOO = "https://raw.githubusercontent.com/airockchip/rknn_model_zoo/v2.3.2"
 ONNX_URL = ("https://ftrg.zbox.filez.com/v2/delivery/data/"
             "95f00b0fc900458ba134f8b180b3f7a1/examples/yolov5/yolov5s_relu.onnx")
+# Small CPU model for the onnxruntime backend (x86_64/arm64): official Ultralytics
+# YOLOv5n ONNX (decode baked in -> one [1,N,85] output). ~3.8 MiB vs Rockchip
+# yolov5s's ~27.6 MiB, much faster on CPU.
+YOLOV5N_URL = "https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5n.onnx"
+YOLOV5N_SHA256 = "04f0e55c26f58d17145b36045780fe1250d5bd2187543e11568e5141d05b3262"
 UA = {"User-Agent": "piport-fetch-models"}
 
 # target dirs, keyed by short name
@@ -49,6 +56,17 @@ def download(url, dest, force=False):
     print(f"got {dest}")
 
 
+def _verify_sha256(path, expected):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    got = digest.hexdigest()
+    if got != expected:
+        sys.exit(f"error: {path} sha256 {got} != expected {expected}")
+    print(f"verified {path}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -64,6 +82,11 @@ def main():
 
     # Rockchip yolov5s_relu ONNX feeds the .rknn conversion workspace only.
     download(ONNX_URL, os.path.join(DIRS["rknn_convert"], "yolov5s_relu.onnx"), args.force)
+
+    # Small CPU model for the onnxruntime backend (gitignored, sha256-pinned).
+    npath = os.path.join(DIRS["models"], "yolov5n.onnx")
+    download(YOLOV5N_URL, npath, args.force)
+    _verify_sha256(npath, YOLOV5N_SHA256)
 
     subset_list = os.path.join(DIRS["rknn_convert"], "coco_subset_20.txt")
     with open(subset_list) as f:

@@ -57,7 +57,7 @@ additions. All of the following was confirmed live against a real console.
 | `http_api.py` | HTTPS `:443`: `/api/1.2/manage`, `/api/1.2/login`, `/api/1.2/status`, `/api/1.2/snapshot`. |
 | `ucp4_client.py` | Generic `ucp4` device-management WebSocket client (adoption, `getInfo`). |
 | `avclient.py` | Classic per-camera avclient client: pairing, detection/classification, `EventSmartDetect` / `EventFeatureFlagsUpdated` pushes, snapshot upload. Most real behavior lives here. |
-| `detector.py` | Wraps `RKNNLite` running a quantized YOLOv5s model on the RK3588 NPU. |
+| `detector.py` | YOLOv5 detector with a runtime-selected backend: `RKNNLite` (quantized YOLOv5s on the RK3588 NPU) or `onnxruntime` (CPU, `yolov5n.onnx`; x86_64/arm64). |
 | `run_all.py` | Launches all of the above together. |
 | `sysinfo_server.py` | Board system monitor / multi-instance web UI (CPU, memory, GPU, NPU); not part of the protocol. |
 | `instance_manager.py` | Manages multiple reboot-surviving emulator instances as systemd units (macvlan or physical). |
@@ -105,6 +105,12 @@ debug = false
 | `[network] iface` / `parent_iface` | Blank = auto-detect (default-route interface). |
 | `[logging] debug` | Debug logs; any `--debug` overrides. |
 
+Env vars override the same keys after the file is read (`config.ENV_OVERRIDES`) --
+handy in containers: `AIPORT_CONSOLE_HOST`/`AIPORT_CONSOLE_PORT`, `AIPORT_MAC`,
+`AIPORT_HOSTNAME`, `AIPORT_NAME`, `AIPORT_DEVICE_ID`, `AIPORT_IFACE`,
+`AIPORT_PARENT_IFACE`, `AIPORT_NETWORK_MODE`/`IP`/`GATEWAY`, `AIPORT_DEBUG`. A blank
+env var is ignored (the file value survives).
+
 ## Install and run
 
 One-shot installer (packages, venv, deps, model assets, `librknnrt` upgrade, systemd unit, web UI):
@@ -127,15 +133,20 @@ Identity and the console endpoint default from `aiport.cfg` -- edit it (or pass 
 before the first run. Then adopt "AI Port" from the Protect UI like a normal camera, and pair a
 real camera to it from the camera's own settings.
 
-## Object detection (RK3588 NPU)
+## Object detection (NPU / CPU)
 
-The pipeline runs a real quantized YOLOv5s model on the NPU. Model binaries are not committed;
-fetch the assets (ONNX, anchors, COCO labels, calibration subset) and optionally build `.rknn`:
+The pipeline runs a real YOLOv5 model through `detector.py`, which picks a backend at
+runtime (`AIPORT_BACKEND=auto|rknn|onnx`, or infer from `AIPORT_MODEL_PATH`): the RK3588
+NPU via `rknnlite` (quantized YOLOv5s `.rknn`), or CPU via `onnxruntime` (Ultralytics
+`yolov5n.onnx`, x86_64/arm64). Model binaries are not committed; fetch the assets (ONNX,
+anchors, COCO labels, calibration subset) and optionally build `.rknn`:
 
 ```bash
-python3 scripts/fetch_models.py            # download assets
+python3 scripts/fetch_models.py            # CPU model + conversion assets
 python3 scripts/fetch_models.py --convert  # build .rknn (x86 host)
 ```
+
+For a containerized CPU install (x86 servers / Raspberry Pi 4/5) see `docker/README.md`.
 
 **Conversion must run on a separate x86_64 build host.** `rknn-toolkit-lite2` is the on-device,
 inference-only API (aarch64-only wheels for Python <= 3.12); it can only run an already-converted

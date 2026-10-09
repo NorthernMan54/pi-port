@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 hutchx86
+#
+# Pi Port -- single-instance AI Port emulator, host networking (x86_64 / arm64).
+# Import this file as a Komodo Stack (Compose), or `docker compose -f
+# docker/compose.yaml up -d --build`.
+#
+# The build context is the repo root, so this file must stay at docker/compose.yaml.
+#
+# Configure via environment (a .env beside this file, or Komodo's stack env vars):
+#   AIPORT_CONSOLE_HOST  the UniFi Protect console IP to dial before adoption
+#   AIPORT_MAC           optional fixed MAC (blank = derived Ubiquiti-OUI MAC)
+#   AIPORT_DEVICE_ID     per-instance identity (unique when running several)
+# See piport/aiport.cfg / config.ENV_OVERRIDES for the full set.
+#
+# WARNING: host networking shares the host's IP and DNS, so L2 discovery works,
+# but the container is NOT a distinct LAN device. For a dedicated MAC/IP use
+# compose.macvlan.yaml (one container per instance).
+
+name: piport
+
+services:
+  aiport:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: piport-cpu
+    container_name: piport-cpu
+    # L2 discovery (UDP/10001) and :443 must be on the real LAN; Docker's
+    # default bridge NATs both away.
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    restart: unless-stopped
+    environment:
+      AIPORT_CONSOLE_HOST: "${AIPORT_CONSOLE_HOST:-}"
+      AIPORT_CONSOLE_PORT: "${AIPORT_CONSOLE_PORT:-7442}"
+      AIPORT_MAC: "${AIPORT_MAC:-}"
+      AIPORT_DEVICE_ID: "${AIPORT_DEVICE_ID:-}"
+      AIPORT_HOSTNAME: "${AIPORT_HOSTNAME:-piport}"
+      AIPORT_NAME: "${AIPORT_NAME:-AI Port}"
+      AIPORT_IFACE: "${AIPORT_IFACE:-}"
+      AIPORT_DEBUG: "${AIPORT_DEBUG:-}"
+    # Prefer a mounted cfg over env for the full identity/network surface:
+    # volumes:
+    #   - ./aiport.cfg:/app/aiport.cfg:ro

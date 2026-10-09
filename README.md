@@ -86,6 +86,8 @@ paired, the console hands the board an RTSP URL on its own internal relay
 | --- | --- | --- | --- |
 | Orange Pi 5 Plus | RK3588 | Verified | The target board; 4 real cameras paired and streamed concurrently |
 | Other RK3588 boards | RK3588 | Untested | Should work; the NPU and ffmpeg paths are RK3588-specific |
+| x86_64 server / PC | amd64 | Smoke-tested | `docker/` CPU image; no NPU, onnxruntime detection |
+| Raspberry Pi 4 / 5 | arm64 | Untested | `docker/` CPU image; arm64 build unverified on real Pi hardware |
 
 ## Features
 
@@ -119,10 +121,11 @@ piport/            the emulator (RK3588 / Orange Pi)
   http_api.py        HTTPS :443 adopt/control API
   ucp4_client.py     generic ucp4 device-management websocket
   avclient.py        pairing/streaming/smart-detect websocket + detection
-  detector.py        YOLOv5 inference wrapper (RKNN / NPU)
+  detector.py        YOLOv5 inference wrapper (RKNN NPU / onnxruntime CPU)
   sysinfo_server.py  dev-box CPU/mem/GPU/NPU status page (+ webui.html)
   models/            anchors + COCO labels (model binaries fetched, not stored)
   instance_manager.py / run_all.py  multi-instance orchestration
+docker/            CPU Docker image + Compose/Komodo stack (x86_64 + arm64)
 scripts/           install.sh (one-shot installer), fetch_models.py, helpers
 rknn_convert/      YOLOv5s -> RKNN conversion recipe (x86 build host)
 docs/images/       README diagram
@@ -130,8 +133,7 @@ docs/images/       README diagram
 
 Model binaries (`.onnx`/`.rknn`) and all Ubiquiti firmware are **not** stored
 here; see [Model assets](#model-assets-not-tracked). `piport/README.md` has the
-protocol detail and per-component notes. The x86/no-NPU Docker variant lives on
-the `experimental` branch.
+protocol detail and per-component notes.
 
 ## Install / Usage
 
@@ -226,14 +228,22 @@ so it is stable across reboots. `create --ip X.Y.Z.W` uses a static address
 instead of DHCP. The web UI (`sysinfo_server.py`) can also create/destroy
 instances.
 
-### x86 / Docker variant
+### x86 / Raspberry Pi (CPU Docker)
 
-The x86/no-NPU Docker variant is not part of `main`; it is maintained on the
-`experimental` branch (`piport/x86/`, onnxruntime on CPU):
+`docker/` builds one CPU image (onnxruntime, no NPU) for `linux/amd64` (x86_64
+servers) and `linux/arm64` (Raspberry Pi 4/5, any arm64 box). Only the detector
+backend differs from the RK3588 build: `detector.py` selects `onnxruntime` at
+runtime. It ships a Compose stack for a **Komodo** instance plus a host-network
+smoke test:
 
 ```bash
-git switch experimental
+docker build -f docker/Dockerfile -t piport-cpu .
+AIPORT_CONSOLE_HOST=<console-ip> docker compose -f docker/compose.yaml up -d --build
+./docker/run-smoke-test.sh   # no console/camera needed
 ```
+
+See [`docker/README.md`](docker/README.md) for Komodo import, macvlan, and the
+confirmed/untested matrix.
 
 ### Model assets (not tracked)
 
@@ -243,12 +253,13 @@ reproducible, they are not committed; `scripts/fetch_models.py` downloads them:
 | Asset | Used by | Source |
 | --- | --- | --- |
 | `yolov5s_relu.onnx` (27.6 MiB) | RKNN conversion (`.rknn`) | Rockchip model zoo delivery: <https://ftrg.zbox.filez.com/v2/delivery/data/95f00b0fc900458ba134f8b180b3f7a1/examples/yolov5/yolov5s_relu.onnx> |
+| `yolov5n.onnx` (3.8 MiB) | CPU detector (x86_64 / Pi) | Ultralytics release `v7.0`: <https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5n.onnx> |
 | anchors, COCO labels, bus.jpg, calibration subset | RKNN conversion | <https://github.com/airockchip/rknn_model_zoo> (tag `v2.3.2`) |
 
-The experimental x86 variant additionally uses Ultralytics `yolov5n.onnx`
-(AGPL-3.0, same as the weights) and still accepts the Rockchip
-`yolov5s_relu.onnx` via `AIPORT_MODEL_PATH` (both output layouts are
-auto-detected); see that branch's README.
+The CPU backend uses Ultralytics `yolov5n.onnx` (AGPL-3.0, same as the weights)
+and still accepts the Rockchip `yolov5s_relu.onnx` via `AIPORT_MODEL_PATH` (both
+output layouts are auto-detected). The Dockerfile downloads and sha256-verifies
+the CPU model at build time.
 
 `yolov5s_relu.rknn` is produced on an x86_64 machine with `rknn-toolkit2`
 (install from PyPI or the Rockchip GitHub release — see `rknn_convert/convert.py`
@@ -304,8 +315,9 @@ Device identity, network mode and the console address live in
 - **Known:** detection is stock YOLOv5 (person/vehicle/animal) on the RK3588 NPU,
   not Ubiquiti's classifier; face recognition, license-plate recognition and
   vehicle classification are not implemented.
-- **Known:** the x86/no-NPU Docker variant is maintained on the `experimental`
-  branch and is not verified on real hardware.
+- **Known:** the CPU Docker image (`docker/`) builds and runs on x86_64; its
+  arm64/Pi build is unverified on real Pi hardware (no arm64 emulation on the
+  build host), and the live-camera path is untested there.
 - **Planned:** stress-testing multiple cameras beyond the four-camera live setup.
 
 ## Changelog

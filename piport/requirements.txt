@@ -3,5 +3,8 @@ websockets>=12.0
 requests>=2.31
 numpy
 
-# rknn-toolkit-lite2 is installed separately: pip install rknn-toolkit-lite2
-# (see piport/README.md for the matching librknnrt.so upgrade it requires).
+# Detector backends are installed separately, one per platform:
+#   * RK3588 NPU (Orange Pi 5 Plus): pip install rknn-toolkit-lite2
+#     (see piport/README.md for the matching librknnrt.so upgrade it requires)
+#   * CPU (x86_64 / arm64: Pi 4/5, any server): pip install onnxruntime
+# detector.py selects whichever backend is present (AIPORT_BACKEND to force).

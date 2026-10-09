@@ -121,7 +121,8 @@ if [ "$NO_NPU" -eq 0 ]; then
 fi
 
 log "fetching model assets (ONNX + labels/anchors; binaries are gitignored)"
-"$PY" "$REPO_ROOT/scripts/fetch_models.py"
+# --no-cpu-model: the CPU yolov5n.onnx is for x86/arm64 runs, not this NPU board.
+"$PY" "$REPO_ROOT/scripts/fetch_models.py" --no-cpu-model
 
 if [ "$NO_NPU" -eq 0 ]; then
     # Source precedence: --rknn file > local/submodule copy > download, where

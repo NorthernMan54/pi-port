@@ -8,8 +8,9 @@ calibration subset) for the RK3588 NPU detector and the small Ultralytics
 YOLOv5n ONNX for the CPU (onnxruntime) detector. Model binaries are not stored
 in this repo (see README).
 
-  python3 scripts/fetch_models.py            # download assets
+  python3 scripts/fetch_models.py            # download assets (incl. the CPU model)
   python3 scripts/fetch_models.py --convert  # also build the .rknn (needs rknn-toolkit2, x86)
+  python3 scripts/fetch_models.py --no-cpu-model   # RK3588 board: skip yolov5n.onnx
 """
 import argparse
 import hashlib
@@ -73,6 +74,8 @@ def main():
     ap.add_argument("--convert", action="store_true",
                     help="run rknn_convert/convert.py to build yolov5s_relu.rknn")
     ap.add_argument("--force", action="store_true", help="re-download existing files")
+    ap.add_argument("--no-cpu-model", action="store_true",
+                    help="skip the CPU yolov5n.onnx (the RK3588 installer does not use it)")
     args = ap.parse_args()
 
     for url, targets in ASSETS.items():
@@ -84,9 +87,11 @@ def main():
     download(ONNX_URL, os.path.join(DIRS["rknn_convert"], "yolov5s_relu.onnx"), args.force)
 
     # Small CPU model for the onnxruntime backend (gitignored, sha256-pinned).
-    npath = os.path.join(DIRS["models"], "yolov5n.onnx")
-    download(YOLOV5N_URL, npath, args.force)
-    _verify_sha256(npath, YOLOV5N_SHA256)
+    # Not needed on the RK3588 NPU board, so the installer passes --no-cpu-model.
+    if not args.no_cpu_model:
+        npath = os.path.join(DIRS["models"], "yolov5n.onnx")
+        download(YOLOV5N_URL, npath, args.force)
+        _verify_sha256(npath, YOLOV5N_SHA256)
 
     subset_list = os.path.join(DIRS["rknn_convert"], "coco_subset_20.txt")
     with open(subset_list) as f:

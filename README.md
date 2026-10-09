@@ -126,6 +126,7 @@ piport/            the emulator (RK3588 / Orange Pi)
   models/            anchors + COCO labels (model binaries fetched, not stored)
   instance_manager.py / run_all.py  multi-instance orchestration
 compose.yaml       CPU stack / Komodo Stack (host net; x86_64 + arm64)
+compose.macvlan.yaml  same, but a dedicated LAN IP/MAC per container
 docker/            CPU Dockerfile + smoke test + notes (x86_64 + arm64)
 scripts/           install.sh (one-shot installer), fetch_models.py, helpers
 rknn_convert/      YOLOv5s -> RKNN conversion recipe (x86 build host)
@@ -243,9 +244,10 @@ AIPORT_CONSOLE_HOST=<console-ip> docker compose up -d --build
 ./docker/run-smoke-test.sh   # no console/camera needed
 ```
 
-One instance per host (`network_mode: host` shares the host's `:443`/`UDP-10001`).
-See [`docker/README.md`](docker/README.md) for Komodo import and the
-confirmed/untested matrix.
+`compose.yaml` is host networking (one instance per host: it shares the host's
+`:443`/`UDP-10001`); `compose.macvlan.yaml` gives each container its own LAN
+IP/MAC for several instances on one host. See [`docker/README.md`](docker/README.md)
+for Komodo import, networking caveats, and the confirmed/untested matrix.
 
 ### Model assets (not tracked)
 

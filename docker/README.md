@@ -33,6 +33,9 @@ Or with the Compose stack at the **repo root** (`compose.yaml`, host networking)
 AIPORT_CONSOLE_HOST=<console-ip> docker compose up -d --build
 ```
 
+For a dedicated LAN IP per container (or several instances on one host), use
+`compose.macvlan.yaml` instead -- see [Networking](#networking).
+
 Then adopt "AI Port" in Protect and pair a camera to it, exactly as on the Pi.
 
 `run-smoke-test.sh` builds and starts the stack on host networking, then checks all
@@ -49,7 +52,8 @@ box and network you control.
 
 The repo-root `compose.yaml` is the Komodo Stack file (Komodo clones the repo and runs
 compose from the clone root, which is exactly the build context). Create a **Stack**
-with source **Git Repo** = `hutchx86/pi-port`, branch `main`, file `compose.yaml`, then
+with source **Git Repo** = `hutchx86/pi-port`, branch `main`, file `compose.yaml`
+(or `compose.macvlan.yaml` for a dedicated IP per container), then
 set the stack environment and deploy:
 
 | Variable | Meaning |
@@ -82,20 +86,29 @@ the mounted file.
 The L2 discovery beacon (`UDP/10001`) must be broadcast-visible on the console's LAN,
 and the console must reach the container's `:443` at a real, stable LAN IP. Docker's
 default bridge breaks both (it source-NATs traffic and serves DNS through a stub at
-`127.0.0.11`), so the stack uses `network_mode: host`: the container shares the host's
-IP, DNS and interfaces and is **not** a distinct LAN device.
+`127.0.0.11`), so there are two supported modes:
 
-Consequences to plan for:
+**Host networking -- `compose.yaml` (simplest).** The container shares the host's IP,
+DNS and interfaces and is **not** a distinct LAN device. The host must be on the same
+L2 LAN as the console, and the host's `:443`/`UDP-10001` must be free (a Traefik/Caddy/
+nginx on `:443` will clash). One instance per host -- a second container would collide.
 
-- The host must be on the **same L2 LAN as the Protect console**.
-- The emulator binds the host's `:443` and `UDP/10001`; both must be free (a
-  Traefik/Caddy/nginx on `:443` will clash).
-- **One instance per host.** A second container would collide on `:443`/`UDP/10001`
-  (host networking shares one network namespace). Run additional instances on another
-  host -- not via macvlan or `instance_manager.py` inside a container.
+**macvlan -- `compose.macvlan.yaml` (dedicated IP per container).** Each container gets
+its own LAN IP **and** MAC, its own `:443`, and can coexist with the host and with other
+instances. This is the Docker equivalent of the board's `instance_manager.py` macvlan,
+and the way to run several AI Ports on one host. Requirements and caveats:
 
-The multi-instance macvlan machinery (`instance_manager.py`) is an RK3588-board feature,
-not part of this Docker image.
+- Docker's macvlan driver has **no DHCP** -- assign a static, free `ipv4_address` (and a
+  matching `AIPORT_MAC`/`mac_address`); the file shows the pattern.
+- The **parent NIC must be wired**; Wi-Fi APs drop the extra MAC.
+- The **host cannot reach the container IP** without an extra macvlan shim interface on
+  the host (the console on the LAN can).
+- Give every instance a unique IP, MAC and `AIPORT_DEVICE_ID`, or the console sees one
+  device instead of several.
+
+Both modes require the target host to be on the console's LAN. Choose host mode for a
+quick single-instance test, macvlan when the host already uses `:443` or you want more
+than one instance.
 
 ## Model
 
@@ -132,6 +145,7 @@ Untested:
   emulation, so the emulated build's `RUN` steps cannot execute -- the base image and
   wheels resolve, but the actual Pi run is unverified).
 - Real cameras / real RTSP frames through the live capture pipeline.
+- macvlan networking end to end (the config validates; no live LAN test).
 - CPU contention between `onnxruntime` and software `ffmpeg` decode under a 4-camera
   load. The RK3588 variant does not have this: decode and inference run on separate
   hardware blocks (RKVDEC + NPU).

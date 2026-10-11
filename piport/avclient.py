@@ -75,6 +75,16 @@ _FFPROBE_BIN = os.path.join(os.path.dirname(FFMPEG_BIN), "ffprobe") \
     else "ffprobe"
 
 
+def _is_pi4(compatible_path="/proc/device-tree/compatible"):
+    """True on the Raspberry Pi 4 family (BCM2711). The Pi 5 (BCM2712) has NO
+    hardware H.264 decoder, so v4l2m2m must not be selected there."""
+    try:
+        with open(compatible_path, "rb") as f:
+            return b"bcm2711" in f.read()
+    except OSError:
+        return False
+
+
 def _detect_hwdec():
     """Active hardware-decode backend name, or None for software."""
     forced = os.environ.get("AIPORT_HWDEC", "auto").strip().lower()
@@ -84,8 +94,10 @@ def _detect_hwdec():
         return forced
     if FFMPEG_BIN != "ffmpeg":
         return "rkmpp"
-    # Raspberry Pi: the bcm2835-codec decoder is /dev/video10 and needs VCHIQ.
-    if os.path.exists("/dev/video10") and os.path.exists("/dev/vchiq"):
+    # Pi 4 only: bcm2835-codec H.264 decoder (/dev/video10, via /dev/vchiq).
+    # Known-flaky under concurrent/large loads (see implementation.md) and the
+    # Pi 5 has no H.264 hardware decoder at all -- it software-decodes H.264.
+    if _is_pi4() and os.path.exists("/dev/video10") and os.path.exists("/dev/vchiq"):
         return "v4l2m2m"
     return None
 

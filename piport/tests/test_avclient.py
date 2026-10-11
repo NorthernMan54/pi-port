@@ -591,6 +591,26 @@ class HwDecoderSelection(unittest.TestCase):
             av.FFMPEG_BIN = old
 
 
+class Pi4Detection(unittest.TestCase):
+    """v4l2m2m is Pi 4 (BCM2711) only -- the Pi 5 has no H.264 hardware decoder."""
+
+    def _compat(self, data):
+        f = tempfile.NamedTemporaryFile(delete=False)
+        f.write(data)
+        f.close()
+        self.addCleanup(os.unlink, f.name)
+        return f.name
+
+    def test_bcm2711_is_pi4(self):
+        self.assertTrue(av._is_pi4(self._compat(b"brcm,bcm2711\x00raspberrypi,4-model-b")))
+
+    def test_bcm2712_is_not_pi4(self):
+        self.assertFalse(av._is_pi4(self._compat(b"brcm,bcm2712\x00raspberrypi,5-model-b")))
+
+    def test_missing_compatible_is_false(self):
+        self.assertFalse(av._is_pi4("/nonexistent/compatible"))
+
+
 try:
     import numpy as _np
 except Exception:  # numpy is a project dep but keep the suite runnable without it

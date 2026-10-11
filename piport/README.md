@@ -150,9 +150,11 @@ For a containerized CPU install (x86 servers / Raspberry Pi 4/5) see `docker/REA
 
 **Video decode** picks a hardware backend automatically, or by `AIPORT_HWDEC`
 (`auto`|`rkmpp`|`v4l2m2m`|`none`): `rkmpp` on the RK3588 (ffmpeg-rockchip), `v4l2m2m`
-on a Raspberry Pi (the bcm2835-codec decoder at `/dev/video10`, which also needs
-`/dev/vchiq`), else software. Hardware decode cuts ffmpeg's CPU sharply, but on a Pi 4
-the CPU detector then dominates -- see `docker/README.md` for the measured numbers.
+on a **Raspberry Pi 4 only** (BCM2711; the bcm2835-codec decoder at `/dev/video10`,
+which also needs `/dev/vchiq`), else software. The **Pi 5 has no H.264 hardware
+decoder** (HEVC only), so it always software-decodes H.264 -- and its CPU does that
+faster than the Pi 4's hardware block. See `docker/README.md` and `implementation.md`
+for the measured numbers and the known Pi 4 decoder limits.
 
 The CPU detector disables onnxruntime's thread **spin-wait** (it burned ~3 extra cores
 alongside ffmpeg on a Pi 4) and caps threads with `AIPORT_ORT_INTRA_THREADS` (e.g. `2`

@@ -183,6 +183,31 @@ the setup below.
   4K-page kernel); not handled by the installer.
 - **No H.264 hardware decode on the Pi 5** (only HEVC), so camera streams are decoded on the CPU.
 
+## ONVIF cameras (`onvif_push.py`)
+
+For an assigned third-party camera Protect sends `OnvifStreamControl` (the camera's
+RTSP URL, `streaming` true/false) and, per channel, `ChangeVideoSettings` with an
+`extendedFlv` `avSerializer`: a `streamName` and `tcp://<console>:7550` as destination.
+Protect's own ingest for that camera stops; without the push the camera has no video.
+
+Each channel is `ffmpeg -c:v copy` (plus AAC audio) into FLV, rewritten by
+`rewrite_flv()` and sent over TCP:
+
+- FLV header flags byte `7`; after every tag a 16-byte trailer: `0`, a 24-bit
+  timescale (90000 video, 11025 otherwise), and the elapsed time **in that
+  timescale** (64-bit).
+- `onClockSync` (`streamClock`, `wallClock`) and `onMpma` script tags every 5 s,
+  the first only after 5 s -- Protect closes a push whose clock sync precedes the
+  first frames.
+
+The format follows unifi-cam-proxy's `clock_sync.py` (MIT), except the trailer units:
+it writes 10-microsecond units regardless of timescale, which Protect 7.2's media
+server reads as video 11% and audio 9x too fast and drops ("Video frame wc=... diff
+exceeds threshold" in `/srv/ms/logs/ms.err.00.log`); the browser live view then never
+starts. The `ChangeVideoSettings` reply reports the stream's probed resolution:
+Protect echoes back whatever was answered before, and the web player sizes its
+decoder from it.
+
 ## Stream pipeline
 
 `avclient.py` runs one ffmpeg process per paired camera that pulls the RTSP stream and uses

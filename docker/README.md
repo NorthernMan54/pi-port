@@ -7,15 +7,14 @@ with `network_mode: host`. For a console on another machine, use
 `scripts/install.sh` (macvlan, a real LAN device) instead.
 
 Verified on a Raspberry Pi 5 (Pi OS trixie) with a USB Coral, next to the
-UNVR container: discovery, adoption and restart all work. Pairing a UniFi camera
-through this setup has not been tested yet.
+UNVR container: discovery, adoption, restart, a UniFi camera via Protect's
+relay, and a Hikvision 4K ONVIF camera (video push, live view, recording,
+detection) all work.
 
-> [!WARNING]
-> **Do not assign third-party (ONVIF) cameras to this AI Port.** Protect then
-> expects the AI Port to *push the camera's video* to it (`extendedFlv` to
-> `:7550`), which this project does not implement. The camera stops showing
-> video and recording until you remove the assignment. Only UniFi cameras,
-> whose video Protect keeps ingesting itself, are supported.
+> [!NOTE]
+> An assigned ONVIF camera gets its video *from* the AI Port (see the main
+> README's ONVIF section): while this container is down, that camera does not
+> record.
 
 ## Why a bridge network
 

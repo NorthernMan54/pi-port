@@ -447,15 +447,17 @@ class TestMotionLoopLifecycle(Base):
     def test_discard_emits_leave_for_open_tracks(self):
         sent = []
         self._orig_send = av._send_smart_detect_event
-        av._send_smart_detect_event = lambda ws, dev, **kw: sent.append((dev, kw["edge_type"]))
+        av._send_smart_detect_event = lambda ws, dev, **kw: sent.append((ws, dev, kw["edge_type"]))
         self.addCleanup(lambda: setattr(av, "_send_smart_detect_event", self._orig_send))
         av._motion_state["D"] = {"tracks": {7: {"event_id": 42, "objectType": "person",
                                                  "coord": [0, 0, 10, 10], "score": 0.9,
                                                  "first_shown_ms": 1, "miss_count": 0,
                                                  "prev_center": (5, 5), "crossed_lines": {}}},
                                   "next_tracker_id": 8}
-        av._stop_motion_detector("D")  # preserve_tracks defaults to False
-        self.assertEqual(sent, [("D", "leave")])
+        ws = object()
+        av._stop_motion_detector("D", ws=ws)  # preserve_tracks defaults to False
+        # The leave must go out on the live connection, not None.
+        self.assertEqual(sent, [(ws, "D", "leave")])
         self.assertNotIn("D", av._motion_state)
 
 
@@ -569,6 +571,19 @@ class HwDecoderSelection(unittest.TestCase):
             self.assertEqual(av._hwdec_args("hevc"), [])
         finally:
             av.FFMPEG_BIN = old
+
+
+class TestProbeParse(unittest.TestCase):
+    def test_full(self):
+        self.assertEqual(av._parse_probe("h264,3840,2160,12/1\n"),
+                         {"codec": "h264", "width": 3840, "height": 2160, "fps": 12})
+
+    def test_fractional_and_partial(self):
+        self.assertEqual(av._parse_probe("HEVC,1920,1080,30000/1001")["fps"], 30)
+        self.assertEqual(av._parse_probe("h264,,,0/0"),
+                         {"codec": "h264", "width": None, "height": None, "fps": None})
+        self.assertEqual(av._parse_probe(""),
+                         {"codec": None, "width": None, "height": None, "fps": None})
 
 
 if __name__ == "__main__":

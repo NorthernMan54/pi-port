@@ -36,6 +36,7 @@ log = logging.getLogger("aiport-avclient")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
+import onvif_push
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ADOPT_STATE_FILE = os.path.join(HERE, "adopt_state.json")
@@ -67,16 +68,38 @@ _FFPROBE_BIN = os.path.join(os.path.dirname(FFMPEG_BIN), "ffprobe") \
     else "ffprobe"
 
 
-def _probe_codec(url, timeout=8):
-    """Video codec_name of the RTSP stream (e.g. 'h264', 'hevc'), or None if unknown."""
+def _parse_probe(out):
+    """ffprobe `codec_name,width,height,avg_frame_rate` csv -> dict; missing
+    fields are None."""
+    info = {"codec": None, "width": None, "height": None, "fps": None}
+    fields = out.strip().splitlines()[0].split(",") if out.strip() else []
+    if fields:
+        info["codec"] = fields[0].strip().lower() or None
+    try:
+        info["width"], info["height"] = int(fields[1]), int(fields[2])
+    except (IndexError, ValueError):
+        pass
+    try:
+        num, _, den = fields[3].partition("/")
+        fps = float(num) / float(den or 1)
+        info["fps"] = round(fps) if fps > 0 else None
+    except (IndexError, ValueError, ZeroDivisionError):
+        pass
+    return info
+
+
+def _probe_stream(url, timeout=8):
+    """Codec ('h264', 'hevc'), width, height and fps of the RTSP stream's first
+    video track; fields None if unknown."""
     try:
         out = subprocess.run(
             [_FFPROBE_BIN, "-v", "error", "-rtsp_transport", "tcp", "-select_streams", "v:0",
-             "-show_entries", "stream=codec_name", "-of", "csv=p=0", url],
-            capture_output=True, timeout=timeout, text=True).stdout.strip()
+             "-show_entries", "stream=codec_name,width,height,avg_frame_rate",
+             "-of", "csv=p=0", url],
+            capture_output=True, timeout=timeout, text=True).stdout
     except (OSError, subprocess.SubprocessError):
-        return None
-    return out.splitlines()[0].strip().lower() if out else None
+        out = ""
+    return _parse_probe(out)
 
 
 def _hwdec_args(codec):
@@ -109,6 +132,7 @@ SMART_DETECT_ZONE_ID = "1"
 _latest_frame = {}   # deviceID -> HxWx3 uint8 numpy array (DETECT_IMG_SIZE square, RGB)
 _frame_lock = threading.Lock()
 _stream_dims = {}    # deviceID -> (width, height) of the real camera stream
+_stream_probe = {}   # deviceID -> {"codec", "width", "height", "fps"} from ffprobe at pull start
 # deviceID -> exclusion polygons in the normalized 0-1000 space.
 _exclude_zones = {}
 # Prototype app exposes `zones` (not excludeZones): when non-default, a detection must be inside one.
@@ -136,6 +160,9 @@ SMART_SNAPSHOT_MARGIN = 1.6
 CAMERA_COORD_END = 1000
 _detector = None
 _detector_lock = threading.Lock()
+# Third-party (ONVIF) cameras: Protect hands their video ingest to the AI Port,
+# which must push each channel to :7550 (see onvif_push.py).
+_onvif = onvif_push.PushManager(ffmpeg_bin=FFMPEG_BIN)
 # [hardware] detector / detector_model, set by main(); see detectors/__init__.py.
 DETECTOR_BACKEND = "auto"
 DETECTOR_MODEL = None
@@ -196,13 +223,20 @@ def _stop_stream(device_id):
 
 # One ffmpeg pulls RTSP and splits post-decode into a JPEG snapshot and 640x640
 # RGB; decoding twice was wasteful (CPU-side NAL parsing dominates, not the NPU).
-def _start_stream(device_id, ip, port, uri, width=None, height=None):
+def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
+    """Pull from Protect's relay (ip/port/uri), or from `url` directly -- an
+    ONVIF camera's own RTSP URL."""
     _stop_stream(device_id)
     os.makedirs(_STREAM_DIR, exist_ok=True)
     _stream_dims[device_id] = (width or DETECT_IMG_SIZE, height or DETECT_IMG_SIZE)
-    url = f"rtsp://{ip}:{port}/{uri}"
+    url = url or f"rtsp://{ip}:{port}/{uri}"
     out_path = os.path.join(_STREAM_DIR, f"{device_id}.jpg")
-    codec = _probe_codec(url)
+    probe = _probe_stream(url)
+    _stream_probe[device_id] = probe
+    if probe["width"] and probe["height"]:
+        # What the stream really is beats what the controller announced.
+        _stream_dims[device_id] = (probe["width"], probe["height"])
+    codec = probe["codec"]
     hwdec_args = _hwdec_args(codec)
     encode_args = ["-c:v", "mjpeg_rkmpp"] if FFMPEG_BIN != "ffmpeg" else []
     size = DETECT_IMG_SIZE
@@ -251,7 +285,7 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
                         device_id, count, backoff)
             time.sleep(backoff)
             if device_id not in _active_streams:
-                _start_stream(device_id, ip, port, uri, width, height)
+                _start_stream(device_id, ip, port, uri, width, height, url=url)
 
     threading.Thread(target=_reader, daemon=True).start()
 
@@ -569,8 +603,11 @@ def _motion_tick(ws, device_id):
                       "for deviceID=%s -- ignoring (not smart-detect-worthy)", device_id)
 
 
-def _stop_motion_detector(device_id, preserve_tracks=False):
+def _stop_motion_detector(device_id, preserve_tracks=False, ws=None):
     """Stop this device's poll loop.
+
+    ws: the live avclient connection, needed to emit `leave` for open tracks
+    (without one those leaves fail and are only logged).
 
     preserve_tracks=True keeps `_motion_state` (open tracks, prev_center) so a
     UiStreamControl refresh does not silently abandon an in-flight track. Only a
@@ -587,7 +624,7 @@ def _stop_motion_detector(device_id, preserve_tracks=False):
         # leaves an orphaned event on the controller).
         for tracker_id, tr in open_tracks:
             try:
-                _send_smart_detect_event(None, device_id, edge_type="leave",
+                _send_smart_detect_event(ws, device_id, edge_type="leave",
                                           event_id=tr["event_id"], stationary=True,
                                           object_type=tr["objectType"], coord=tr["coord"],
                                           confidence=tr["score"],
@@ -1075,7 +1112,7 @@ def handle_function(ws, msg, device_info):
         else:
             if device_id:
                 _stop_stream(device_id)
-                _stop_motion_detector(device_id)
+                _stop_motion_detector(device_id, ws=ws)
             reply_status = "stopped"
         # usedPoints MUST be on every reply (start and stop); omitting it breaks re-pairing
         # with estimated_capacity_exceeded.
@@ -1091,16 +1128,61 @@ def handle_function(ws, msg, device_info):
                 _send_feature_flags_event(ws, device_id)
         return
     if fn == "OnvifStreamControl":
-        reply_status = "started" if payload.get("streaming") else "stopped"
+        # Assigning an ONVIF camera: we pull its RTSP for detection and push its
+        # video to Protect (channels arrive via ChangeVideoSettings with this deviceID).
+        device_id = payload.get("deviceID")
+        url = payload.get("streamUrl")
+        reply_status = "stopped"
+        if device_id and payload.get("streaming") and url:
+            try:
+                _onvif.set_source(device_id, url, audio=payload.get("audio", True),
+                                  width=payload.get("width"), height=payload.get("height"),
+                                  fps=payload.get("fps"))
+                _stream_restart_count.pop(device_id, None)
+                _start_stream(device_id, None, None, None, payload.get("width"),
+                              payload.get("height"), url=url)
+                _start_motion_detector(ws, device_id, None, None, None, preserve_tracks=True)
+                reply_status = "started"
+            except Exception:
+                log.exception("failed to start ONVIF camera deviceID=%s", device_id)
+        elif device_id:
+            _onvif.clear_device(device_id)
+            _stop_stream(device_id)
+            _stop_motion_detector(device_id, ws=ws)
         send_msg(ws, "OnvifStreamControl", {"status": reply_status}, in_response_to=msg_id)
+        if device_id and reply_status == "started":
+            _send_status_event(ws, device_id, plug=True, streaming=True,
+                               smart_ready=True, audio_ready=True)
+            _send_feature_flags_event(ws, device_id)
         return
     if fn == "GetStreamList":
         # aiportUpdateHandler requires this before re-issuing UiStreamControl; reply needs `list`.
         send_msg(ws, "GetStreamList", {"list": []}, in_response_to=msg_id)
         return
     if fn == "ChangeVideoSettings":
-        # A query, not a push: the controller builds its channel list from `.video`/`.audio`,
-        # so `{}` blocks provisioning.
+        # With a deviceID it configures an ONVIF camera's channel pushes (streamName +
+        # :7550 destination per videoN). Either way the reply is also read as a query:
+        # the controller builds its channel list from `.video`/`.audio`, so `{}` blocks
+        # provisioning.
+        onvif_src = None
+        if payload.get("deviceID") and isinstance(payload.get("video"), dict):
+            _onvif.configure(payload["deviceID"], payload["video"])
+            onvif_src = _onvif.source(payload["deviceID"])
+        if onvif_src:
+            # Every channel carries the camera's main stream, so report its real
+            # geometry -- probed, since Protect echoes back whatever we answered
+            # before. A wrong size breaks the web player (it sizes its decoder from it).
+            probe = _stream_probe.get(payload["deviceID"]) or {}
+            channel = {"enabled": True,
+                       "width": probe.get("width") or onvif_src["width"] or 1920,
+                       "height": probe.get("height") or onvif_src["height"] or 1080,
+                       "fps": probe.get("fps") or onvif_src["fps"] or 15,
+                       "bitrate": 8000000}
+            send_msg(ws, "ChangeVideoSettings", {
+                "video": {k: dict(channel) for k in payload["video"]},
+                "audio": {"enabled": True, "volume": 100},
+            }, in_response_to=msg_id)
+            return
         send_msg(ws, "ChangeVideoSettings", {
             "video": {
                 "video1": {"enabled": True, "width": 1920, "height": 1080,
@@ -1152,9 +1234,10 @@ def handle_function(ws, msg, device_info):
         # Un-adopt signal: the controller doesn't close the WS afterward, so tear down here.
         log.info("ResetToDefaults received -- treating as un-adopt: clearing "
                   "adopt state and tearing down streams")
+        _onvif.stop_all()
         for device_id in list(_active_streams):
             _stop_stream(device_id)
-            _stop_motion_detector(device_id)
+            _stop_motion_detector(device_id, ws=ws)
         _exclude_zones.clear()
         _detect_zones.clear()
         _lines.clear()

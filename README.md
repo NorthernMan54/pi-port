@@ -100,6 +100,8 @@ whose runtime, hardware and model are present. A new accelerator is one
   connections a real console expects.
 - **Camera pairing and video relay** — pairs real cameras and pulls their stream
   from Protect's internal RTSP relay.
+- **Third-party (ONVIF) cameras** — when one is assigned, pushes its video to
+  Protect as `extendedFlv` (live view and recording) and runs detection on it.
 - **Real object detection on an accelerator** — YOLOv5 → RKNN on the RK3588
   NPU, or SSDLite MobileDet on a Coral Edge TPU (person/vehicle/animal), not a
   placeholder.
@@ -256,10 +258,33 @@ network instead (Coral or CPU detector):
 cd docker && echo "AIPORT_CONSOLE=<console-ip>" > .env && docker compose up -d --build
 ```
 
-See [`docker/README.md`](docker/README.md). Either way, **only UniFi cameras
-are supported**: assigning a third-party (ONVIF) camera to the AI Port makes
-Protect wait for the AI Port to push that camera's video, which is not
-implemented, so the camera stops recording until it is unassigned.
+See [`docker/README.md`](docker/README.md).
+
+### ONVIF cameras
+
+Assigning a third-party (ONVIF) camera to the AI Port hands that camera's video
+ingest to the AI Port: Protect sends the camera's RTSP URL (`OnvifStreamControl`)
+and asks for each channel to be pushed to `tcp://<console>:7550` in Ubiquiti's
+`extendedFlv` format (`ChangeVideoSettings`). `piport/onvif_push.py` does that
+with one `ffmpeg -c:v copy` per channel (no re-encode), and the AI Port runs
+detection on the camera's stream like on a UniFi camera's.
+
+Verified on a Raspberry Pi 5 (Docker, Coral) with a Hikvision 4K camera and
+Protect 7.2: live view in the app and browser, recording, and smart-detect
+events.
+
+Limits:
+
+- **If the AI Port stops, the camera stops recording.** Protect no longer pulls
+  it; unassign the camera (or remove the AI Port) to hand ingest back.
+- Every channel carries the camera's main stream (no lower-resolution
+  channels); the resolution reported to Protect is probed from the stream.
+- Audio is AAC 32 kHz mono (silent if the camera has none). Protect asks for
+  Opus, which plain FLV cannot carry.
+- Each channel and the detector open their own RTSP session to the camera; some
+  cameras limit concurrent logins (Hikvision answers `401` past its limit).
+- On a Pi 5 the camera's H.264 is decoded in software for detection (~half a
+  core for 4K at 12 fps).
 
 The older x86 Docker variant (`piport/x86/`) lives on the `experimental`
 branch.
@@ -339,9 +364,9 @@ Device identity, network mode and the console address live in
 - **Known:** detection is a stock COCO model (person/vehicle/animal), not
   Ubiquiti's classifier; face recognition, license-plate recognition and
   vehicle classification are not implemented.
-- **Known:** third-party (ONVIF) cameras are not supported. Protect hands their
-  video ingest to the AI Port (`extendedFlv` push to `:7550`), which is not
-  implemented; such a camera loses video until unassigned.
+- **Known:** an assigned ONVIF camera depends on the AI Port for its video
+  (no recording while the AI Port is down), gets the main stream on every
+  channel, and AAC instead of Opus audio.
 - **Known:** in the Docker setup the AI Port is only reachable from its own
   host, so it only suits a console running on that host.
 - **Planned:** stress-testing multiple cameras beyond the four-camera live setup.
@@ -351,7 +376,9 @@ Device identity, network mode and the console address live in
 - **Unreleased** — pluggable detector backends (`piport/detectors/`): RK3588
   NPU, Coral Edge TPU (Raspberry Pi 5) and CPU, chosen by `[hardware] detector`
   / `install.sh --accel`; a Docker setup for a console on the same host;
-  credentials masked in logs.
+  credentials masked in logs; third-party (ONVIF) cameras (video push to
+  Protect plus detection); real stream resolution reported to Protect; `leave`
+  events for open tracks are sent when a camera is stopped.
 - **Unreleased** — the console's firmware-update push (`UpdateFirmwareRequest`)
   is answered by pinning the target version and faking the reboot instead of
   flashing; every interface reports the pinned version.

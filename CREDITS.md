@@ -44,6 +44,11 @@ Third-party projects this repository references, derives from, or vendors. See
 
 ## Protocol research
 
+- **[keshavdv/unifi-cam-proxy](https://github.com/keshavdv/unifi-cam-proxy)**
+  (MIT) — the `extendedFlv` push format (`clock_sync.py`) that
+  `piport/onvif_push.py`'s `rewrite_flv()` follows, with corrected trailer
+  units. MIT text: [`LICENSES/MIT-unifi-cam-proxy.txt`](LICENSES/MIT-unifi-cam-proxy.txt).
+
 - **[rjmotion/pyunifiwire](https://github.com/rjmotion/pyunifiwire)** — UBNT L2
   discovery field/TLV notes.
 - **[danielwoz/ubiquiti-protect-onvif-event-listener](https://github.com/danielwoz/ubiquiti-protect-onvif-event-listener)**

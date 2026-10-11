@@ -148,6 +148,12 @@ python3 scripts/fetch_models.py --convert  # build .rknn (x86 host)
 
 For a containerized CPU install (x86 servers / Raspberry Pi 4/5) see `docker/README.md`.
 
+**Video decode** picks a hardware backend automatically, or by `AIPORT_HWDEC`
+(`auto`|`rkmpp`|`v4l2m2m`|`none`): `rkmpp` on the RK3588 (ffmpeg-rockchip), `v4l2m2m`
+on a Raspberry Pi (the bcm2835-codec decoder at `/dev/video10`, which also needs
+`/dev/vchiq`), else software. Hardware decode cuts ffmpeg's CPU sharply, but on a Pi 4
+the CPU detector then dominates -- see `docker/README.md` for the measured numbers.
+
 **Conversion must run on a separate x86_64 build host.** `rknn-toolkit-lite2` is the on-device,
 inference-only API (aarch64-only wheels for Python <= 3.12); it can only run an already-converted
 `.rknn`. Conversion needs full `rknn-toolkit2`, matching the on-Pi version. Two pins avoid known

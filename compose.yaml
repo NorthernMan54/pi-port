@@ -45,3 +45,17 @@ services:
     # Prefer a mounted cfg over env for the full identity/network surface:
     # volumes:
     #   - ./piport/aiport.cfg:/app/aiport.cfg:ro
+
+  # Optional dev status page (CPU/mem; the GPU/NPU panels are RK3588-only and
+  # stay blank on x86/Pi). Browsable at http://<host>:8090 -- NO auth, trusted
+  # LAN only. Remove this service if you do not want it.
+  webui:
+    image: piport-cpu
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: piport-webui
+    network_mode: host
+    restart: unless-stopped
+    entrypoint: ["python3", "sysinfo_server.py"]
+    command: ["--bind-ip", "0.0.0.0", "--port", "8090"]

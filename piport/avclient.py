@@ -57,14 +57,37 @@ _stream_restart_count = {}
 # clockMonotonic/clockStream on that device's EventSmartDetect payloads.
 _stream_started_monotonic_ms = {}
 
-# Prefer ffmpeg-rockchip (H.264 via RKVDEC; mainline rkmpp wedges when MPP's queue
-# fills); fall back to system ffmpeg.
+# Hardware video decode. Two backends, chosen automatically or forced with
+# AIPORT_HWDEC (auto|rkmpp|v4l2m2m|none); falls back to ffmpeg's software decoder.
+#   rkmpp    -- Rockchip ffmpeg (ffmpeg-rkmpp) on the RK3588, H.264/HEVC via RKVDEC.
+#               Mainline rkmpp wedges when MPP's queue fills, hence the custom build.
+#   v4l2m2m  -- generic ffmpeg's V4L2 mem2mem wrapper on a Raspberry Pi
+#               (bcm2835-codec). The decoder is /dev/video10 and it drives the VPU
+#               firmware through /dev/vchiq, so BOTH must be exposed to a container.
 FFMPEG_BIN = ("/usr/local/ffmpeg-rkmpp/bin/ffmpeg"
               if os.path.exists("/usr/local/ffmpeg-rkmpp/bin/ffmpeg") else "ffmpeg")
-_HWDEC_CODECS = {"h264": "h264_rkmpp", "hevc": "hevc_rkmpp"}
+_HWDEC_BACKENDS = {
+    "rkmpp": {"h264": "h264_rkmpp", "hevc": "hevc_rkmpp"},
+    "v4l2m2m": {"h264": "h264_v4l2m2m", "hevc": "hevc_v4l2m2m"},
+}
 _FFPROBE_BIN = os.path.join(os.path.dirname(FFMPEG_BIN), "ffprobe") \
     if FFMPEG_BIN != "ffmpeg" and os.path.exists(os.path.join(os.path.dirname(FFMPEG_BIN), "ffprobe")) \
     else "ffprobe"
+
+
+def _detect_hwdec():
+    """Active hardware-decode backend name, or None for software."""
+    forced = os.environ.get("AIPORT_HWDEC", "auto").strip().lower()
+    if forced in ("none", "sw", "software"):
+        return None
+    if forced in _HWDEC_BACKENDS:
+        return forced
+    if FFMPEG_BIN != "ffmpeg":
+        return "rkmpp"
+    # Raspberry Pi: the bcm2835-codec decoder is /dev/video10 and needs VCHIQ.
+    if os.path.exists("/dev/video10") and os.path.exists("/dev/vchiq"):
+        return "v4l2m2m"
+    return None
 
 
 def _probe_codec(url, timeout=8):
@@ -80,12 +103,13 @@ def _probe_codec(url, timeout=8):
 
 
 def _hwdec_args(codec):
-    """Input decoder args: rkmpp decoder matching the stream codec; empty (ffmpeg's
-    auto-selected software decoder) without ffmpeg-rockchip or for an unknown codec.
-    Unknown/failed probe assumes h264, the historical default."""
-    if FFMPEG_BIN == "ffmpeg":
+    """Input decoder args for the active hardware backend, or empty (ffmpeg's
+    auto-selected software decoder). Unknown/failed probe assumes h264, the
+    historical default."""
+    backend = _detect_hwdec()
+    if not backend:
         return []
-    dec = _HWDEC_CODECS.get(codec or "h264")
+    dec = _HWDEC_BACKENDS[backend].get(codec or "h264")
     return ["-c:v", dec] if dec else []
 
 # Real detection: per-tick YOLOv5s/RKNN classify the latest frame; objects are

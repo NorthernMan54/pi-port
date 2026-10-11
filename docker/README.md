@@ -48,6 +48,14 @@ four components are alive -- no console or camera required:
 It broadcasts discovery on the host LAN and binds `:443`/`:10001`, so run it only on a
 box and network you control.
 
+## Status web UI (optional)
+
+`compose.yaml` includes a `webui` service that runs `sysinfo_server.py` on `:8090`
+(`http://<host>:8090`): CPU per-core + memory. It has **no auth** -- LAN use only. The
+GPU/NPU panels read RK3588-only sysfs paths and stay blank on x86/Pi, and the
+instance create/destroy buttons are `instance_manager` (board) features, so ignore them
+off-board. Remove the `webui` service from the compose file if you do not want it.
+
 ## Importing into Komodo
 
 The repo-root `compose.yaml` is the Komodo Stack file (Komodo clones the repo and runs
@@ -147,6 +155,7 @@ host networking:
   push pinned to 5.1.16 (fake update), four cameras paired, RTSP pulls running, the
   onnxruntime detector emitting a real `EventSmartDetect` (`person`, `edgeType: enter`) and
   a snapshot upload.
+- Status web UI (`sysinfo_server.py` on `:8090`) serves on the Pi (GPU/NPU blank).
 
 Untested:
 - macvlan networking end to end (the config validates; no live LAN test).
@@ -156,6 +165,22 @@ Untested:
   RK3588 board avoids this (decode and inference on separate hardware blocks).
 - The known RTSP restart loop (`todo.md` #5) still occurs (~`Failed reading RTSP data:
   End of file` then auto-restart) -- pre-existing, not container-specific.
+
+## Raspberry Pi hardware decode (not in the container yet)
+
+The Pi 4/5 exposes an H.264/HEVC decoder via V4L2 M2M (`bcm2835-codec`, `/dev/video10`,
+driven through `/dev/vchiq`); `avclient.py` selects it automatically on bare metal
+(`AIPORT_HWDEC=v4l2m2m`), which cuts ffmpeg's decode CPU ~4-5x. Two caveats we found on
+the Pi 4:
+
+- **In a container it stalls.** Passing `/dev/video10` + `/dev/vchiq` lets the *decoder*
+  open (a file decodes), but the live RTSP + filter-graph pipeline then produces no
+  frames (ffmpeg sits at ~0 CPU, no snapshots) -- the container lacks further VPU
+  plumbing. Treat container hardware decode as unsupported for now; bare metal works.
+- **Decode isn't the whole cost.** With hardware decode on 3 cameras, ffmpeg still used
+  ~1 core (driver + scale/mjpeg) and the CPU detector ~2.2 cores, so the Pi 4 stayed
+  saturated. Hardware decode is necessary for headroom but not sufficient; the detector
+  is the remaining bottleneck.
 
 ## A gotcha worth knowing
 

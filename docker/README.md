@@ -131,21 +131,32 @@ QEMU/binfmt (`docker run --privileged --rm tonistiigi/binfmt --install arm64`).
 
 ## Confirmed vs. untested
 
-Confirmed (this repo, x86_64):
+Confirmed on x86_64:
 - `docker build` succeeds; the sha-pinned model downloads and verifies.
 - Host-network smoke test: all four components come up, discovery answers real console
   probes on the LAN, and the control API binds `:443`.
 - `onnxruntime` inference on a still image: 3 person + 1 vehicle on the stock `bus.jpg`.
-- The arm64 dependency set resolves (base image is multi-arch; `onnxruntime` 1.31.0
-  publishes `cp311` `manylinux_2_28_aarch64` wheels; `ffmpeg`/`iproute2` are standard
-  Debian arm64 packages).
+
+Confirmed on a real Raspberry Pi 4 Model B (Debian 13, aarch64, 2026-10-11):
+- `docker build` succeeds on arm64 (~9 min cold; `onnxruntime` 1.31.0 aarch64).
+- Host-network smoke test PASS: all four components, `:443` bound, and discovery answered
+  real console probes (`10.10.10.5`/`.61`/`10.10.10.1`) on the LAN.
+- In-container inference: 3 person + 1 vehicle on `bus.jpg`, ~368 ms/frame (~2.7 fps) on
+  the Cortex-A72 -- fine for the 1.5 s poll loop over a few cameras, not a 4-camera
+  real-time budget with margin.
 
 Untested:
-- A full arm64 image build and run on real Pi 4 / Pi 5 hardware (this host has no arm64
-  emulation, so the emulated build's `RUN` steps cannot execute -- the base image and
-  wheels resolve, but the actual Pi run is unverified).
-- Real cameras / real RTSP frames through the live capture pipeline.
+- Actual adoption/pairing against the console (needs a console-side action) and real
+  cameras / RTSP frames through the live capture pipeline.
 - macvlan networking end to end (the config validates; no live LAN test).
 - CPU contention between `onnxruntime` and software `ffmpeg` decode under a 4-camera
   load. The RK3588 variant does not have this: decode and inference run on separate
   hardware blocks (RKVDEC + NPU).
+
+## A gotcha worth knowing
+
+`.dockerignore` patterns without a `/` match only the context **root**, not
+subdirectories: `*.key` does not exclude `piport/server.key`. A stale `server.crt`/
+`server.key` left in `piport/` by a bare-metal run was therefore baked into the image and
+made every container fail `ssl load_cert_chain` (`[SSL] PEM lib`). The ignore rules use
+`**/` so runtime state under `piport/` can never ship.

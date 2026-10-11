@@ -41,5 +41,5 @@
   <text class="s" x="140" y="280">http_api.py    HTTPS :443 adopt / snapshot API</text>
   <text class="s" x="140" y="298">ucp4_client.py management WebSocket</text>
   <text class="s" x="400" y="262">avclient.py   pairing, events, RTSP pull</text>
-  <text class="s" x="400" y="280">detector.py   YOLOv5 on the NPU</text>
+  <text class="s" x="400" y="280">detectors/    YOLOv5 on NPU / TPU</text>
 </svg>

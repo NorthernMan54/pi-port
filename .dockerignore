@@ -1,0 +1,19 @@
+**/.git
+**/.venv
+**/__pycache__
+**/*.pyc
+# Runtime state and secrets never belong in the image.
+piport/instances/
+**/adopt_state.json*
+**/fw_version.json
+**/device_name
+**/*.key
+**/*.pem
+**/*.crt
+**/*.bak-preinstall
+# Model binaries: the image fetches its own (sha256-pinned).
+**/*.onnx
+**/*.rknn
+**/*.tflite
+rknn_convert/
+docs/

@@ -57,7 +57,7 @@ additions. All of the following was confirmed live against a real console.
 | `http_api.py` | HTTPS `:443`: `/api/1.2/manage`, `/api/1.2/login`, `/api/1.2/status`, `/api/1.2/snapshot`. |
 | `ucp4_client.py` | Generic `ucp4` device-management WebSocket client (adoption, `getInfo`). |
 | `avclient.py` | Classic per-camera avclient client: pairing, detection/classification, `EventSmartDetect` / `EventFeatureFlagsUpdated` pushes, snapshot upload. Most real behavior lives here. |
-| `detector.py` | Wraps `RKNNLite` running a quantized YOLOv5s model on the RK3588 NPU. |
+| `detectors/` | Pluggable detection backends selected by `[hardware] detector`: `rknn` (RK3588 NPU), `edgetpu` (Coral USB/PCIe), `cpu` (onnxruntime). `postprocess.py` holds the shared YOLOv5 decode/NMS and COCO → person/vehicle/animal mapping. |
 | `run_all.py` | Launches all of the above together. |
 | `sysinfo_server.py` | Board system monitor / multi-instance web UI (CPU, memory, GPU, NPU); not part of the protocol. |
 | `instance_manager.py` | Manages multiple reboot-surviving emulator instances as systemd units (macvlan or physical). |
@@ -150,7 +150,7 @@ pip install onnx==1.16.1   # repin; rknn-toolkit2 may upgrade onnx
 ```
 
 `fetch_models.py` places `yolov5s_relu.rknn`, `anchors_yolov5.txt`, and `coco_80_labels_list.txt`
-in `models/` next to `detector.py`.
+in `models/`.
 
 - **System `librknnrt.so` upgrade (required).** The stock OS ships runtime 1.4.0 (2022), which
   cannot load models built by `rknn-toolkit2==2.3.2` (`Invalid RKNN model version 6`). Replace
@@ -158,12 +158,37 @@ in `models/` next to `detector.py`.
   `scripts/install.sh` does this. `RKNNLite().init_runtime()` should then log version 2.3.2.
 - **Explicit batch dimension.** `RKNNLite.inference()` needs `frame[np.newaxis, ...]` (shape
   `(1,H,W,3)`) or it fails with `"need 4dims input, but 3dims input buffer feed"`. Handled in
-  `detector.py`.
+  `detectors/rknn.py`.
+
+## Object detection (Coral Edge TPU, e.g. Raspberry Pi 5)
+
+`detectors/edgetpu.py` runs Google's SSDLite MobileDet COCO model (320x320 uint8, decode and NMS
+in-graph, the model Frigate ships) on a Coral via `ai-edge-litert` and the `libedgetpu` delegate;
+pycoral is not used (it has no wheels past Python 3.9). `scripts/install.sh --accel edgetpu` does
+the setup below.
+
+- **Runtime pairing.** Google's own `libedgetpu` apt repo stopped in 2021. feranick's maintained
+  `libedgetpu1-std` 16.0 (built against TF 2.19.1) works with `ai-edge-litert` 2.3.0 on Pi OS
+  trixie / Python 3.13 (verified on a Pi 5). `tflite-runtime` has no Python 3.13 wheels.
+- **`std`, not `max`.** The max-clock build runs the USB stick very hot.
+- **USB ids.** The Coral enumerates as `1a6e:089a` until libedgetpu uploads its firmware on first
+  open, then as `18d1:9302`.
+- **"Failed to load delegate" with no message** (verbose libedgetpu logs show `USB error -7
+  [GetDeviceDescriptor]`): the stick stopped answering on USB, typically after an earlier failed
+  open. Unplug and replug it; no driver install fixes this.
+- **USB 2 vs 3.** The Pi 5 has only two USB 3 ports. On USB 2 MobileDet takes ~33 ms per frame
+  (measured); USB 3 is faster (not measured here). Either is far below the 1.5 s detection tick.
+  The web UI shows the Coral's link speed.
+- **PCIe/M.2 Coral** additionally needs the `gasket`/`apex` kernel driver (and, on a Pi 5, the
+  4K-page kernel); not handled by the installer.
+- **No H.264 hardware decode on the Pi 5** (only HEVC), so camera streams are decoded on the CPU.
+
+## Stream pipeline
 
 `avclient.py` runs one ffmpeg process per paired camera that pulls the RTSP stream and uses
 `filter_complex split=2` for both outputs from a single decode: a 1/2-fps JPEG still (snapshots)
-and 2-fps 640x640 raw RGB frames piped to Python for classification (no image-decode library
-needed). A background loop classifies the latest frame every 1.5s (`MOTION_POLL_INTERVAL_S`): a
+and 2-fps raw RGB frames at the detector's input size (640x640 RKNN/CPU, 320x320 Edge TPU) piped
+to Python for classification (no image-decode library needed). A background loop classifies the latest frame every 1.5s (`MOTION_POLL_INTERVAL_S`): a
 detection opens (`"enter"`) or refreshes (`"moving"`) a track, and a track closes (`"leave"`)
 only after `MOTION_MISS_TOLERANCE_TICKS` (20, ~30s) of **consecutive** empty ticks. Simultaneous
 objects are tracked independently and matched frame-to-frame by bounding-box IOU within each type.

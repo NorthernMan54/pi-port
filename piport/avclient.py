@@ -104,8 +104,9 @@ IOU_MATCH_THRESHOLD = 0.3
 # Paired camera's smartDetectZones row id -- zonesStatus's key must match it (not always "1").
 SMART_DETECT_ZONE_ID = "1"
 
-# RK3588 NPU YOLOv5s (detector.py); ffmpeg decodes to 640x640 raw RGB, latest frame only.
-_latest_frame = {}   # deviceID -> HxWx3 uint8 numpy array (640x640, RGB)
+# Detector backend (detectors/); ffmpeg decodes to its square input size as raw RGB,
+# latest frame only.
+_latest_frame = {}   # deviceID -> HxWx3 uint8 numpy array (DETECT_IMG_SIZE square, RGB)
 _frame_lock = threading.Lock()
 _stream_dims = {}    # deviceID -> (width, height) of the real camera stream
 # deviceID -> exclusion polygons in the normalized 0-1000 space.
@@ -125,7 +126,9 @@ SNAPSHOT_FALLBACK_WINDOW_S = 60
 _recent_snapshot_announcements = collections.deque(maxlen=32)
 # deviceID -> last announced per-object coord, so a filename-less fallback can still crop.
 _last_object_coord_by_device = {}
-DETECT_IMG_SIZE = 640  # must match detector.py's IMG_SIZE
+# Side of the square frames ffmpeg feeds the detector; _get_detector() sets it from
+# the loaded backend's input_size (640 RKNN/CPU, typically 320 Edge TPU).
+DETECT_IMG_SIZE = 640
 # Per-object snapshot: square crop centered on the detection, ffmpeg-scaled to this size.
 SMART_SNAPSHOT_SIZE = 512
 SMART_SNAPSHOT_MARGIN = 1.6
@@ -133,14 +136,19 @@ SMART_SNAPSHOT_MARGIN = 1.6
 CAMERA_COORD_END = 1000
 _detector = None
 _detector_lock = threading.Lock()
+# [hardware] detector / detector_model, set by main(); see detectors/__init__.py.
+DETECTOR_BACKEND = "auto"
+DETECTOR_MODEL = None
 
 
 def _get_detector():
-    global _detector
+    global _detector, DETECT_IMG_SIZE
     with _detector_lock:
         if _detector is None:
-            from detector import Detector
-            _detector = Detector()
+            import detectors
+            _detector = detectors.create(DETECTOR_BACKEND, DETECTOR_MODEL)
+            # Streams started from here on decode at the backend's input size.
+            DETECT_IMG_SIZE = _detector.input_size
         return _detector
 
 
@@ -292,16 +300,22 @@ def _classify_frame_detections(device_id):
     [] if none."""
     with _frame_lock:
         frame = _latest_frame.get(device_id)
-    if frame is None:
+    if frame is None or DETECTOR_BACKEND == "none":
         return []
     try:
         detector = _get_detector()
+        if frame.shape[1] != detector.input_size:
+            # Stream predates a late detector load at a different size; the
+            # next stream restart picks up the right one.
+            log.debug("deviceID=%s frame %dpx != detector input %dpx; skipping tick",
+                      device_id, frame.shape[1], detector.input_size)
+            return []
         results = detector.detect(frame)
     except Exception:
         log.exception("classification failed for deviceID=%s", device_id)
         return []
-    # Detector's 640 buffer is a resolution-independent stretch, so scale straight to 0-1000.
-    s = CAMERA_COORD_END / DETECT_IMG_SIZE
+    # The detector's square buffer is a resolution-independent stretch, so scale straight to 0-1000.
+    s = CAMERA_COORD_END / frame.shape[1]
     out = []
     for r in results:
         x1, y1, x2, y2 = r["box"]
@@ -428,7 +442,7 @@ def _process_line_crossings(ws, device_id, tracker_id, tr, new_center):
 
 def _dedupe_detections(detections, iou_thresh=0.4):
     """Collapse same-type detections that heavily overlap into one (highest
-    score wins). Per-class NMS in detector.py uses NMS_THRESH 0.45, but two
+    score wins). Per-class NMS in detectors/postprocess.py uses NMS_THRESH 0.45, but two
     boxes for ONE object can still survive it (e.g. a full-body box plus a
     partial/torso box with IoU just under the gate) -- observed live as two
     `person detected` ticks 1ms apart at scores 0.67/0.51 for the same person.
@@ -1301,6 +1315,24 @@ def run(host, port, device_info, token=None):
             handle_function(ws, msg, device_info)
 
 
+def _init_detector(cfg):
+    """Load the configured detector up front so ffmpeg is started at its input
+    size. A failure is logged, not fatal: the device still pairs and relays
+    snapshots, and classification retries the load each tick."""
+    global DETECTOR_BACKEND, DETECTOR_MODEL
+    DETECTOR_BACKEND = os.environ.get("AIPORT_DETECTOR") or cfg.get("detector") or "auto"
+    DETECTOR_MODEL = os.environ.get("AIPORT_MODEL_PATH") or cfg.get("detector_model") or None
+    if DETECTOR_BACKEND.strip().lower() == "none":
+        DETECTOR_BACKEND = "none"
+        log.info("detector backend 'none': object detection disabled")
+        return
+    try:
+        _get_detector()
+    except Exception:
+        log.exception("detector backend %r failed to load; detection disabled until it does",
+                      DETECTOR_BACKEND)
+
+
 def main():
     cfg = config.load_config_and_logging(sys.argv[1:])
     ap = argparse.ArgumentParser(description=__doc__)
@@ -1369,6 +1401,8 @@ def main():
 
     # Single-use token: present on first connect after adopt, omitted on later reconnects.
     used_tokens = set()
+
+    _init_detector(cfg)
 
     pinned = config.pinned_fw_version(STATE_DIR)
     if pinned:

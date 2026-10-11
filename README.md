@@ -40,7 +40,7 @@ sudo scripts/install.sh --console <console-ip> [--parent-iface <iface>]
 |  |  |
 | --- | --- |
 | **What** | Emulates the UniFi Protect AI Port device role on an RK3588 board |
-| **Hardware** | Orange Pi 5 Plus (RK3588) |
+| **Hardware** | Orange Pi 5 Plus (RK3588 NPU); Raspberry Pi 5 + Coral USB Edge TPU |
 | **Protocol / interface** | UBNT discovery UDP/10001; mTLS WSS :7442 (`ucp4` + classic avclient); RTSP relay :7447 |
 | **Language** | Python 3 |
 | **Status** | Working against a real Protect console — 4 cameras paired and streamed concurrently |
@@ -52,7 +52,7 @@ sudo scripts/install.sh --console <console-ip> [--parent-iface <iface>]
 | --- | --- | --- |
 | **What it is** | Ubiquiti AI Port appliance (Ambarella) | This repo's Python, on an Orange Pi 5 Plus (RK3588) |
 | **Firmware** | Ubiquiti, signed | None — the emulator itself |
-| **Detection model** | Ubiquiti's own classifier | Stock YOLOv5 (person/vehicle/animal), RKNN on the NPU |
+| **Detection model** | Ubiquiti's own classifier | Stock COCO detector mapped to person/vehicle/animal: YOLOv5s on the RK3588 NPU, or SSDLite MobileDet on a Coral |
 | **Output** | Full Ubiquiti product behaviour | The subset this project implements |
 
 It is a protocol-compatible stand-in built on the same shared camera/chime
@@ -76,7 +76,7 @@ paired, the console hands the board an RTSP URL on its own internal relay
 | `http_api.py` | Python | HTTPS :443 adopt / control / snapshot API |
 | `ucp4_client.py` | Python | Generic `ucp4` device-management WebSocket |
 | `avclient.py` | Python | Pairing, streaming and smart-detect WebSocket + detection loop |
-| `detector.py` | Python | YOLOv5 inference wrapper (RKNN / NPU) |
+| `detectors/` | Python | Pluggable YOLOv5 backends: RKNN (NPU), Edge TPU (Coral), CPU |
 | `sysinfo_server.py` | Python | Dev-box CPU/mem/GPU/NPU status page (`webui.html`) |
 | `instance_manager.py`, `run_all.py` | Python | Multi-instance orchestration |
 
@@ -86,6 +86,13 @@ paired, the console hands the board an RTSP URL on its own internal relay
 | --- | --- | --- | --- |
 | Orange Pi 5 Plus | RK3588 | Verified | The target board; 4 real cameras paired and streamed concurrently |
 | Other RK3588 boards | RK3588 | Untested | Should work; the NPU and ffmpeg paths are RK3588-specific |
+| Raspberry Pi 5 + Coral USB | BCM2712 + Edge TPU | Partly verified | Detector verified on Pi OS trixie (MobileDet, ~33 ms/frame with the Coral on USB 2); adopt/pair against a console not yet run. No H.264 hardware decode on the Pi 5, so camera streams decode on the CPU |
+| Any Linux box | CPU (`onnxruntime`) | Untested | `--accel cpu`; fine for a camera or two |
+
+The detector is pluggable (`piport/detectors/`, `[hardware] detector` in
+`aiport.cfg`): `rknn`, `edgetpu`, `cpu`, or `auto`, which takes the first one
+whose runtime, hardware and model are present. A new accelerator is one
+`base.Detector` subclass.
 
 ## Features
 
@@ -93,8 +100,9 @@ paired, the console hands the board an RTSP URL on its own internal relay
   connections a real console expects.
 - **Camera pairing and video relay** — pairs real cameras and pulls their stream
   from Protect's internal RTSP relay.
-- **Real NPU object detection** — YOLOv5 → RKNN on the RK3588 NPU
-  (person/vehicle/animal), not a placeholder.
+- **Real object detection on an accelerator** — YOLOv5 → RKNN on the RK3588
+  NPU, or SSDLite MobileDet on a Coral Edge TPU (person/vehicle/animal), not a
+  placeholder.
 - **Detection events with thumbnails** — `EventSmartDetect` with per-object
   snapshots and Full-FoV images, plus the overview/timeline thumbnails.
 - **Multi-instance** — one reboot-surviving systemd unit and macvlan interface
@@ -104,9 +112,12 @@ paired, the console hands the board an RTSP URL on its own internal relay
 
 ## Requirements
 
-- Orange Pi 5 Plus (or another RK3588 board) running Linux, with root — the
-  emulator binds UDP/10001 and TCP/443.
-- Python 3, and `rknn-toolkit-lite2` on the board for NPU inference.
+- Orange Pi 5 Plus (or another RK3588 board), or a Raspberry Pi 5 with a Coral
+  USB Edge TPU, running Linux, with root — the emulator binds UDP/10001 and
+  TCP/443.
+- Python 3 (3.13 on Pi OS trixie works), plus the backend's runtime, which the
+  installer adds: `rknn-toolkit-lite2` (NPU), or `ai-edge-litert` +
+  `libedgetpu` (Coral).
 - A UniFi Protect console you own and control, on the same LAN.
 - For model conversion: an x86_64 Linux host with `rknn-toolkit2` (the RKNN
   converter does not run on the board).
@@ -119,7 +130,7 @@ piport/            the emulator (RK3588 / Orange Pi)
   http_api.py        HTTPS :443 adopt/control API
   ucp4_client.py     generic ucp4 device-management websocket
   avclient.py        pairing/streaming/smart-detect websocket + detection
-  detector.py        YOLOv5 inference wrapper (RKNN / NPU)
+  detectors/         pluggable YOLOv5 backends (rknn / edgetpu / cpu)
   sysinfo_server.py  dev-box CPU/mem/GPU/NPU status page (+ webui.html)
   models/            anchors + COCO labels (model binaries fetched, not stored)
   instance_manager.py / run_all.py  multi-instance orchestration
@@ -145,11 +156,17 @@ sudo scripts/install.sh --console <UNVR-IP> [--parent-iface <iface>]
 
 - Run from the checkout root, as root. `--parent-iface` defaults to the
   auto-detected default-route NIC.
+- `--accel auto|rknn|edgetpu|cpu|none` picks the detector backend (default
+  `auto`: rknn on an RK3588, edgetpu when a Coral is plugged in, else cpu) and
+  installs only that backend's runtime and model. For `edgetpu` that is
+  feranick's `libedgetpu1-std` build for the distro (sha256-pinned) and
+  Google's MobileDet model; a PCIe/M.2 Coral additionally needs the `gasket`
+  kernel driver, which the installer does not set up.
 - The NPU model cannot be built on the Pi; build it on an x86 host
   (`scripts/fetch_models.py --convert`) or let the installer fetch it from
   `--rknn-url` / `PIPORT_RKNN_URL` / its default URL. `--rknn <path>` takes a
   local build, and a local `models-rknn/` submodule is also detected. Use
-  `--no-npu` for a CPU-only protocol-stack install.
+  `--accel none` (or `--no-npu`) for a protocol-stack-only install.
 - Opens the web UI on `:8090` (`--webui-port` to change) for board stats and
   instance management.
 
@@ -170,16 +187,17 @@ don't collide on `:443`.
 The installer automates the steps below; run them by hand if you prefer:
 
 ```bash
-# 1. Fetch the model assets into models/ (downloads ONNX + labels;
-#    --convert also builds the .rknn on an x86 box with rknn-toolkit2).
-python3 scripts/fetch_models.py
-python3 scripts/fetch_models.py --convert     # optional, x86 build host
+# 1. Fetch the model assets into models/.
+python3 scripts/fetch_models.py                     # RKNN: ONNX + labels
+python3 scripts/fetch_models.py --convert           # optional, x86 build host
+python3 scripts/fetch_models.py --backend edgetpu   # Coral: MobileDet .tflite
 
-# 2. Install runtime dependencies.
+# 2. Install runtime dependencies (one backend's).
 pip install -r piport/requirements.txt
-pip install rknn-toolkit-lite2
+pip install rknn-toolkit-lite2      # RK3588 NPU
+pip install ai-edge-litert          # Coral (plus libedgetpu1-std, see install.sh)
 
-# 3. Set device identity and your console IP.
+# 3. Set device identity, your console IP and [hardware] detector.
 $EDITOR piport/aiport.cfg
 
 # 4. Run (needs root).
@@ -226,29 +244,44 @@ so it is stable across reboots. `create --ip X.Y.Z.W` uses a static address
 instead of DHCP. The web UI (`sysinfo_server.py`) can also create/destroy
 instances.
 
-### x86 / Docker variant
+### Docker (console on the same host)
 
-The x86/no-NPU Docker variant is not part of `main`; it is maintained on the
-`experimental` branch (`piport/x86/`, onnxruntime on CPU):
+When the Protect console itself runs on the board (e.g. the
+`dciancu/unifi-protect-unvr-docker-arm64` container), `install.sh` cannot work:
+the console already holds `:443`, and a macvlan interface cannot talk to its
+own host. `docker/` runs the emulator in a container on a private bridge
+network instead (Coral or CPU detector):
 
 ```bash
-git switch experimental
+cd docker && echo "AIPORT_CONSOLE=<console-ip>" > .env && docker compose up -d --build
 ```
+
+See [`docker/README.md`](docker/README.md). Either way, **only UniFi cameras
+are supported**: assigning a third-party (ONVIF) camera to the AI Port makes
+Protect wait for the AI Port to push that camera's video, which is not
+implemented, so the camera stops recording until it is unassigned.
+
+The older x86 Docker variant (`piport/x86/`) lives on the `experimental`
+branch.
 
 ### Model assets (not tracked)
 
-The detector needs an open YOLOv5 model. Because the binaries are large and
-reproducible, they are not committed; `scripts/fetch_models.py` downloads them:
+Each backend needs an open model. Because the binaries are large and
+reproducible, they are not committed; `scripts/fetch_models.py` downloads them
+(`--backend rknn|edgetpu|cpu`), sha256-pinned where a single file:
 
 | Asset | Used by | Source |
 | --- | --- | --- |
+| `ssdlite_mobiledet_coco_qat_postprocess_edgetpu.tflite` (5.1 MiB) | `edgetpu` backend | Google Coral test data (Apache-2.0), the model Frigate ships: <https://github.com/google-coral/test_data> (`release-frogfish`) |
+| `yolov5n.onnx` (3.8 MiB) | `cpu` backend | Ultralytics YOLOv5 `v7.0` release (AGPL-3.0) |
 | `yolov5s_relu.onnx` (27.6 MiB) | RKNN conversion (`.rknn`) | Rockchip model zoo delivery: <https://ftrg.zbox.filez.com/v2/delivery/data/95f00b0fc900458ba134f8b180b3f7a1/examples/yolov5/yolov5s_relu.onnx> |
 | anchors, COCO labels, bus.jpg, calibration subset | RKNN conversion | <https://github.com/airockchip/rknn_model_zoo> (tag `v2.3.2`) |
 
-The experimental x86 variant additionally uses Ultralytics `yolov5n.onnx`
-(AGPL-3.0, same as the weights) and still accepts the Rockchip
-`yolov5s_relu.onnx` via `AIPORT_MODEL_PATH` (both output layouts are
-auto-detected); see that branch's README.
+The `cpu` backend also accepts the Rockchip `yolov5s_relu.onnx`, and the
+`edgetpu` backend an Ultralytics YOLOv5 Edge TPU export, via `[hardware]
+detector_model` / `AIPORT_MODEL_PATH`; output layouts are auto-detected.
+`piport/models/coco_90_labels.txt` (the MobileDet class ids) is Google's
+`coco_labels.txt`, Apache-2.0.
 
 `yolov5s_relu.rknn` is produced on an x86_64 machine with `rknn-toolkit2`
 (install from PyPI or the Rockchip GitHub release — see `rknn_convert/convert.py`
@@ -287,6 +320,8 @@ Device identity, network mode and the console address live in
 | `[identity] device_id` | per-instance | Persistent device UUID (must be unique per instance) |
 | `[network] iface` / `mode` / `ip` | auto / `dhcp` / — | Interface to bind, and `dhcp` or `static` addressing |
 | `[console] host` / `port` | — / `7442` | The Protect console to dial when not yet adopted |
+| `[hardware] detector` | `auto` | Detection backend: `auto`, `rknn`, `edgetpu`, `cpu` (env `AIPORT_DETECTOR` overrides) |
+| `[hardware] detector_model` | — | Model file for that backend; blank = its default in `models/` (env `AIPORT_MODEL_PATH`) |
 
 ## Verification
 
@@ -301,15 +336,22 @@ Device identity, network mode and the console address live in
 
 ## Roadmap / known limitations
 
-- **Known:** detection is stock YOLOv5 (person/vehicle/animal) on the RK3588 NPU,
-  not Ubiquiti's classifier; face recognition, license-plate recognition and
+- **Known:** detection is a stock COCO model (person/vehicle/animal), not
+  Ubiquiti's classifier; face recognition, license-plate recognition and
   vehicle classification are not implemented.
-- **Known:** the x86/no-NPU Docker variant is maintained on the `experimental`
-  branch and is not verified on real hardware.
+- **Known:** third-party (ONVIF) cameras are not supported. Protect hands their
+  video ingest to the AI Port (`extendedFlv` push to `:7550`), which is not
+  implemented; such a camera loses video until unassigned.
+- **Known:** in the Docker setup the AI Port is only reachable from its own
+  host, so it only suits a console running on that host.
 - **Planned:** stress-testing multiple cameras beyond the four-camera live setup.
 
 ## Changelog
 
+- **Unreleased** — pluggable detector backends (`piport/detectors/`): RK3588
+  NPU, Coral Edge TPU (Raspberry Pi 5) and CPU, chosen by `[hardware] detector`
+  / `install.sh --accel`; a Docker setup for a console on the same host;
+  credentials masked in logs.
 - **Unreleased** — the console's firmware-update push (`UpdateFirmwareRequest`)
   is answered by pinning the target version and faking the reboot instead of
   flashing; every interface reports the pinned version.

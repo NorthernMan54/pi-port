@@ -20,6 +20,7 @@ run_all.log
 *.img
 *.onnx
 *.rknn
+*.tflite
 /rknn_convert/.venv/
 /rknn_convert/*.whl
 /rknn_convert/bus.jpg
@@ -31,3 +32,6 @@ __pycache__/
 
 # Windows metadata
 *:Zone.Identifier
+
+# Docker compose local settings
+docker/.env

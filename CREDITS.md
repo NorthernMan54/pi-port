@@ -10,8 +10,11 @@ Third-party projects this repository references, derives from, or vendors. See
   `piport/models/anchors_yolov5.txt`,
   `piport/models/coco_80_labels_list.txt`, `rknn_convert/anchors_yolov5.txt`,
   `rknn_convert/coco_80_labels_list.txt` and `rknn_convert/coco_subset_20.txt`.
-  `detector.py`'s YOLOv5 post-processing and `rknn_convert/convert.py` are adapted
+  `detectors/postprocess.py`'s YOLOv5 post-processing and `rknn_convert/convert.py` are adapted
   from its example. Apache-2.0 text: [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt).
+
+- **[google-coral/test_data](https://github.com/google-coral/test_data)**
+  (Apache-2.0) — `piport/models/coco_90_labels.txt` is its `coco_labels.txt`.
 
 ## Detection model
 
@@ -19,6 +22,19 @@ Third-party projects this repository references, derives from, or vendors. See
   the detection architecture. The converted `.rknn` is an AGPL-3.0 derivative of
   YOLOv5s, so redistributed model binaries carry AGPL-3.0, the same license as
   this project.
+
+- **Google SSDLite MobileDet COCO Edge TPU model**
+  ([google-coral/test_data](https://github.com/google-coral/test_data),
+  Apache-2.0) — the `edgetpu` backend's default model, downloaded at install
+  time, not stored here.
+
+## Runtime dependencies (installed, not vendored)
+
+- **[feranick/libedgetpu](https://github.com/feranick/libedgetpu)**
+  (Apache-2.0) — maintained build of Google's Edge TPU runtime; `install.sh`
+  installs its `libedgetpu1-std` package for the `edgetpu` backend.
+- **[ai-edge-litert](https://pypi.org/project/ai-edge-litert/)** (Apache-2.0) —
+  Google's TFLite runtime, which loads the Edge TPU delegate.
 
 ## Non-free, not distributed
 

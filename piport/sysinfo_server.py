@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 hutchx86
-"""Minimal dev-box system monitor for the Orange Pi running this emulator
-(NOT part of the AI Port protocol). Shows CPU/memory/GPU/NPU usage in a
-browser. Stdlib-only (http.server).
+"""Minimal dev-box system monitor for the board running this emulator
+(NOT part of the AI Port protocol). Shows CPU/memory/GPU/accelerator usage in
+a browser. Stdlib-only (http.server).
 
-Board-specific sysfs paths (Orange Pi 5 Plus / RK3588):
-  CPU:  /proc/stat
-  Mem:  /proc/meminfo
-  GPU:  /sys/devices/platform/fb000000.gpu/utilisation (0-100)
-  NPU:  /sys/kernel/debug/rknpu/load (three cores, needs root)
+Sources (board-specific ones are simply n/a elsewhere):
+  CPU:   /proc/stat
+  Mem:   /proc/meminfo
+  GPU:   /sys/devices/platform/fb000000.gpu/utilisation (RK3588 Mali, 0-100)
+  NPU:   /sys/kernel/debug/rknpu/load (RK3588, three cores, needs root)
+  Coral: USB ids / /dev/apex_0 -- presence and link speed only; the Edge TPU
+         exposes no load counter
+  Board: /proc/device-tree/model
 """
 import argparse
+import glob
 import json
 import os
 import re
@@ -28,6 +32,9 @@ GPU_UTIL_PATH = "/sys/devices/platform/fb000000.gpu/utilisation"
 NPU_LOAD_PATH = "/sys/kernel/debug/rknpu/load"
 
 _NPU_CORE_RE = re.compile(r"Core\d+:\s*(\d+)%")
+BOARD_MODEL_PATH = "/proc/device-tree/model"
+# Same ids as detectors/edgetpu.py (not imported: that pulls in numpy).
+_CORAL_USB_IDS = {("1a6e", "089a"): False, ("18d1", "9302"): True}  # -> firmware loaded
 
 # Two /proc/stat samples needed for a CPU delta; keep previous across requests.
 _prev_cpu_total = None
@@ -128,6 +135,29 @@ def _npu_percent():
     return {"average": round(sum(cores) / len(cores), 1), "cores": cores}
 
 
+def _coral_status():
+    """{"bus", "speed_mbps", "firmware_loaded"} for the first Coral found, or None."""
+    for dev in glob.glob("/sys/bus/usb/devices/*"):
+        vendor = _read_file(os.path.join(dev, "idVendor"))
+        product = _read_file(os.path.join(dev, "idProduct"))
+        if vendor is None or product is None:
+            continue
+        loaded = _CORAL_USB_IDS.get((vendor.strip(), product.strip()))
+        if loaded is None:
+            continue
+        speed = (_read_file(os.path.join(dev, "speed")) or "").strip()
+        return {"bus": "usb", "speed_mbps": int(float(speed)) if speed else None,
+                "firmware_loaded": loaded}
+    if os.path.exists("/dev/apex_0"):
+        return {"bus": "pcie", "speed_mbps": None, "firmware_loaded": True}
+    return None
+
+
+def _board_model():
+    text = _read_file(BOARD_MODEL_PATH)
+    return text.strip("\0\n ") if text else None
+
+
 def collect_stats():
     mem_used_mb, mem_total_mb, mem_pct = _mem_stats()
     return {
@@ -139,6 +169,8 @@ def collect_stats():
         "mem_percent": mem_pct,
         "gpu_percent": _gpu_percent(),
         "npu": _npu_percent(),
+        "coral": _coral_status(),
+        "board": _board_model(),
     }
 
 

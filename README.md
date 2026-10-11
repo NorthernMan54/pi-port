@@ -193,11 +193,47 @@ AIPORT_CONSOLE_HOST=<console-ip> docker compose up -d --build
 IP/MAC for several instances on one host. See [`docker/README.md`](docker/README.md)
 for Komodo import, networking caveats, and the confirmed/untested matrix.
 
+### Raspberry Pi (bare metal, optional)
+
+The Docker stack above is the recommended Pi path and is the same command as
+x86. Run bare metal only if you want the Pi 4's hardware H.264 decode (it stalls
+inside a container) or no Docker. Differences from the RK3588 board: **no NPU**,
+so install `onnxruntime` instead of `rknn-toolkit-lite2`, and there is **no
+`.rknn`** — the CPU `yolov5n.onnx` is used.
+
+```bash
+sudo apt-get install -y ffmpeg python3-venv
+python3 -m venv venv
+venv/bin/pip install -r piport/requirements.txt onnxruntime
+python3 scripts/fetch_models.py                 # downloads yolov5n.onnx
+$EDITOR piport/aiport.cfg                        # set [console] host (+ identity)
+sudo venv/bin/python piport/run_all.py --iface <iface> [--state-dir <dir>]
+```
+
+`detector.py` selects the onnxruntime backend automatically. On a **Pi 4** it also
+enables `h264_v4l2m2m` hardware decode; on a **Pi 5** it does not (no H.264
+hardware decoder — it software-decodes, which the faster CPU handles). For reboot
+survival, wrap `run_all.py` in a systemd unit with `KillMode=control-group`:
+
+```ini
+[Unit]
+Description=UniFi AI Port emulator
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+ExecStart=/opt/pi-port/venv/bin/python /opt/pi-port/piport/run_all.py --iface <iface> --state-dir /var/lib/pi-port
+Restart=on-failure
+KillMode=control-group
+[Install]
+WantedBy=multi-user.target
+```
+
 ### Manual install
 
 ```bash
 python3 scripts/fetch_models.py               # model assets (--convert builds the .rknn, x86)
-pip install -r piport/requirements.txt        # + rknn-toolkit-lite2 on the RK3588
+pip install -r piport/requirements.txt        # + rknn-toolkit-lite2 (RK3588 NPU) or onnxruntime (CPU)
 $EDITOR piport/aiport.cfg                     # device identity + console IP
 sudo python3 piport/run_all.py --iface <iface>
 ```

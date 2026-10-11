@@ -282,7 +282,21 @@ class _OnnxBackend:
         self._labels = _load_labels()
         self._anchors = _load_anchors()
         self.model_path = os.environ.get("AIPORT_MODEL_PATH") or ONNX_MODEL_PATH
-        self._session = ort.InferenceSession(self.model_path, providers=["CPUExecutionProvider"])
+        so = ort.SessionOptions()
+        # YOLOv5 is one sequential graph: no inter-op parallelism needed.
+        so.inter_op_num_threads = 1
+        intra = os.environ.get("AIPORT_ORT_INTRA_THREADS")
+        if intra:
+            so.intra_op_num_threads = int(intra)  # 0 = auto (all cores)
+        # Do NOT spin-wait between inferences: with a shared CPU (ffmpeg decoding
+        # alongside) onnxruntime's default spin burns cores for no throughput
+        # (measured ~3 extra cores on a 3-camera Pi 4). Park threads instead.
+        for key in ("session.intra_op.allow_spinning", "session.inter_op.allow_spinning"):
+            try:
+                so.add_session_config_entry(key, "0")
+            except Exception:
+                pass
+        self._session = ort.InferenceSession(self.model_path, so, providers=["CPUExecutionProvider"])
         inp = self._session.get_inputs()[0]
         self._input_name = inp.name
         # Ultralytics release ONNX is fp16; honour the graph's input dtype.

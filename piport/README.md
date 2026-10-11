@@ -154,6 +154,11 @@ on a Raspberry Pi (the bcm2835-codec decoder at `/dev/video10`, which also needs
 `/dev/vchiq`), else software. Hardware decode cuts ffmpeg's CPU sharply, but on a Pi 4
 the CPU detector then dominates -- see `docker/README.md` for the measured numbers.
 
+The CPU detector disables onnxruntime's thread **spin-wait** (it burned ~3 extra cores
+alongside ffmpeg on a Pi 4) and caps threads with `AIPORT_ORT_INTRA_THREADS` (e.g. `2`
+on a Pi 4; unset = onnxruntime's default). `AIPORT_OBJ_THRESH` overrides the detection
+confidence gate.
+
 **Conversion must run on a separate x86_64 build host.** `rknn-toolkit-lite2` is the on-device,
 inference-only API (aarch64-only wheels for Python <= 3.12); it can only run an already-converted
 `.rknn`. Conversion needs full `rknn-toolkit2`, matching the on-Pi version. Two pins avoid known

@@ -551,24 +551,79 @@ class _FakeWS:
 
 
 class HwDecoderSelection(unittest.TestCase):
-    def test_codec_maps_to_rkmpp_decoder(self):
+    """AIPORT_HWDEC pins the backend so this is device-independent."""
+
+    def setUp(self):
+        self._saved = os.environ.get("AIPORT_HWDEC")
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self._saved is None:
+            os.environ.pop("AIPORT_HWDEC", None)
+        else:
+            os.environ["AIPORT_HWDEC"] = self._saved
+
+    def test_rkmpp(self):
+        os.environ["AIPORT_HWDEC"] = "rkmpp"
+        self.assertEqual(av._hwdec_args("hevc"), ["-c:v", "hevc_rkmpp"])
+        self.assertEqual(av._hwdec_args("h264"), ["-c:v", "h264_rkmpp"])
+        self.assertEqual(av._hwdec_args(None), ["-c:v", "h264_rkmpp"])
+        self.assertEqual(av._hwdec_args("mjpeg"), [])
+
+    def test_v4l2m2m(self):
+        os.environ["AIPORT_HWDEC"] = "v4l2m2m"
+        self.assertEqual(av._hwdec_args("h264"), ["-c:v", "h264_v4l2m2m"])
+        self.assertEqual(av._hwdec_args("hevc"), ["-c:v", "hevc_v4l2m2m"])
+        self.assertEqual(av._hwdec_args("mjpeg"), [])
+
+    def test_none_is_software(self):
+        os.environ["AIPORT_HWDEC"] = "none"
+        self.assertEqual(av._hwdec_args("hevc"), [])
+        self.assertEqual(av._hwdec_args("h264"), [])
+
+    def test_auto_prefers_ffmpeg_rkmpp(self):
+        os.environ.pop("AIPORT_HWDEC", None)
         old = av.FFMPEG_BIN
         av.FFMPEG_BIN = "/usr/local/ffmpeg-rkmpp/bin/ffmpeg"
         try:
-            self.assertEqual(av._hwdec_args("hevc"), ["-c:v", "hevc_rkmpp"])
             self.assertEqual(av._hwdec_args("h264"), ["-c:v", "h264_rkmpp"])
-            self.assertEqual(av._hwdec_args(None), ["-c:v", "h264_rkmpp"])
-            self.assertEqual(av._hwdec_args("mjpeg"), [])
         finally:
             av.FFMPEG_BIN = old
 
-    def test_system_ffmpeg_uses_software_decode(self):
-        old = av.FFMPEG_BIN
-        av.FFMPEG_BIN = "ffmpeg"
-        try:
-            self.assertEqual(av._hwdec_args("hevc"), [])
-        finally:
-            av.FFMPEG_BIN = old
+
+try:
+    import numpy as _np
+except Exception:  # numpy is a project dep but keep the suite runnable without it
+    _np = None
+
+
+@unittest.skipIf(_np is None, "numpy unavailable")
+class MotionGate(unittest.TestCase):
+    """_scene_changed drives the frame-diff gate that skips static-scene inference."""
+
+    def setUp(self):
+        self.addCleanup(av._latest_frame.clear)
+        self.addCleanup(av._scene_ref.clear)
+        av._latest_frame.clear()
+        av._scene_ref.clear()
+
+    def test_first_frame_triggers(self):
+        av._latest_frame["d"] = _np.zeros((640, 640, 3), _np.uint8)
+        self.assertTrue(av._scene_changed("d"))
+
+    def test_static_scene_does_not_trigger(self):
+        av._latest_frame["d"] = _np.full((640, 640, 3), 100, _np.uint8)
+        av._scene_changed("d")                    # first tick sets the reference
+        self.assertFalse(av._scene_changed("d"))  # identical frame -> below threshold
+
+    def test_large_change_triggers(self):
+        av._latest_frame["d"] = _np.zeros((640, 640, 3), _np.uint8)
+        av._scene_changed("d")
+        av._latest_frame["d"] = _np.full((640, 640, 3), 200, _np.uint8)
+        self.assertTrue(av._scene_changed("d"))
+
+    def test_no_frame_is_no_change(self):
+        self.assertFalse(av._scene_changed("absent"))
 
 
 if __name__ == "__main__":

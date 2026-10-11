@@ -159,6 +159,13 @@ alongside ffmpeg on a Pi 4) and caps threads with `AIPORT_ORT_INTRA_THREADS` (e.
 on a Pi 4; unset = onnxruntime's default). `AIPORT_OBJ_THRESH` overrides the detection
 confidence gate.
 
+Classification is also **gated by a cheap frame-diff**: a tick with no open track and no
+meaningful frame change skips inference entirely (on a static scene this is the difference
+between a busied core and ~1% CPU). `AIPORT_MOTION_GATE=0` disables it and
+`AIPORT_MOTION_GATE_THRESH` tunes the threshold (default `0.02`, on an 80x80 grayscale
+diff). Tracks that are already open always classify, so a stationary object keeps its
+track and can close normally.
+
 **Conversion must run on a separate x86_64 build host.** `rknn-toolkit-lite2` is the on-device,
 inference-only API (aarch64-only wheels for Python <= 3.12); it can only run an already-converted
 `.rknn`. Conversion needs full `rknn-toolkit2`, matching the on-Pi version. Two pins avoid known

@@ -125,6 +125,12 @@ MOTION_POLL_INTERVAL_S = 1.5
 MOTION_MISS_TOLERANCE_TICKS = 20
 # Min IOU (same objectType) to match a detection to an existing track.
 IOU_MATCH_THRESHOLD = 0.3
+# Motion/scene gate: skip the classifier when the frame barely changed and no track
+# is open. Cheap on a CPU (unlike the NPU, where inference was cheap enough to run
+# unconditionally). AIPORT_MOTION_GATE=0 disables; threshold via AIPORT_MOTION_GATE_THRESH.
+MOTION_GATE = os.environ.get("AIPORT_MOTION_GATE", "1").strip().lower() not in ("0", "false", "no", "off")
+MOTION_GATE_THRESH = float(os.environ.get("AIPORT_MOTION_GATE_THRESH", "0.02"))
+_GATE_STRIDE = 8  # sample every Nth pixel -> 80x80 grayscale for the diff
 # Paired camera's smartDetectZones row id -- zonesStatus's key must match it (not always "1").
 SMART_DETECT_ZONE_ID = "1"
 
@@ -469,8 +475,37 @@ def _dedupe_detections(detections, iou_thresh=0.4):
     return out
 
 
+_scene_ref = {}  # deviceID -> last tick's downsampled grayscale frame (motion gate)
+
+
+def _scene_changed(device_id):
+    """True if this tick's frame differs enough from the previous tick's. Always
+    advances the reference so a genuinely static scene stays below the gate."""
+    import numpy as np  # lazy, like the detector path: avclient imports without numpy
+    with _frame_lock:
+        frame = _latest_frame.get(device_id)
+    if frame is None:
+        return False
+    gray = frame[::_GATE_STRIDE, ::_GATE_STRIDE].mean(axis=2)
+    ref = _scene_ref.get(device_id)
+    _scene_ref[device_id] = gray
+    if ref is None or ref.shape != gray.shape:
+        return True
+    return float(np.abs(gray - ref).mean()) / 255.0 >= MOTION_GATE_THRESH
+
+
 def _motion_tick(ws, device_id):
-    detections = _dedupe_detections(_classify_frame_detections(device_id))
+    # With open tracks we always classify (a stationary object must keep its track
+    # and be able to close); otherwise skip the classifier when nothing moved.
+    with _motion_lock:
+        has_tracks = bool(_motion_state.get(device_id, {}).get("tracks"))
+    changed = _scene_changed(device_id)
+    gated = MOTION_GATE and not has_tracks and not changed
+    if gated:
+        log.debug("motion gate: static scene, skipping inference for deviceID=%s", device_id)
+        detections = []
+    else:
+        detections = _dedupe_detections(_classify_frame_detections(device_id))
     with _motion_lock:
         dev = _motion_state.setdefault(device_id, {"tracks": {}, "next_tracker_id": 1})
         tracks = dev["tracks"]
@@ -573,8 +608,8 @@ def _motion_tick(ws, device_id):
             except Exception:
                 log.exception("failed to send enter for tracker_id=%s deviceID=%s", tracker_id, device_id)
 
-        if not detections and not tracks:
-            # Tick with nothing detectable = non-smart motion (lighting/noise); ignore.
+        if not detections and not tracks and not gated:
+            # Classified and found nothing = non-smart motion (lighting/noise); ignore.
             log.info("real motion tick: scene changed but no person/vehicle/animal found "
                       "for deviceID=%s -- ignoring (not smart-detect-worthy)", device_id)
 

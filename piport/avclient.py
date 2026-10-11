@@ -1084,6 +1084,15 @@ def _version_from_update_uri(uri):
     return dict(parse_qsl(parts.query)).get("version") or None
 
 
+def _used_points():
+    """Load reported on every stream-control reply (UiStreamControl and
+    OnvifStreamControl). Protect stores usedPoints / 10 as the AI Port's
+    cameraUtilization and, when the field is missing, assumes the AI Port is
+    full (maxCameraCapacity, 1) -- pairing then fails with
+    estimated_capacity_exceeded. 2 per active camera stream (0.2 each)."""
+    return len(_active_streams) * 2
+
+
 def handle_function(ws, msg, device_info):
     fn = msg.get("functionName")
     payload = msg.get("payload") or {}
@@ -1114,10 +1123,8 @@ def handle_function(ws, msg, device_info):
                 _stop_stream(device_id)
                 _stop_motion_detector(device_id, ws=ws)
             reply_status = "stopped"
-        # usedPoints MUST be on every reply (start and stop); omitting it breaks re-pairing
-        # with estimated_capacity_exceeded.
-        active_count = len(_active_streams)
-        reply = {"status": reply_status, "usedPoints": active_count * 2}
+        # usedPoints MUST be on every reply (start and stop); see _used_points().
+        reply = {"status": reply_status, "usedPoints": _used_points()}
         send_msg(ws, "UiStreamControl", reply, in_response_to=msg_id)
         if device_id:
             # smart_ready is the likely gate for AI-task dispatch.
@@ -1149,7 +1156,8 @@ def handle_function(ws, msg, device_info):
             _onvif.clear_device(device_id)
             _stop_stream(device_id)
             _stop_motion_detector(device_id, ws=ws)
-        send_msg(ws, "OnvifStreamControl", {"status": reply_status}, in_response_to=msg_id)
+        send_msg(ws, "OnvifStreamControl", {"status": reply_status, "usedPoints": _used_points()},
+                 in_response_to=msg_id)
         if device_id and reply_status == "started":
             _send_status_event(ws, device_id, plug=True, streaming=True,
                                smart_ready=True, audio_ready=True)

@@ -446,9 +446,10 @@ class TestMotionLoopLifecycle(Base):
 
     def test_discard_emits_leave_for_open_tracks(self):
         sent = []
-        self._orig_send = av._send_smart_detect_event
+        # Own attribute: Base's cleanup restores send_msg from self._orig_send.
+        self._orig_smart_detect = av._send_smart_detect_event
         av._send_smart_detect_event = lambda ws, dev, **kw: sent.append((ws, dev, kw["edge_type"]))
-        self.addCleanup(lambda: setattr(av, "_send_smart_detect_event", self._orig_send))
+        self.addCleanup(lambda: setattr(av, "_send_smart_detect_event", self._orig_smart_detect))
         av._motion_state["D"] = {"tracks": {7: {"event_id": 42, "objectType": "person",
                                                  "coord": [0, 0, 10, 10], "score": 0.9,
                                                  "first_shown_ms": 1, "miss_count": 0,
@@ -538,6 +539,31 @@ class TestFirmwareUpdate(unittest.TestCase):
         reply = json.loads(ws.sent[-1])
         self.assertEqual(reply["functionName"], "ChangeDeviceSettings")
         self.assertEqual(reply["payload"]["name"], "Front Door")
+
+
+class TestStreamControlUsedPoints(unittest.TestCase):
+    """Protect reads usedPoints/10 as the AI Port's load and treats a reply
+    without it as a full AI Port (pairing then fails: estimated_capacity_exceeded)."""
+
+    def setUp(self):
+        self._streams = dict(av._active_streams)
+        av._active_streams.clear()
+        av._active_streams.update({"A": None, "B": None})
+        self.addCleanup(lambda: (av._active_streams.clear(), av._active_streams.update(self._streams)))
+
+    def _reply(self, fn, payload):
+        ws = _FakeWS()
+        av.handle_function(ws, {"functionName": fn, "messageId": "m", "payload": payload}, {})
+        return next(json.loads(m)["payload"] for m in ws.sent
+                    if json.loads(m)["functionName"] == fn)
+
+    def test_onvif_stop_reply_has_used_points(self):
+        reply = self._reply("OnvifStreamControl", {"streaming": False})
+        self.assertEqual(reply, {"status": "stopped", "usedPoints": 4})
+
+    def test_ui_stop_reply_has_used_points(self):
+        reply = self._reply("UiStreamControl", {"streaming": False})
+        self.assertEqual(reply["usedPoints"], 4)
 
 
 class _FakeWS:

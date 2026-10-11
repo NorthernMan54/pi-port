@@ -137,21 +137,25 @@ Confirmed on x86_64:
   probes on the LAN, and the control API binds `:443`.
 - `onnxruntime` inference on a still image: 3 person + 1 vehicle on the stock `bus.jpg`.
 
-Confirmed on a real Raspberry Pi 4 Model B (Debian 13, aarch64, 2026-10-11):
+Confirmed on a real Raspberry Pi 4 Model B (Debian 13, aarch64, 2026-10-11), container on
+host networking:
 - `docker build` succeeds on arm64 (~9 min cold; `onnxruntime` 1.31.0 aarch64).
 - Host-network smoke test PASS: all four components, `:443` bound, and discovery answered
   real console probes (`10.10.10.5`/`.61`/`10.10.10.1`) on the LAN.
-- In-container inference: 3 person + 1 vehicle on `bus.jpg`, ~368 ms/frame (~2.7 fps) on
-  the Cortex-A72 -- fine for the 1.5 s poll loop over a few cameras, not a 4-camera
-  real-time budget with margin.
+- In-container inference: 3 person + 1 vehicle on `bus.jpg`, ~368 ms/frame.
+- **Live end to end**: adopted by a real UNVR (controller 7.3.70), the console's firmware
+  push pinned to 5.1.16 (fake update), four cameras paired, RTSP pulls running, the
+  onnxruntime detector emitting a real `EventSmartDetect` (`person`, `edgeType: enter`) and
+  a snapshot upload.
 
 Untested:
-- Actual adoption/pairing against the console (needs a console-side action) and real
-  cameras / RTSP frames through the live capture pipeline.
 - macvlan networking end to end (the config validates; no live LAN test).
-- CPU contention between `onnxruntime` and software `ffmpeg` decode under a 4-camera
-  load. The RK3588 variant does not have this: decode and inference run on separate
-  hardware blocks (RKVDEC + NPU).
+- Pi 5.
+- Sustained 4-camera CPU headroom: with four software-decoded 2304x1296 RTSP pulls the
+  Pi 4 ran at load ~3.75 on 4 cores. It works, but the Cortex-A72 has little margin; the
+  RK3588 board avoids this (decode and inference on separate hardware blocks).
+- The known RTSP restart loop (`todo.md` #5) still occurs (~`Failed reading RTSP data:
+  End of file` then auto-restart) -- pre-existing, not container-specific.
 
 ## A gotcha worth knowing
 

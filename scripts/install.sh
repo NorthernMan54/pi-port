@@ -1,43 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 hutchx86
-#
-# One-shot installer for the Pi Port AI-Port emulator on an Orange Pi 5 Plus
-# (RK3588 / aarch64). Does, in order:
-#
-#   1. apt prerequisites (python3-venv/pip, ffmpeg, iproute2, isc-dhcp-client,
-#      curl, ca-certificates, diffutils, git)
-#   2. a venv at piport/.venv + piport/requirements.txt (+ rknn-toolkit-lite2)
-#   3. the model assets (scripts/fetch_models.py) and the NPU .rknn model
-#   4. the system librknnrt.so upgrade the model needs (backed up, idempotent)
-#   5. a macvlan systemd instance via instance_manager.py (survives reboot)
-#   6. a systemd unit for the web UI (sysinfo_server.py) and starts it
-#
-# Run as root (it installs packages, writes /etc/systemd/system and creates a
-# network interface):
-#
-#   sudo scripts/install.sh --console <UNVR-IP> [--parent-iface <iface>]
-#
-# Options:
-#   --name NAME            instance name (default: main)
-#   --parent-iface IFACE   physical NIC the macvlan instance is built on
-#                          (alias: --iface; default: auto-detected)
-#   --console HOST[:PORT]  UniFi Protect console address; written to aiport.cfg
-#   --rknn PATH            prebuilt yolov5s_relu.rknn to install (see below)
-#   --rknn-url URL         download the .rknn from URL (overrides PIPORT_RKNN_URL)
-#   --rknn-sha256 HEX      verify a downloaded/supplied .rknn against this sha256
-#   --webui-port N         web UI listen port (default: 8090)
-#   --no-npu               skip rknn-toolkit-lite2, librknnrt upgrade and the
-#                          .rknn requirement (protocol stack still installs)
-#   -h, --help
-#
-# The NPU model is deliberately not shipped in the repo (binary). It can come
-# from, in order: --rknn PATH, a local/submodule copy (models-rknn/ or
-# rknn_convert/), --rknn-url URL, PIPORT_RKNN_URL, or the DEFAULT_RKNN_URL set
-# below (published as a separate AGPL-3.0 model repo/release -- see README.md).
-# rknn-toolkit2 can only convert ONNX -> RKNN on an x86_64 host, so a copy built
-# elsewhere (fetch_models.py --convert) is the alternative.
-#
+# One-shot Orange Pi 5 Plus (RK3588/aarch64) installer: apt deps, venv, model
+# assets, librknnrt upgrade, a macvlan systemd instance + web UI. Run as root; -h for options.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -74,7 +39,21 @@ verify_sha256() {  # verify_sha256 <file> <expected-hex>
     [ "$got" = "$expected" ]
 }
 
-usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; }
+usage() {
+    cat <<'EOF'
+Usage: sudo scripts/install.sh --console <UNVR-IP> [options]
+
+  --console HOST[:PORT]   UniFi Protect console address (written to aiport.cfg)
+  --parent-iface IFACE    NIC the macvlan instance is built on (alias --iface)
+  --name NAME             instance name (default: main)
+  --rknn PATH             prebuilt yolov5s_relu.rknn to install
+  --rknn-url URL          download the .rknn from URL (overrides PIPORT_RKNN_URL)
+  --rknn-sha256 HEX       verify a downloaded/supplied .rknn
+  --webui-port N          web UI listen port (default: 8090)
+  --no-npu                skip rknn-toolkit-lite2, librknnrt upgrade and the .rknn
+  -h, --help
+EOF
+}
 
 ORIG_ARGS=("$@")
 while [ $# -gt 0 ]; do
@@ -99,7 +78,7 @@ case "$NAME" in *[!a-zA-Z0-9_-]*|"") die "invalid --name '$NAME' (letters/digits
 
 ARCH="$(uname -m)"
 if [ "$ARCH" != "aarch64" ] && [ "$NO_NPU" -eq 0 ]; then
-    die "this installer targets aarch64/RK3588, got $ARCH. For the x86/no-NPU Docker variant see the 'experimental' branch; to force a CPU-only install here, pass --no-npu"
+    die "this installer targets aarch64/RK3588, got $ARCH. For CPU/x86 use the Docker stack (docker/README.md); or pass --no-npu for a CPU-only install"
 fi
 
 log "installing system packages"

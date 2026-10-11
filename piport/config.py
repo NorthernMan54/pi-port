@@ -27,9 +27,8 @@ DEFAULTS = {
     "mac": "",
     "hostname": "piport",
     "platform": "UVC AI Port",  # canonical Protect type (ucp4 X-Type, /api/info)
-    # Discovery TLV 0x0C. Network's fingerprint catalogue knows the AI Port by its
-    # SKU "UP-AI-Port" (not the canonical type), so the beacon must advertise the
-    # SKU or Network can't attribute the device. Protect accepts either.
+    # Discovery TLV 0x0C: Network's catalogue knows the AI Port by SKU "UP-AI-Port",
+    # not the canonical type, so the beacon advertises the SKU (Protect accepts either).
     "discovery_platform": "UP-AI-Port",
     # Device name Protect shows / renames; advertised in discovery TLV 0x0B so
     # Network shows the same name (Protect pushes renames via ChangeDeviceSettings).
@@ -55,10 +54,8 @@ DEFAULTS = {
     "debug": "false",
 }
 
-# Environment overrides applied after aiport.cfg (a container-friendly way to set
-# identity/console without mounting a file; e.g. `docker run -e AIPORT_CONSOLE_HOST=...`).
-# The detector's own AIPORT_BACKEND / AIPORT_MODEL_PATH / AIPORT_OBJ_THRESH are read
-# directly in detector.py and are intentionally not duplicated here.
+# Env overrides applied after aiport.cfg (container-friendly identity/console config,
+# e.g. -e AIPORT_CONSOLE_HOST=...). The detector's own vars are read in detector.py.
 ENV_OVERRIDES = {
     "AIPORT_MAC": "mac",
     "AIPORT_HOSTNAME": "hostname",

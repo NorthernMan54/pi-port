@@ -288,9 +288,8 @@ class _OnnxBackend:
         intra = os.environ.get("AIPORT_ORT_INTRA_THREADS")
         if intra:
             so.intra_op_num_threads = int(intra)  # 0 = auto (all cores)
-        # Do NOT spin-wait between inferences: with a shared CPU (ffmpeg decoding
-        # alongside) onnxruntime's default spin burns cores for no throughput
-        # (measured ~3 extra cores on a 3-camera Pi 4). Park threads instead.
+        # No spin-wait between inferences: onnxruntime's default spin burned ~3
+        # extra cores on a 3-camera Pi 4 for no throughput. Park threads instead.
         for key in ("session.intra_op.allow_spinning", "session.inter_op.allow_spinning"):
             try:
                 so.add_session_config_entry(key, "0")

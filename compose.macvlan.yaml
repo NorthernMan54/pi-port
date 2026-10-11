@@ -1,25 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 hutchx86
 #
-# Pi Port -- AI Port emulator with a DEDICATED LAN IP per container (macvlan).
-# Use this instead of compose.yaml when you want the container to be a real
-# distinct L2 device: its own IP and MAC, its own :443, no clash with the host,
-# and room for several instances on one host.
-#
-# Deploy:
-#   docker compose -f compose.macvlan.yaml up -d --build
-# or as a Komodo Stack pointed at this file (file_paths = ["compose.macvlan.yaml"]).
-#
-# ILLUSTRATIVE -- replace every <placeholder>, then it is ready.
-#
-# Caveats (all normal for macvlan):
-#  * Static IPs only -- Docker's macvlan driver has no built-in DHCP. Pick free
-#    addresses in your LAN.
-#  * The parent NIC must be WIRED. On Wi-Fi the AP usually drops the extra MAC.
-#  * The HOST cannot reach these container IPs without an extra macvlan "shim"
-#    interface on the host. The Protect console, being on the LAN, can.
-#  * Give every instance a UNIQUE IP, MAC and AIPORT_DEVICE_ID, or the console
-#    sees one AI Port instead of several.
+# Dedicated LAN IP per container (macvlan). Use instead of compose.yaml when the
+# container must be a distinct L2 device (own IP/MAC, own :443, several instances).
+# Static IPs only (no Docker DHCP); wired parent NIC; the host can't reach the
+# container IP without a shim. Every instance needs a unique IP, MAC and device-id.
+# ILLUSTRATIVE -- replace the <placeholders>.
 
 name: piport
 
@@ -39,29 +25,14 @@ services:
       AIPORT_HOSTNAME: "${AIPORT_HOSTNAME:-piport}"
       AIPORT_NAME: "${AIPORT_NAME:-AI Port}"
       AIPORT_IFACE: "${AIPORT_IFACE:-eth0}"
-      # Must match this service's mac_address below (protocol identity).
-      AIPORT_MAC: "FCECDA000001"
+      AIPORT_MAC: "FCECDA000001"   # must match mac_address below (protocol identity)
     networks:
       lan:
         ipv4_address: 192.0.2.230   # <placeholder> -- a real free LAN address
         mac_address: "FC:EC:DA:00:00:01"
 
-  # To run a SECOND AI Port on the same host, copy the block above, change the
-  # container_name, AIPORT_MAC, mac_address and ipv4_address (all unique):
-  #
-  # aiport-2:
-  #   build: { context: ., dockerfile: docker/Dockerfile }
-  #   image: piport-cpu
-  #   container_name: piport-macvlan-2
-  #   cap_add: [NET_ADMIN]
-  #   restart: unless-stopped
-  #   environment:
-  #     AIPORT_CONSOLE_HOST: "${AIPORT_CONSOLE_HOST:-}"
-  #     AIPORT_MAC: "FCECDA000002"
-  #   networks:
-  #     lan:
-  #       ipv4_address: 192.0.2.231
-  #       mac_address: "FC:EC:DA:00:00:02"
+  # Second instance: copy the block above and change container_name, AIPORT_MAC,
+  # mac_address and ipv4_address (all unique).
 
 networks:
   lan:

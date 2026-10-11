@@ -57,13 +57,8 @@ _stream_restart_count = {}
 # clockMonotonic/clockStream on that device's EventSmartDetect payloads.
 _stream_started_monotonic_ms = {}
 
-# Hardware video decode. Two backends, chosen automatically or forced with
-# AIPORT_HWDEC (auto|rkmpp|v4l2m2m|none); falls back to ffmpeg's software decoder.
-#   rkmpp    -- Rockchip ffmpeg (ffmpeg-rkmpp) on the RK3588, H.264/HEVC via RKVDEC.
-#               Mainline rkmpp wedges when MPP's queue fills, hence the custom build.
-#   v4l2m2m  -- generic ffmpeg's V4L2 mem2mem wrapper on a Raspberry Pi
-#               (bcm2835-codec). The decoder is /dev/video10 and it drives the VPU
-#               firmware through /dev/vchiq, so BOTH must be exposed to a container.
+# Hardware video decode (AIPORT_HWDEC=auto|rkmpp|v4l2m2m|none): rkmpp on the RK3588,
+# v4l2m2m on a Pi 4 (/dev/video10 + /dev/vchiq); else software.
 FFMPEG_BIN = ("/usr/local/ffmpeg-rkmpp/bin/ffmpeg"
               if os.path.exists("/usr/local/ffmpeg-rkmpp/bin/ffmpeg") else "ffmpeg")
 _HWDEC_BACKENDS = {
@@ -94,9 +89,7 @@ def _detect_hwdec():
         return forced
     if FFMPEG_BIN != "ffmpeg":
         return "rkmpp"
-    # Pi 4 only: bcm2835-codec H.264 decoder (/dev/video10, via /dev/vchiq).
-    # Known-flaky under concurrent/large loads (see implementation.md) and the
-    # Pi 5 has no H.264 hardware decoder at all -- it software-decodes H.264.
+    # Pi 4 only (flaky under load); the Pi 5 has no H.264 hardware decoder.
     if _is_pi4() and os.path.exists("/dev/video10") and os.path.exists("/dev/vchiq"):
         return "v4l2m2m"
     return None
@@ -137,9 +130,8 @@ MOTION_POLL_INTERVAL_S = 1.5
 MOTION_MISS_TOLERANCE_TICKS = 20
 # Min IOU (same objectType) to match a detection to an existing track.
 IOU_MATCH_THRESHOLD = 0.3
-# Motion/scene gate: skip the classifier when the frame barely changed and no track
-# is open. Cheap on a CPU (unlike the NPU, where inference was cheap enough to run
-# unconditionally). AIPORT_MOTION_GATE=0 disables; threshold via AIPORT_MOTION_GATE_THRESH.
+# Motion/scene gate: skip the classifier on a near-static frame with no open track.
+# AIPORT_MOTION_GATE=0 disables; AIPORT_MOTION_GATE_THRESH tunes (default 0.02).
 MOTION_GATE = os.environ.get("AIPORT_MOTION_GATE", "1").strip().lower() not in ("0", "false", "no", "off")
 MOTION_GATE_THRESH = float(os.environ.get("AIPORT_MOTION_GATE_THRESH", "0.02"))
 _GATE_STRIDE = 8  # sample every Nth pixel -> 80x80 grayscale for the diff

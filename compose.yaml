@@ -1,22 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 hutchx86
 #
-# Pi Port -- single-instance AI Port emulator, host networking (x86_64 / arm64).
-# This is the file a Komodo Stack uses: add it as a git-repo Stack with
-# file_paths = ["compose.yaml"], and the build context below (the repo root) is
-# exactly where Komodo clones the repo. Also works locally:
-#   AIPORT_CONSOLE_HOST=<ip> docker compose up -d --build
-#
-# Configure via environment (a .env beside this file, or Komodo's stack env):
-#   AIPORT_CONSOLE_HOST  the UniFi Protect console IP to dial before adoption
-#   AIPORT_MAC           optional fixed MAC (blank = derived Ubiquiti-OUI MAC)
-#   AIPORT_DEVICE_ID     per-instance identity (unique when running several)
-# See piport/aiport.cfg / config.ENV_OVERRIDES for the full set.
-#
-# WARNING: host networking shares the host's IP and DNS, so L2 discovery works,
-# but the container is NOT a distinct LAN device, and it binds the host's :443 --
-# that port must be free. One instance per host: a second container would collide
-# on :443/UDP-10001, so run additional instances on another host.
+# Single-instance AI Port emulator, host networking (x86_64/arm64) -- the Komodo
+# Stack file. Set AIPORT_CONSOLE_HOST etc. via env; one instance per host.
 
 name: piport
 
@@ -27,8 +13,7 @@ services:
       dockerfile: docker/Dockerfile
     image: piport-cpu
     container_name: piport-cpu
-    # L2 discovery (UDP/10001) and :443 must be on the real LAN; Docker's
-    # default bridge NATs both away.
+    # L2 discovery (:10001) and :443 must be on the real LAN; the default bridge NATs both away.
     network_mode: host
     cap_add:
       - NET_ADMIN
@@ -42,13 +27,10 @@ services:
       AIPORT_NAME: "${AIPORT_NAME:-AI Port}"
       AIPORT_IFACE: "${AIPORT_IFACE:-}"
       AIPORT_DEBUG: "${AIPORT_DEBUG:-}"
-    # Prefer a mounted cfg over env for the full identity/network surface:
     # volumes:
-    #   - ./piport/aiport.cfg:/app/aiport.cfg:ro
+    #   - ./piport/aiport.cfg:/app/aiport.cfg:ro   # full identity/network surface
 
-  # Optional dev status page (CPU/mem; the GPU/NPU panels are RK3588-only and
-  # stay blank on x86/Pi). Browsable at http://<host>:8090 -- NO auth, trusted
-  # LAN only. Remove this service if you do not want it.
+  # Optional status page on :8090 (CPU/mem; no auth; GPU/NPU panels are RK3588-only).
   webui:
     image: piport-cpu
     build:

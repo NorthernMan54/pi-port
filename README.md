@@ -86,7 +86,7 @@ paired, the console hands the board an RTSP URL on its own internal relay
 | --- | --- | --- | --- |
 | Orange Pi 5 Plus | RK3588 | Verified | The target board; 4 real cameras paired and streamed concurrently |
 | Other RK3588 boards | RK3588 | Untested | Should work; the NPU and ffmpeg paths are RK3588-specific |
-| Raspberry Pi 5 + Coral USB | BCM2712 + Edge TPU | Partly verified | Detector verified on Pi OS trixie (MobileDet, ~33 ms/frame with the Coral on USB 2); adopt/pair against a console not yet run. No H.264 hardware decode on the Pi 5, so camera streams decode on the CPU |
+| Raspberry Pi 5 + Coral USB | BCM2712 + Edge TPU | Verified (Docker) | Pi OS trixie, console on the same Pi: adoption, a UniFi camera and a 4K ONVIF camera with detection (MobileDet, ~33 ms/frame with the Coral on USB 2). The `install.sh` path is untested against a console. No H.264 hardware decode on the Pi 5, so camera streams decode on the CPU |
 | Any Linux box | CPU (`onnxruntime`) | Untested | `--accel cpu`; fine for a camera or two |
 
 The detector is pluggable (`piport/detectors/`, `[hardware] detector` in

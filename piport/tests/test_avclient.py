@@ -311,33 +311,6 @@ class TestBestFrame(Base):
         fullfov = av._snapshot_filename_to_device[payload["smartDetectSnapshotFullFoV"]]
         self.assertEqual(fullfov["jpeg"], best["jpeg"])
 
-    def test_tracks_closing_together_share_one_leave(self):
-        av._stream_dims["D"] = (2560, 1440)
-        face = {"objectType": "face", "coord": [500, 300, 50, 50], "score": 0.9, "event_id": 7,
-                "first_shown_ms": 100, "extra": {"faceEmbed": [0.1]},
-                "best": {"jpeg": b"FACE", "coord": [510, 300, 40, 40], "score": 0.93, "wall": 222}}
-        person = {"objectType": "person", "coord": [400, 200, 300, 700], "score": 0.85,
-                  "event_id": 6, "first_shown_ms": 90, "extra": {},
-                  "best": {"jpeg": b"PERSON", "coord": [400, 210, 300, 690], "score": 0.88, "wall": 111}}
-        av._send_leaves(None, "D", [(3, face), (2, person)])
-        self.assertEqual(len(self.sent), 1)
-        payload = self.sent[0][1]
-        self.assertEqual(payload["edgeType"], "leave")
-        self.assertEqual(payload["eventId"], 6)  # person first, face last
-        self.assertEqual(set(payload["trackerIDAttrMap"]), {"2", "3"})
-        snaps = payload["smartDetectSnapshots"]
-        self.assertEqual([(x["trackerID"], x["smartDetectSnapshotType"]) for x in snaps],
-                         [(2, "person"), (3, "face")])
-        self.assertEqual([x["smartDetectSnapshot"] for x in snaps],
-                         ["smartdetectsnap_zone_2111.jpg", "smartdetectsnap_zone_3222.jpg"])
-        recs = av._snapshot_filename_to_device
-        self.assertEqual(recs["smartdetectsnap_zone_3222.jpg"]["jpeg"], b"FACE")
-        self.assertEqual(recs["smartdetectsnap_zone_3222.jpg"]["coord"], [510, 300, 40, 40])
-        self.assertEqual(recs[payload["smartDetectSnapshotFullFoV"]]["jpeg"], b"PERSON")
-        self.assertEqual([d["trackerID"] for d in payload["descriptors"]], [2, 3])
-        self.assertEqual(payload["descriptors"][1]["faceEmbed"], [0.1])
-        self.assertEqual(payload["objectTypes"], ["person", "face"])
-
     def test_capture_keeps_best_score(self):
         tr = {}
         av._capture_best("D", tr, {"score": 0.8, "coord": [1, 2, 3, 4], "frame": (1, b"a")})
@@ -351,6 +324,90 @@ class TestBestFrame(Base):
             av._record_snapshot_filename(f"f{i}.jpg", "D", kind="fullfov", jpeg=b"x")
         held = [r for r in av._snapshot_filename_to_device.values() if r.get("jpeg")]
         self.assertEqual(len(held), av.BEST_FRAME_RECORDS_MAX)
+
+
+class TestCameraEvent(Base):
+    """Protect keeps one smart-detect event per camera: tracks share it."""
+
+    PERSON = {"objectType": "person", "score": 0.8, "coord": [400, 200, 200, 600]}
+    FACE = {"objectType": "face", "score": 0.9, "coord": [450, 220, 60, 60]}
+    CAR = {"objectType": "vehicle", "score": 0.7, "coord": [100, 500, 200, 100]}
+
+    def setUp(self):
+        super().setUp()
+        from unittest import mock
+        self.frames = []
+        for target, value in (
+                ("_classify_frame_detections",
+                 lambda dev: [dict(d) for d in self.frames.pop(0) if d["objectType"] != "face"]),
+                ("_enrich_detections",
+                 lambda dev, dets: [dict(d) for d in self._faces]),
+                ("_scene_changed", lambda dev: True),
+                ("_read_snapshot", lambda dev: (1, b"\xff\xd8F\xff\xd9"))):
+            patcher = mock.patch.object(av, target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        av._motion_state.pop("D", None)
+        self.addCleanup(av._motion_state.pop, "D", None)
+        self.addCleanup(av._event_max_ms.pop, "D", None)
+
+    def tick(self, *objs):
+        self._faces = [o for o in objs if o["objectType"] == "face"]
+        self.frames.append(list(objs))
+        av._motion_tick(None, "D")
+
+    def events(self):
+        return [(p["edgeType"], sorted(d["objectType"] for d in p["descriptors"]),
+                 sorted(x["smartDetectSnapshotType"] for x in p.get("smartDetectSnapshots", [])))
+                for fn, p in self.sent if fn == "EventSmartDetect"]
+
+    def test_person_and_face_one_event(self):
+        self.tick(self.PERSON, self.FACE)
+        self.tick(self.PERSON, self.FACE)
+        self.sent.clear()
+        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
+            self.tick()
+        ev = self.events()
+        self.assertEqual(ev[-1], ("leave", ["face", "person"], ["face", "person"]))
+        self.assertEqual([e[0] for e in ev[:-1]], ["moving"] * (len(ev) - 1))
+        self.assertIsNone(av._motion_state["D"].get("event"))
+
+    def test_first_tick_is_one_enter(self):
+        self.tick(self.PERSON, self.FACE)
+        self.assertEqual(self.events(), [("enter", ["face", "person"], [])])
+        ids = {p["eventId"] for _, p in self.sent}
+        self.assertEqual(len(ids), 1)
+
+    def test_time_limit_closes_and_parks_stationary(self):
+        av._event_max_ms["D"] = 0
+        self.tick(self.CAR)          # opens
+        self.tick(self.CAR)          # time limit: leave, car goes stationary
+        self.assertEqual(self.events()[-1], ("leave", ["vehicle"], ["vehicle"]))
+        self.sent.clear()
+        self.tick(self.CAR)          # still parked: quiet
+        self.assertEqual(self.sent, [])
+        moved = dict(self.CAR, coord=[300, 500, 200, 100])
+        av._event_max_ms["D"] = 10 ** 9
+        self.tick(moved)             # drove off: a new event
+        self.assertEqual(self.events(), [("enter", ["vehicle"], [])])
+
+    def test_visitor_beside_parked_car(self):
+        av._event_max_ms["D"] = 0
+        self.tick(self.CAR)
+        self.tick(self.CAR)          # car now stationary
+        av._event_max_ms["D"] = 10 ** 9
+        self.sent.clear()
+        self.tick(self.CAR, self.PERSON, self.FACE)
+        self.assertEqual(self.events(), [("enter", ["face", "person"], [])])
+        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
+            self.tick(self.CAR)
+        self.assertEqual(self.events()[-1], ("leave", ["face", "person"], ["face", "person"]))
+
+    def test_motion_settings_max_duration(self):
+        av.handle_function(None, {"functionName": "ChangeSmartMotionSettings", "messageId": 1,
+                                  "payload": {"deviceID": "D", "eventMaxDurationMSec": 300000}},
+                           {})
+        self.assertEqual(av._event_max_ms["D"], 300000)
 
 
 class TestSnapshotUpload(Base):

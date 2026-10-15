@@ -510,25 +510,6 @@ def _enrich_detections(device_id, detections):
     return [dict(e, extra=dict(e["extra"])) for e in extra]
 
 
-def _send_leaves(ws, device_id, closing):
-    """One leave for every track closing this tick, so Protect fetches each one's
-    snapshot (faces last: the Full-FoV comes from the first track's best frame)."""
-    if not closing:
-        return
-    closing = sorted(closing, key=lambda c: c[1]["objectType"] == "face")
-    args = [{"tracker_id": tid, "object_type": tr["objectType"], "coord": tr["coord"],
-             "confidence": tr["score"], "first_shown_ms": tr["first_shown_ms"],
-             "descriptor_extra": tr.get("extra"), "best": tr.get("best")} for tid, tr in closing]
-    first = args[0]
-    try:
-        _send_smart_detect_event(ws, device_id, edge_type="leave",
-                                  event_id=closing[0][1]["event_id"], stationary=True,
-                                  also_leaving=args[1:], **first)
-    except Exception:
-        log.exception("failed to send leave for tracker_ids=%s deviceID=%s",
-                      [tid for tid, _ in closing], device_id)
-
-
 def _merge_extra(tr, d):
     """Carry enrichment fields onto a track. Scored keys (plate text in a
     vehicle's `name`, a face's `faceEmbed`) keep the best-scoring read; other
@@ -689,6 +670,70 @@ def _scene_changed(device_id):
     return float(np.abs(gray - ref).mean()) / 255.0 >= MOTION_GATE_THRESH
 
 
+# Protect keeps ONE smart-detect event per camera (not per track): the first leave
+# closes it, and its scheduled check force-ends one open > ~5.5 min with no snapshots.
+# So tracks share a camera-wide event: enter when the first track appears, a batched
+# moving per tick, and one leave (every participant's snapshot) when the last active
+# track goes or eventMaxDurationMSec (sent in ChangeSmartMotionSettings) runs out.
+DEFAULT_EVENT_MAX_MS = 300000
+_event_max_ms = {}  # deviceID -> eventMaxDurationMSec from ChangeSmartMotionSettings
+# A track still present when its event hit the time limit goes quiet (stationary, e.g. a
+# parked car) until its centre moves this far (0-1000 image units).
+STATIONARY_RESUME_DISTANCE = 50
+
+
+def _track_args(tracker_id, tr):
+    return {"tracker_id": tracker_id, "object_type": tr["objectType"], "coord": tr["coord"],
+            "confidence": tr["score"], "first_shown_ms": tr["first_shown_ms"],
+            "descriptor_extra": tr.get("extra"), "best": tr.get("best")}
+
+
+def _send_event_message(ws, device_id, edge_type, event_id, members, stationary=False):
+    """One EventSmartDetect for a camera event carrying every member track
+    (faces last, so a leave's Full-FoV comes from a person/vehicle best frame)."""
+    if not members:
+        return
+    members = sorted(members, key=lambda m: m[1]["objectType"] == "face")
+    args = [_track_args(tid, tr) for tid, tr in members]
+    try:
+        _send_smart_detect_event(ws, device_id, edge_type=edge_type, event_id=event_id,
+                                  stationary=stationary, also_leaving=args[1:], **args[0])
+    except Exception:
+        log.exception("failed to send %s for tracker_ids=%s deviceID=%s", edge_type,
+                      [tid for tid, _ in members], device_id)
+
+
+def _send_leaves(ws, device_id, closing):
+    """Leave carrying every given track (kept for callers outside the tick loop)."""
+    if closing:
+        _send_event_message(ws, device_id, "leave", closing[0][1]["event_id"], closing,
+                            stationary=True)
+
+
+def _close_line_events(ws, device_id, tracker_id, tr):
+    """Close any line events this track opened (line events stay per track)."""
+    for line_id, entry in tr.get("crossed_lines", {}).items():
+        if entry["event_id"] is None:
+            continue
+        line = next((l for l in _lines.get(device_id, []) if l["id"] == line_id), None)
+        if line is None:
+            continue
+        try:
+            _send_line_detect_event(ws, device_id, line, "leave", entry["event_id"],
+                                    entry["direction"], entry["a2b"], entry["b2a"],
+                                    tr["objectType"], tr["coord"], tr["score"],
+                                    tr["first_shown_ms"], tracker_id)
+        except Exception:
+            log.exception("failed to send line leave for line=%s tracker_id=%s deviceID=%s",
+                          line_id, tracker_id, device_id)
+
+
+def _moved_since(tr):
+    cx, cy = _zone_center_norm(tr["coord"])
+    sx, sy = _zone_center_norm(tr["stationary_coord"])
+    return ((cx - sx) ** 2 + (cy - sy) ** 2) ** 0.5 > STATIONARY_RESUME_DISTANCE
+
+
 def _motion_tick(ws, device_id):
     # With open tracks we always classify (a stationary object must keep its track
     # and be able to close); otherwise skip the classifier when nothing moved.
@@ -705,14 +750,16 @@ def _motion_tick(ws, device_id):
     with _motion_lock:
         dev = _motion_state.setdefault(device_id, {"tracks": {}, "next_tracker_id": 1})
         tracks = dev["tracks"]
+        event = dev.get("event")  # {"id", "started_ms", "finished": [(tid, tr)]} or None
         unclaimed = list(range(len(detections)))
+        now_ms = int(time.time() * 1000)
+        joining = []  # tracks that start (or resume) taking part in the event this tick
 
         # IOU only disambiguates multiple same-type candidates; with one track and one
         # detection, match unconditionally.
         type_track_count = collections.Counter(tr["objectType"] for tr in tracks.values())
         type_detect_count = collections.Counter(d["objectType"] for d in detections)
 
-        closing = []  # tracks that close this tick; they leave in one batched message
         # 1. Match each track to its best remaining same-type detection by IOU.
         for tracker_id, tr in list(tracks.items()):
             unambiguous = (type_track_count[tr["objectType"]] == 1
@@ -729,25 +776,23 @@ def _motion_tick(ws, device_id):
                 d = detections[best_idx]
                 unclaimed.remove(best_idx)
                 tr["coord"] = d["coord"]
-                _merge_extra(tr, d)
-                _capture_best(device_id, tr, d)
                 tr["score"] = d["score"]
                 tr["miss_count"] = 0
+                if tr.get("stationary_coord") and _moved_since(tr):
+                    # A stationary object moved again: it rejoins as a fresh participant.
+                    log.info("real motion tick: stationary %s tracker_id=%s moved, rejoining "
+                             "for deviceID=%s", tr["objectType"], tracker_id, device_id)
+                    tr.pop("stationary_coord")
+                    tr["first_shown_ms"] = now_ms
+                    tr.pop("best", None)
+                    joining.append((tracker_id, tr))
+                _merge_extra(tr, d)
+                _capture_best(device_id, tr, d)
                 # Line Crossing: check this tick's movement against configured lines.
                 new_center = _protect_center(device_id, d["coord"])
                 if tr["objectType"] not in ("licensePlate", "face"):
                     _process_line_crossings(ws, device_id, tracker_id, tr, new_center)
                 tr["prev_center"] = new_center
-                # Push a "moving" update to keep the open event's smartDetectTypes/score populated.
-                try:
-                    _send_smart_detect_event(ws, device_id, edge_type="moving", event_id=tr["event_id"],
-                                              stationary=False, object_type=tr["objectType"],
-                                              coord=tr["coord"], confidence=tr["score"],
-                                              first_shown_ms=tr["first_shown_ms"], tracker_id=tracker_id,
-                                              descriptor_extra=tr.get("extra"))
-                except Exception:
-                    log.exception("failed to send moving update for tracker_id=%s deviceID=%s",
-                                  tracker_id, device_id)
                 continue
             # No matching detection this tick for this track.
             tr["miss_count"] += 1
@@ -759,53 +804,56 @@ def _motion_tick(ws, device_id):
                 continue
             # Missed enough consecutive ticks -- this track is genuinely gone.
             log.info("real motion tick: no detection for %d consecutive ticks, closing smartDetectZone "
-                      "track for deviceID=%s tracker_id=%s event_id=%s (last seen: %s score=%.2f)",
-                      MOTION_MISS_TOLERANCE_TICKS, device_id, tracker_id, tr["event_id"],
+                      "track for deviceID=%s tracker_id=%s (last seen: %s score=%.2f)",
+                      MOTION_MISS_TOLERANCE_TICKS, device_id, tracker_id,
                       tr["objectType"], tr["score"])
-            closing.append((tracker_id, tr))
-            # Close any line events this track opened, mirroring the zone lifecycle.
-            for line_id, entry in tr.get("crossed_lines", {}).items():
-                if entry["event_id"] is None:
-                    continue
-                line = next((l for l in _lines.get(device_id, []) if l["id"] == line_id), None)
-                if line is None:
-                    continue
-                try:
-                    _send_line_detect_event(ws, device_id, line, "leave", entry["event_id"],
-                                            entry["direction"], entry["a2b"], entry["b2a"],
-                                            tr["objectType"], tr["coord"], tr["score"],
-                                            tr["first_shown_ms"], tracker_id)
-                except Exception:
-                    log.exception("failed to send line leave for line=%s tracker_id=%s deviceID=%s",
-                                  line_id, tracker_id, device_id)
+            if event is not None and not tr.get("stationary_coord"):
+                event["finished"].append((tracker_id, tr))  # its snapshot goes in the leave
+            _close_line_events(ws, device_id, tracker_id, tr)
             del tracks[tracker_id]
-        _send_leaves(ws, device_id, closing)
 
-        # 2. Any unclaimed detection opens a new track with its own trackerID/eventId.
+        # 2. Any unclaimed detection opens a new track and joins the camera event.
         for idx in unclaimed:
             d = detections[idx]
             tracker_id = dev["next_tracker_id"]
             dev["next_tracker_id"] += 1
-            event_id = next(_event_id_counter)
-            first_shown_ms = int(time.time() * 1000)
-            tracks[tracker_id] = {"event_id": event_id, "objectType": d["objectType"],
-                                    "coord": d["coord"], "score": d["score"],
-                                    "first_shown_ms": first_shown_ms, "miss_count": 0,
-                                    "prev_center": _protect_center(device_id, d["coord"]),
-                                    "crossed_lines": {}}
+            tracks[tracker_id] = {"objectType": d["objectType"],
+                                  "coord": d["coord"], "score": d["score"],
+                                  "first_shown_ms": now_ms, "miss_count": 0,
+                                  "prev_center": _protect_center(device_id, d["coord"]),
+                                  "crossed_lines": {}}
             _merge_extra(tracks[tracker_id], d)
             _capture_best(device_id, tracks[tracker_id], d)
             log.info("real motion tick: %s detected (score=%.2f), opening smartDetectZone track "
-                      "for deviceID=%s tracker_id=%s event_id=%s", d["objectType"], d["score"],
-                      device_id, tracker_id, event_id)
-            try:
-                _send_smart_detect_event(ws, device_id, edge_type="enter", event_id=event_id,
-                                          stationary=False, object_type=d["objectType"],
-                                          coord=d["coord"], confidence=d["score"],
-                                          first_shown_ms=first_shown_ms, tracker_id=tracker_id,
-                                          descriptor_extra=tracks[tracker_id]["extra"])
-            except Exception:
-                log.exception("failed to send enter for tracker_id=%s deviceID=%s", tracker_id, device_id)
+                      "for deviceID=%s tracker_id=%s", d["objectType"], d["score"],
+                      device_id, tracker_id)
+            joining.append((tracker_id, tracks[tracker_id]))
+
+        # 3. Camera event lifecycle.
+        active = [(tid, tr) for tid, tr in tracks.items() if not tr.get("stationary_coord")]
+        if event is None and joining:
+            event = dev["event"] = {"id": next(_event_id_counter), "started_ms": now_ms,
+                                    "finished": []}
+            for _, tr in active:
+                tr["event_id"] = event["id"]
+            log.info("smartDetectZone event %s opened for deviceID=%s", event["id"], device_id)
+            _send_event_message(ws, device_id, "enter", event["id"], active)
+        elif event is not None:
+            for _, tr in joining:
+                tr["event_id"] = event["id"]
+            max_ms = _event_max_ms.get(device_id, DEFAULT_EVENT_MAX_MS)
+            timed_out = now_ms - event["started_ms"] >= max_ms
+            if not active or timed_out:
+                members = event["finished"] + active
+                log.info("smartDetectZone event %s closed for deviceID=%s (%s; %d track(s))",
+                         event["id"], device_id, "time limit" if timed_out else "all gone",
+                         len(members))
+                _send_event_message(ws, device_id, "leave", event["id"], members, stationary=True)
+                for _, tr in active:  # still in view: quiet until it moves again
+                    tr["stationary_coord"] = list(tr["coord"])
+                dev["event"] = None
+            else:
+                _send_event_message(ws, device_id, "moving", event["id"], active)
 
         if not detections and not tracks and not gated:
             # Classified and found nothing = non-smart motion (lighting/noise); ignore.
@@ -1527,6 +1575,15 @@ def handle_function(ws, msg, device_info):
                           args=(payload.get("uri"), device_info, payload.get("filename"),
                                 payload.get("what"), payload.get("deviceID")),
                           daemon=True).start()
+        return
+
+    if fn == "ChangeSmartMotionSettings":
+        # Real devices end a smart-detect event after eventMaxDurationMSec themselves.
+        max_ms = payload.get("eventMaxDurationMSec")
+        if payload.get("deviceID") and isinstance(max_ms, (int, float)) and max_ms > 0:
+            _event_max_ms[payload["deviceID"]] = int(max_ms)
+        if msg.get("responseExpected"):
+            send_msg(ws, fn, {}, in_response_to=msg_id)
         return
 
     if fn == "UpdateFaceDBRequest":

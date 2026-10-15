@@ -193,6 +193,14 @@ and `known/uiface.db`, a binary store), so the embedding layout can
 be compared with SFace's; matching against it (`matchedId`) is not implemented yet. Whether
 Protect's face service accepts SFace embeddings is also unconfirmed.
 
+**Events.** Protect keeps one smart-detect event per camera, not per track: the first
+`leave` closes it, and a scheduled check force-ends one left open past ~5.5 minutes without
+fetching any snapshots. So tracks share a camera event: `enter` when the first track
+appears, one batched `moving` per tick, and a single `leave` carrying every participant's
+snapshot when the last active track goes or `eventMaxDurationMSec` (from
+`ChangeSmartMotionSettings`, 5 min by default) runs out. A track still in view at the time
+limit (a parked car) goes quiet until it moves again. Line-crossing events stay per track.
+
 **Coordinates and thumbnails.** Protect draws descriptor coords (and the user's zones and
 lines) on a 16:9 canvas the height of the video; a camera of another aspect sits centred
 in it (a 1920x2560 doorbell fills the middle 42%). Boxes are converted to that canvas when

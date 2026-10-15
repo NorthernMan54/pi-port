@@ -31,3 +31,6 @@ __pycache__/
 
 # Windows metadata
 *:Zone.Identifier
+
+# local Python environment (README install steps)
+/venv/

@@ -198,9 +198,14 @@ Protect's face service accepts SFace embeddings is also unconfirmed.
 fetching any snapshots. So tracks share a camera event: `enter` when the first track
 appears, one batched `moving` per tick, and a single `leave` with one participant's
 snapshot when the last active track goes or `eventMaxDurationMSec` (from
-`ChangeSmartMotionSettings`, 5 min by default) runs out. That leave carries a single tracker
-(face > person > vehicle > animal, then best score): seen live, Protect fetched snapshots for
-single-tracker leaves but requested nothing for one carrying two trackers. A track still in view at the time
+`ChangeSmartMotionSettings`, 5 min by default) runs out. A single-participant event closes with that
+tracker as the leave's descriptor and snapshot (proven live). A multi-participant event closes
+the way Protect's backend reads a leave: empty `descriptors`, one `smartDetectSnapshots` entry
+per participant, and `trackerIDAttrMap` carrying `faceEmbed` (face), `associatedFaceTrackerID`
+(the person whose box holds the face), and `vehicleType`/`color`/`matchedName` (plate) for
+vehicles. If Protect requests none of its snapshots within 4 s, the single-tracker leave (face >
+person > vehicle > animal) is resent. Seen live: Protect recorded faces in its faces section from
+pi-port's face events, so its face service accepts SFace embeddings. A track still in view at the time
 limit (a parked car) goes quiet until it really moves: its box mostly leaves the parked spot,
 or shifts at about the same size for ~6 s (someone walking past only shrinks it for a moment). Line-crossing events stay per track.
 

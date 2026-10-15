@@ -43,6 +43,7 @@ class Base(unittest.TestCase):
         av._snapshot_seq_by_device.clear()
         av._stream_dims.clear()
         av._active_streams.clear()
+        av._pending_leaves.clear()
         self.sent = []
         self._orig_send = av.send_msg
         av.send_msg = lambda ws, fn, payload, **kw: self.sent.append((fn, payload))
@@ -350,6 +351,9 @@ class TestCameraEvent(Base):
         av._motion_state.pop("D", None)
         self.addCleanup(av._motion_state.pop, "D", None)
         self.addCleanup(av._event_max_ms.pop, "D", None)
+        patcher = mock.patch.object(av, "LEAVE_FALLBACK_S", 3600)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tick(self, *objs):
         self._faces = [o for o in objs if o["objectType"] == "face"]
@@ -368,7 +372,8 @@ class TestCameraEvent(Base):
         for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
             self.tick()
         ev = self.events()
-        self.assertEqual(ev[-1], ("leave", ["face"], ["face"]))  # one tracker: the face
+        # Multi-participant leave: no descriptors, a snapshot per participant.
+        self.assertEqual(ev[-1], ("leave", [], ["face", "person"]))
         self.assertEqual([e[0] for e in ev[:-1]], ["moving"] * (len(ev) - 1))
         self.assertIsNone(av._motion_state["D"].get("event"))
 
@@ -401,7 +406,7 @@ class TestCameraEvent(Base):
         self.assertEqual(self.events(), [("enter", ["face", "person"], [])])
         for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
             self.tick(self.CAR)
-        self.assertEqual(self.events()[-1], ("leave", ["face"], ["face"]))
+        self.assertEqual(self.events()[-1], ("leave", [], ["face", "person"]))
 
     def test_occlusion_does_not_wake_parked_car(self):
         # Live 10:27:24: someone walked in front of a parked car; its box narrowed
@@ -447,7 +452,13 @@ class TestCameraEvent(Base):
         ev = self.events()
         self.assertEqual(ev[0][0], "enter")
         self.assertNotIn("vehicle", ev[0][1])   # the car stayed parked
-        self.assertEqual(ev[-1], ("leave", ["face"], ["face"]))  # closed without the time limit
+        self.assertEqual(ev[-1], ("leave", [], ["face", "person"]))  # closed without the time limit
+
+    def test_single_participant_keeps_proven_leave(self):
+        av._event_max_ms["D"] = 0
+        self.tick(self.CAR)
+        self.tick(self.CAR)
+        self.assertEqual(self.events()[-1], ("leave", ["vehicle"], ["vehicle"]))
 
     def test_leave_priority(self):
         person = (1, {"objectType": "person", "score": 0.9})
@@ -463,6 +474,75 @@ class TestCameraEvent(Base):
                                   "payload": {"deviceID": "D", "eventMaxDurationMSec": 300000}},
                            {})
         self.assertEqual(av._event_max_ms["D"], 300000)
+
+
+class TestMultiLeave(Base):
+    """Real-device leave for several participants, with a single-tracker fallback."""
+
+    def members(self):
+        person = {"objectType": "person", "coord": [400, 200, 300, 700], "score": 0.85,
+                  "first_shown_ms": 90, "extra": {},
+                  "best": {"jpeg": b"P", "coord": [400, 200, 300, 700], "score": 0.9, "wall": 111}}
+        face = {"objectType": "face", "coord": [520, 230, 50, 60], "score": 0.92,
+                "first_shown_ms": 95, "extra": {"faceEmbed": [0.1, 0.2]},
+                "best": {"jpeg": b"F", "coord": [520, 230, 50, 60], "score": 0.93, "wall": 222}}
+        car = {"objectType": "vehicle", "coord": [0, 500, 200, 100], "score": 0.7,
+               "first_shown_ms": 80, "extra": {"name": "ABC123", "attributes": {
+                   "vehicleType": {"val": "truck", "confidence": 70},
+                   "color": {"val": "white", "confidence": 70}}}}
+        return [(4, face), (3, person), (1, car)]
+
+    def setUp(self):
+        super().setUp()
+        av._stream_dims["D"] = (2560, 1440)
+        self.fallbacks = []
+
+    def send(self, wait=30):
+        from unittest import mock
+        with mock.patch.object(av, "LEAVE_FALLBACK_S", wait):
+            return av._send_multi_leave(None, "D", 9, self.members(),
+                                        lambda: self.fallbacks.append(1))
+
+    def test_payload_shape(self):
+        self.send().cancel()
+        payload = self.sent[-1][1]
+        self.assertEqual((payload["edgeType"], payload["descriptors"], payload["objectTypes"]),
+                         ("leave", [], []))
+        self.assertEqual([(x["trackerID"], x["smartDetectSnapshotType"])
+                          for x in payload["smartDetectSnapshots"]],
+                         [(3, "person"), (1, "vehicle"), (4, "face")])
+        attrs = payload["trackerIDAttrMap"]
+        self.assertEqual(attrs["3"]["associatedFaceTrackerID"], 4)
+        self.assertEqual(attrs["4"]["faceEmbed"], [0.1, 0.2])
+        self.assertEqual(attrs["1"]["matchedName"], "ABC123")
+        self.assertEqual(attrs["1"]["vehicleType"], {"val": "truck", "confidence": 70})
+        self.assertEqual(attrs["1"]["color"]["val"], "white")
+        self.assertEqual(av._snapshot_filename_to_device["smartdetectsnap_zone_4222.jpg"]["jpeg"],
+                         b"F")
+        self.assertEqual(av._snapshot_filename_to_device[payload["smartDetectSnapshotFullFoV"]]
+                         ["jpeg"], b"P")  # Full-FoV from the person's best frame
+
+    def test_fallback_when_nothing_requested(self):
+        timer = self.send(wait=0.05)
+        names = [x["smartDetectSnapshot"] for x in self.sent[-1][1]["smartDetectSnapshots"]]
+        timer.join(2)
+        self.assertEqual(self.fallbacks, [1])
+        self.assertFalse(set(names) & set(av._pending_leaves))  # cleaned up
+
+    def test_no_fallback_once_protect_requests_a_snapshot(self):
+        from unittest import mock
+        timer = self.send(wait=0.3)
+        name = self.sent[-1][1]["smartDetectSnapshots"][0]["smartDetectSnapshot"]
+        with mock.patch.object(av.threading, "Thread"):
+            av.handle_function(None, {"functionName": "GetRequest", "messageId": 5, "payload": {
+                "what": "smartDetectZoneSnapshot", "filename": name, "uri": "https://x"}}, {})
+        timer.join(2)
+        self.assertEqual(self.fallbacks, [])
+
+    def test_face_outside_person_not_associated(self):
+        members = self.members()
+        members[0][1]["best"]["coord"] = [900, 900, 20, 20]
+        self.assertEqual(av._associate_faces(members), {})
 
 
 class TestSnapshotUpload(Base):

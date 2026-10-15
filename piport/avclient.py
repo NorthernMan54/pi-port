@@ -714,6 +714,127 @@ def _send_event_message(ws, device_id, edge_type, event_id, members, stationary=
 LEAVE_PRIORITY = {"face": 0, "person": 1, "vehicle": 2, "animal": 3}
 
 
+# A multi-participant event closes the way Protect's backend reads it (onObjectsLeft,
+# getAssociatedFaceTrackerIds, publishFace, fillAndCorrectTrackInfo): empty descriptors,
+# a snapshot per participant, and per-tracker attributes in trackerIDAttrMap (faceEmbed,
+# associatedFaceTrackerID, vehicleType/color, plate as matchedName). If Protect requests
+# none of its snapshots within LEAVE_FALLBACK_S, the proven single-tracker leave is resent.
+LEAVE_FALLBACK_S = 4.0
+_pending_leaves = {}  # snapshot filename -> shared {"seen": bool} for a multi-tracker leave
+
+
+def _center_inside(inner, outer):
+    cx, cy = _zone_center_norm(inner)
+    x, y, w, h = outer
+    return x <= cx <= x + w and y <= cy <= y + h
+
+
+def _associate_faces(members):
+    """{person tracker_id: face tracker_id} for faces inside a person's box."""
+    def box(tr):
+        return (tr.get("best") or {}).get("coord") or tr["coord"]
+    people = [(tid, tr) for tid, tr in members if tr["objectType"] == "person"]
+    out = {}
+    for fid, face in members:
+        if face["objectType"] != "face":
+            continue
+        holders = [(tid, tr) for tid, tr in people
+                   if tid not in out and _center_inside(box(face), box(tr))]
+        if holders:
+            tid, _ = min(holders, key=lambda m: box(m[1])[2] * box(m[1])[3])
+            out[tid] = fid
+    return out
+
+
+def _tracker_attrs(tracker_id, tr, faces_by_person):
+    """trackerIDAttrMap entry for one participant (attributeSchema keys)."""
+    entry = {"objectType": tr["objectType"], "zone": [int(SMART_DETECT_ZONE_ID)]}
+    extra = tr.get("extra") or {}
+    if tr["objectType"] == "face" and extra.get("faceEmbed"):
+        entry["faceEmbed"] = extra["faceEmbed"]
+    if tr["objectType"] == "person" and tracker_id in faces_by_person:
+        entry["associatedFaceTrackerID"] = faces_by_person[tracker_id]
+    if tr["objectType"] == "vehicle":
+        for key in ("vehicleType", "color"):
+            if key in (extra.get("attributes") or {}):
+                entry[key] = extra["attributes"][key]
+        if extra.get("name"):
+            entry["matchedName"] = extra["name"]
+    return entry
+
+
+def _send_multi_leave(ws, device_id, event_id, members, fallback):
+    """Close a multi-participant event in one leave; run fallback() if Protect then
+    requests none of its snapshots within LEAVE_FALLBACK_S."""
+    members = sorted(members, key=lambda m: (m[1]["objectType"] == "face",
+                                              LEAVE_PRIORITY.get(m[1]["objectType"], 9)))
+    now_ms = int(time.time() * 1000)
+    clock_mono, clock_stream = _stream_clocks(device_id)
+    seq = _snapshot_seq_by_device.get(device_id, 0) + 1
+    _snapshot_seq_by_device[device_id] = seq
+    fov_w, fov_h = _stream_dims.get(device_id, (DETECT_IMG_SIZE, DETECT_IMG_SIZE))
+    fullfov = f"smartdetectsnap_zone_{seq:08d}_fullfov.jpg"
+    first_best = members[0][1].get("best")
+    _record_snapshot_filename(fullfov, device_id, kind="fullfov",
+                              jpeg=first_best["jpeg"] if first_best else None)
+    faces_by_person = _associate_faces(members)
+    snapshots, attr_map = [], {}
+    for tid, tr in members:
+        b = tr.get("best")
+        crop = list(b["coord"] if b else tr["coord"])
+        box = [int(round(v)) for v in _to_protect(device_id, crop)]
+        wall = b["wall"] if b else tr["first_shown_ms"]
+        name = f"smartdetectsnap_zone_{tid}{wall}.jpg"
+        _record_snapshot_filename(name, device_id, kind="object", coord=crop,
+                                  jpeg=b["jpeg"] if b else None)
+        level = int(round(tr["score"] * 100)) if tr["score"] <= 1 else int(round(tr["score"]))
+        snapshots.append({
+            "clockBestMonotonic": 0, "clockBestWall": wall, "confidenceLevel": level,
+            "coord": box, "framingRect": box, "reVerifyEligible": False,
+            "smartDetectSnapshot": name, "smartDetectSnapshotHeight": SMART_SNAPSHOT_SIZE,
+            "smartDetectSnapshotName": "", "smartDetectSnapshotType": tr["objectType"],
+            "smartDetectSnapshotWidth": SMART_SNAPSHOT_SIZE, "trackerID": tid,
+        })
+        attr_map[str(tid)] = _tracker_attrs(tid, tr, faces_by_person)
+    level = max(s_["confidenceLevel"] for s_ in snapshots)
+    payload = {
+        "deviceID": device_id, "clockMonotonic": clock_mono, "clockStream": clock_stream,
+        "clockStreamRate": 1000, "clockWall": now_ms,
+        # Departing trackers aren't repeated in descriptors (real captures, notes s7).
+        "descriptors": [], "displayTimeoutMSec": 200, "edgeType": "leave",
+        "eventId": event_id, "objectTypes": [],
+        "smartDetectSnapshotFullFoV": fullfov,
+        "smartDetectSnapshotFullFoVHeight": fov_h, "smartDetectSnapshotFullFoVWidth": fov_w,
+        "smartDetectSnapshots": snapshots, "trackerIDAttrMap": attr_map,
+        "zonesStatus": {SMART_DETECT_ZONE_ID: {"level": level, "status": "leave"}},
+    }
+    pending = {"seen": False}
+    names = [fullfov] + [x["smartDetectSnapshot"] for x in snapshots]
+    for n in names:
+        _pending_leaves[n] = pending
+
+    def _check():
+        for n in names:
+            _pending_leaves.pop(n, None)
+        if pending["seen"]:
+            log.info("multi-tracker leave for event %s deviceID=%s: snapshots requested",
+                     event_id, device_id)
+            return
+        log.warning("multi-tracker leave for event %s deviceID=%s got no snapshot request in "
+                    "%.0fs; resending as a single-tracker leave", event_id, device_id,
+                    LEAVE_FALLBACK_S)
+        try:
+            fallback()
+        except Exception:
+            log.exception("single-tracker fallback leave failed for event %s", event_id)
+
+    send_msg(ws, "EventSmartDetect", payload, response_expected=False)
+    timer = threading.Timer(LEAVE_FALLBACK_S, _check)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
 def _leave_track(members):
     """(tracker_id, track) whose snapshot closes the event: face > person > vehicle >
     animal, then the best-scoring frame."""
@@ -870,7 +991,16 @@ def _motion_tick(ws, device_id):
                          "snapshot from %s tracker_id=%s)", event["id"], device_id,
                          "time limit" if timed_out else "all gone", len(members),
                          lead[1]["objectType"], lead[0])
-                _send_event_message(ws, device_id, "leave", event["id"], [lead], stationary=True)
+                def single(ws=ws, event_id=event["id"], lead=lead):
+                    _send_event_message(ws, device_id, "leave", event_id, [lead], stationary=True)
+                if len(members) > 1:
+                    try:
+                        _send_multi_leave(ws, device_id, event["id"], members, single)
+                    except Exception:
+                        log.exception("multi-tracker leave failed for event %s", event["id"])
+                        single()
+                else:
+                    single()
                 for _, tr in active:  # still in view: quiet until it moves again
                     tr["stationary_coord"] = list(tr["coord"])
                     tr["moved_ticks"] = 0
@@ -1593,6 +1723,9 @@ def handle_function(ws, msg, device_info):
     if fn == "GetRequest" and "snapshot" in str(payload.get("what", "")).lower():
         # Snapshot upload request (what may be snapshot/smartDetectZoneSnapshot/...FullFoV);
         # ack and upload in the background.
+        pending = _pending_leaves.pop(payload.get("filename") or "", None)
+        if pending is not None:
+            pending["seen"] = True  # Protect accepted a multi-tracker leave
         send_msg(ws, "GetRequest", {}, in_response_to=msg_id)
         threading.Thread(target=_upload_snapshot,
                           args=(payload.get("uri"), device_info, payload.get("filename"),

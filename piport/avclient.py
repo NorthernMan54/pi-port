@@ -396,9 +396,10 @@ def _load_snapshot_bgr(device_id):
 
 
 def _enrich_detections(device_id, detections):
-    """Plate/face detections derived from this tick's vehicle/person boxes.
-    Results are reused until a newer snapshot lands, so tracks don't flap; a
-    plate/name lands on its parent's extra only on a fresh read (tracks keep it)."""
+    """Face detections (plus plate text on vehicles) from this tick's boxes.
+    Protect reads a vehicle's plate from its descriptor `name` and recognises a
+    face from its `faceEmbed`. Results are reused until a newer snapshot lands, so
+    tracks don't flap; plate/name reach the parent only on a fresh read (tracks keep them)."""
     vehicles = [d for d in detections if d["objectType"] == "vehicle"]
     people = [d for d in detections if d["objectType"] == "person"]
     if not vehicles and not people:
@@ -416,13 +417,15 @@ def _enrich_detections(device_id, detections):
         extra = []
         try:
             for p in enricher.plates(img, [v["coord"] for v in vehicles]):
-                vehicles[p["parent"]].setdefault("extra", {})["licensePlate"] = p["text"]
-                extra.append({"objectType": "licensePlate", "score": p["confidence"],
-                              "coord": p["coord"],
-                              "extra": {"licensePlate": p["text"], "name": p["text"]}})
+                vehicles[p["parent"]].setdefault("scored", {})["name"] = (p["text"], p["confidence"])
+                log.info("enrichment: plate %r on vehicle for deviceID=%s (score=%.2f)",
+                         p["text"], device_id, p["confidence"])
             for f in enricher.faces(img, [p["coord"] for p in people]):
-                extra.append({"objectType": "face", "score": f["score"], "coord": f["coord"],
-                              "extra": {"name": f["name"], "tag": f["name"]}})
+                face = {"objectType": "face", "score": f["score"], "coord": f["coord"],
+                        "extra": {"name": f["name"], "tag": f["name"]}}
+                if f["embedding"] is not None:
+                    face["scored"] = {"faceEmbed": (f["embedding"], f["score"])}
+                extra.append(face)
                 if f["name"]:
                     people[f["parent"]].setdefault("extra", {}).update(
                         {"name": f["name"], "tag": f["name"]})
@@ -430,24 +433,24 @@ def _enrich_detections(device_id, detections):
             log.exception("plate/face enrichment failed for deviceID=%s", device_id)
         _enrich_cache[device_id] = (mtime, extra)
         for e in extra:
-            log.info("enrichment: %s for deviceID=%s (score=%.2f) %s", e["objectType"], device_id,
-                     e["score"], e["extra"])
+            log.info("enrichment: %s for deviceID=%s (score=%.2f, name=%r, embedding=%s)",
+                     e["objectType"], device_id, e["score"], e["extra"]["name"],
+                     "faceEmbed" in e.get("scored", {}))
     return [dict(e, extra=dict(e["extra"])) for e in extra]
 
 
 def _merge_extra(tr, d):
-    """Carry enrichment fields onto a track. Plate text follows the
-    best-scoring read; other keys (attributes, names) take the newest value
-    and are never cleared by a tick that lacks them."""
-    extra = d.get("extra")
-    if not extra:
-        return
-    if tr["objectType"] == "licensePlate":
-        if d["score"] >= tr.get("extra_score", 0):
-            tr["extra"] = dict(extra)
-            tr["extra_score"] = d["score"]
-        return
-    tr.setdefault("extra", {}).update({k: v for k, v in extra.items() if v not in ("", None)})
+    """Carry enrichment fields onto a track. Scored keys (plate text in a
+    vehicle's `name`, a face's `faceEmbed`) keep the best-scoring read; other
+    keys (attributes, names) take the newest value and are never cleared by a
+    tick that lacks them."""
+    out = tr.setdefault("extra", {})
+    out.update({k: v for k, v in (d.get("extra") or {}).items() if v not in ("", None)})
+    scores = tr.setdefault("extra_scores", {})
+    for key, (value, score) in (d.get("scored") or {}).items():
+        if score >= scores.get(key, 0):
+            out[key] = value
+            scores[key] = score
 
 
 def _iou(box_a, box_b):
@@ -702,8 +705,8 @@ def _motion_tick(ws, device_id):
                                     "coord": d["coord"], "score": d["score"],
                                     "first_shown_ms": first_shown_ms, "miss_count": 0,
                                     "prev_center": _zone_center_norm(d["coord"]),
-                                    "crossed_lines": {}, "extra": dict(d.get("extra") or {}),
-                                    "extra_score": d["score"]}
+                                    "crossed_lines": {}}
+            _merge_extra(tracks[tracker_id], d)
             log.info("real motion tick: %s detected (score=%.2f), opening smartDetectZone track "
                       "for deviceID=%s tracker_id=%s event_id=%s", d["objectType"], d["score"],
                       device_id, tracker_id, event_id)
@@ -964,6 +967,60 @@ def _upload_snapshot(upload_uri, device_info, requested_filename, what=None,
                   len(data), path, upload_uri, resp.status_code, resp.text[:300])
     except requests.RequestException as e:
         log.warning("snapshot upload to %s failed: %r", upload_uri, e)
+
+
+def _describe_face_db(path):
+    """One-line summary of a downloaded face DB: its format and, for SQLite,
+    each table's row count and columns (embedding size shows up as blob length)."""
+    with open(path, "rb") as f:
+        head = f.read(16)
+    if not head.startswith(b"SQLite format 3"):
+        kind = {b"\x1f\x8b": "gzip", b"PK": "zip", b"{": "json", b"[": "json"}
+        return next((k for m, k in kind.items() if head.startswith(m)), f"unknown ({head!r})")
+    import sqlite3
+    parts = []
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        for (table,) in con.execute("SELECT name FROM sqlite_master WHERE type='table'"):
+            cols = [r[1] for r in con.execute(f'PRAGMA table_info("{table}")')]
+            rows = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+            sample = con.execute(f'SELECT * FROM "{table}" LIMIT 1').fetchone() or ()
+            blobs = {c: len(v) for c, v in zip(cols, sample) if isinstance(v, bytes)}
+            parts.append(f"{table}({rows} rows; cols={cols}; blob bytes={blobs})")
+    finally:
+        con.close()
+    return "sqlite: " + "; ".join(parts)
+
+
+def _download_face_db(uri, device_info):
+    """Fetch the known-faces DB Protect offers (UpdateFaceDBRequest) into
+    <state-dir>/facedb/ and log what it contains."""
+    if not uri:
+        log.warning("UpdateFaceDBRequest had no uri")
+        return
+    headers = {"x-ident": device_info["mac_nosep"].upper(), "x-type": device_info["type"],
+               "x-sysid": device_info["sysid_hex"]}
+    try:
+        resp = requests.get(uri, headers=headers, cert=(CERT_PATH, KEY_PATH), verify=False,
+                            timeout=30)
+    except requests.RequestException as e:
+        log.warning("face DB download from %s failed: %r", uri, e)
+        return
+    if resp.status_code != 200:
+        log.info("face DB download from %s -> %s: %s", uri, resp.status_code, resp.text[:200])
+        return
+    out_dir = os.path.join(STATE_DIR or HERE, "facedb")
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, "known.db")
+    with open(path + ".tmp", "wb") as f:
+        f.write(resp.content)
+    os.replace(path + ".tmp", path)
+    try:
+        summary = _describe_face_db(path)
+    except Exception as e:  # unknown format: the raw file is still saved
+        summary = f"unreadable ({e!r})"
+    log.info("face DB saved to %s (%d bytes, content-type=%s): %s", path, len(resp.content),
+             resp.headers.get("content-type"), summary)
 
 
 def _stream_clocks(device_id):
@@ -1315,6 +1372,15 @@ def handle_function(ws, msg, device_info):
                           args=(payload.get("uri"), device_info, payload.get("filename"),
                                 payload.get("what"), payload.get("deviceID")),
                           daemon=True).start()
+        return
+
+    if fn == "UpdateFaceDBRequest":
+        # Protect pushes its known-faces DB (named face groups) for on-device matching.
+        # Download and describe it; matching against it isn't implemented yet.
+        if msg.get("responseExpected"):
+            send_msg(ws, fn, {}, in_response_to=msg_id)
+        threading.Thread(target=_download_face_db, args=(payload.get("uri"), device_info),
+                         daemon=True).start()
         return
 
     if fn == "ChangeSmartDetectSettings":

@@ -168,14 +168,15 @@ when onnxruntime offers it (never on Linux) and falls back to CPU if the model w
 
 ### Enrichment: vehicle attributes, license plates, faces (`enrich.py`, best-guess wire format)
 
-On top of person/vehicle/animal, `enrich.py` adds three optional stages. **The wire format
-for all three is a best guess, not confirmed against a real AI Port capture:**
+On top of person/vehicle/animal, `enrich.py` adds three optional stages. The field names
+come from Protect's backend (7.1.75); **none is confirmed against a real AI Port capture,
+and the vehicle-attribute values are guesses:**
 
 | Stage | Models | Emitted as |
 |-------|--------|------------|
 | Vehicle type + colour | YOLO class + HSV colour vote (no extra model) | `attributes: {vehicleType: {val, confidence}, color: {val, confidence}}` on vehicle descriptors (shape from the Protect backend; value vocabulary unconfirmed) |
-| License plates | `fast-alpr` (YOLOv9 plate detector + CCT OCR, MIT) on the full-res snapshot inside each vehicle box | its own `licensePlate` track (`licensePlate` + `name` = text), and `licensePlate` on the parent vehicle descriptor |
-| Faces | YuNet (MIT) inside each person box; SFace (Apache-2.0) against a local gallery | its own `face` track; a gallery match sets `name`/`tag` on the face and parent person |
+| License plates | `fast-alpr` (YOLOv9 plate detector + CCT OCR, MIT) on the full-res snapshot inside each vehicle box | plate text in the vehicle descriptor's `name` (Protect's `parseSmartDetectTrackPayload` reads it there; `recognizeTracks` recognises moving vehicles with a `name`); best-scoring read kept per track |
+| Faces | YuNet (MIT) inside each person box; SFace (Apache-2.0) embedding | its own `face` track carrying `faceEmbed` (128 floats, best-scoring face kept), which `recognizeTracks` passes to Protect's face service; an optional local-gallery match also sets `name`/`tag` on the face and parent person |
 
 Plates and faces are read from the full-res snapshot (refreshed every second while they are on),
 not the 640x640 detection buffer. The `smartDetect` capabilities gain `licensePlate`,
@@ -183,8 +184,13 @@ not the 640x640 detection buffer. The `smartDetect` capabilities gain `licensePl
 Knobs: `AIPORT_VEHICLE_ATTRS` / `AIPORT_LPR` / `AIPORT_FACE` (`auto`|`0`|`1`),
 `AIPORT_LPR_THRESH`, `AIPORT_FACE_THRESH`, `AIPORT_FACE_MATCH_THRESH`, and
 `AIPORT_FACES_DIR` (default `<state-dir>/faces`): one sub-directory per person, named after
-them, holding a few clear face photos; edits are picked up without a restart. Protect's own
-face enrolment is not synced to the device (that protocol is unknown).
+them, holding a few clear face photos; edits are picked up without a restart.
+
+Protect also sends `UpdateFaceDBRequest` with a URL for its known-faces database (named
+groups, for on-device matching). `avclient.py` downloads it to `<state-dir>/facedb/known.db`
+and logs its format (for SQLite: tables, row counts, blob sizes), so the embedding layout can
+be compared with SFace's; matching against it (`matchedId`) is not implemented yet. Whether
+Protect's face service accepts SFace embeddings is also unconfirmed.
 
 Classification is also **gated by a cheap frame-diff**: a tick with no open track and no
 meaningful frame change skips inference entirely (on a static scene this is the difference

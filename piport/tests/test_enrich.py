@@ -90,22 +90,30 @@ except Exception as exc:  # websockets/requests missing
 
 @unittest.skipIf(avclient is None, f"avclient unavailable ({_AV_ERR})")
 class TestMergeExtra(unittest.TestCase):
-    def test_plate_keeps_best_read(self):
-        tr = {"objectType": "licensePlate", "extra": {"licensePlate": "ABC123"}, "extra_score": 0.9}
-        avclient._merge_extra(tr, {"score": 0.6, "extra": {"licensePlate": "A8C123"}})
-        self.assertEqual(tr["extra"]["licensePlate"], "ABC123")
-        avclient._merge_extra(tr, {"score": 0.95, "extra": {"licensePlate": "ABC124"}})
-        self.assertEqual(tr["extra"]["licensePlate"], "ABC124")
+    def test_plate_name_keeps_best_read(self):
+        tr = {"objectType": "vehicle"}
+        avclient._merge_extra(tr, {"scored": {"name": ("ABC123", 0.9)}})
+        avclient._merge_extra(tr, {"scored": {"name": ("A8C123", 0.6)}})
+        self.assertEqual(tr["extra"]["name"], "ABC123")
+        avclient._merge_extra(tr, {"scored": {"name": ("ABC124", 0.95)}})
+        self.assertEqual(tr["extra"]["name"], "ABC124")
+
+    def test_face_embed_keeps_best_face(self):
+        tr = {"objectType": "face"}
+        avclient._merge_extra(tr, {"extra": {"name": ""}, "scored": {"faceEmbed": ([1.0], 0.8)}})
+        avclient._merge_extra(tr, {"extra": {"name": ""}, "scored": {"faceEmbed": ([2.0], 0.7)}})
+        self.assertEqual(tr["extra"]["faceEmbed"], [1.0])
+        self.assertNotIn("name", tr["extra"])
 
     def test_name_not_cleared_by_unmatched_tick(self):
         tr = {"objectType": "face", "extra": {"name": "Alex", "tag": "Alex"}}
-        avclient._merge_extra(tr, {"score": 0.9, "extra": {"name": "", "tag": ""}})
+        avclient._merge_extra(tr, {"extra": {"name": "", "tag": ""}})
         self.assertEqual(tr["extra"]["name"], "Alex")
 
-    def test_vehicle_gains_plate(self):
+    def test_attributes_and_plate_coexist(self):
         tr = {"objectType": "vehicle", "extra": {"attributes": {"color": {"val": "red"}}}}
-        avclient._merge_extra(tr, {"score": 0.8, "extra": {"licensePlate": "XYZ9"}})
-        self.assertEqual(tr["extra"]["licensePlate"], "XYZ9")
+        avclient._merge_extra(tr, {"scored": {"name": ("XYZ9", 0.8)}})
+        self.assertEqual(tr["extra"]["name"], "XYZ9")
         self.assertIn("attributes", tr["extra"])
 
     def test_descriptor_carries_extra(self):
@@ -114,15 +122,74 @@ class TestMergeExtra(unittest.TestCase):
         avclient.send_msg = lambda ws, fn, payload, **kw: sent.append(payload)
         try:
             avclient._send_smart_detect_event(
-                None, "DEV", edge_type="enter", object_type="licensePlate",
-                coord=[1, 2, 3, 4], confidence=0.9,
-                descriptor_extra={"licensePlate": "ABC123", "name": "ABC123"})
+                None, "DEV", edge_type="enter", object_type="vehicle",
+                coord=[1, 2, 3, 4], confidence=0.9, descriptor_extra={"name": "ABC123"})
+            avclient._send_smart_detect_event(
+                None, "DEV", edge_type="enter", object_type="face",
+                coord=[1, 2, 3, 4], confidence=0.9, descriptor_extra={"faceEmbed": [0.5, -0.25]})
         finally:
             avclient.send_msg = orig
-        d = sent[0]["descriptors"][0]
-        self.assertEqual((d["objectType"], d["licensePlate"], d["name"]),
-                         ("licensePlate", "ABC123", "ABC123"))
-        self.assertEqual(sent[0]["objectTypes"], ["licensePlate"])
+        vehicle, face = (p["descriptors"][0] for p in sent)
+        self.assertEqual((vehicle["objectType"], vehicle["name"]), ("vehicle", "ABC123"))
+        self.assertNotIn("licensePlate", vehicle)
+        self.assertEqual(face["faceEmbed"], [0.5, -0.25])
+
+
+@unittest.skipIf(avclient is None, f"avclient unavailable ({_AV_ERR})")
+class TestEnrichDetections(unittest.TestCase):
+    """Plates land on the parent vehicle's `name`; faces become face detections."""
+
+    class _Enricher:
+        lpr = face = True
+
+        def plates(self, img, coords):
+            return [{"coord": [10, 10, 5, 5], "text": "ABC123", "confidence": 0.9, "parent": 0}]
+
+        def faces(self, img, coords):
+            return [{"coord": [20, 20, 5, 5], "score": 0.85, "name": "", "embedding": [0.1, 0.2],
+                     "parent": 0}]
+
+    def setUp(self):
+        from unittest import mock
+        for target, value in (("_get_enricher", lambda: self._Enricher()),
+                              ("_load_snapshot_bgr", lambda dev: (np.zeros((4, 4, 3), np.uint8), 1.0))):
+            patcher = mock.patch.object(avclient, target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        avclient._enrich_cache.pop("DEV", None)
+        self.addCleanup(avclient._enrich_cache.pop, "DEV", None)
+
+    def test_plate_and_face(self):
+        vehicle = {"objectType": "vehicle", "score": 0.8, "coord": [0, 0, 100, 100]}
+        person = {"objectType": "person", "score": 0.8, "coord": [0, 0, 100, 100]}
+        extra = avclient._enrich_detections("DEV", [vehicle, person])
+        self.assertEqual(vehicle["scored"]["name"], ("ABC123", 0.9))
+        self.assertEqual([e["objectType"] for e in extra], ["face"])
+        self.assertEqual(extra[0]["scored"]["faceEmbed"], ([0.1, 0.2], 0.85))
+
+
+@unittest.skipIf(avclient is None, f"avclient unavailable ({_AV_ERR})")
+class TestFaceDb(unittest.TestCase):
+    def test_describe_sqlite(self):
+        import sqlite3
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(), "known.db")
+        self.addCleanup(os.remove, path)
+        con = sqlite3.connect(path)
+        con.execute("CREATE TABLE faces (subject_id INTEGER, embedding BLOB)")
+        con.execute("INSERT INTO faces VALUES (7, ?)", (bytes(512),))
+        con.commit()
+        con.close()
+        summary = avclient._describe_face_db(path)
+        self.assertIn("faces(1 rows", summary)
+        self.assertIn("'embedding': 512", summary)
+
+    def test_describe_unknown(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            f.write(b"\x1f\x8b\x08rest")
+        self.addCleanup(os.remove, f.name)
+        self.assertEqual(avclient._describe_face_db(f.name), "gzip")
 
 
 _SAMPLES = os.environ.get("AIPORT_ENRICH_SAMPLES")
@@ -147,6 +214,7 @@ class TestModels(unittest.TestCase):
         faces = self.e.faces(img, [[0, 0, 1000, 1000]])
         self.assertEqual(len(faces), 1)
         self.assertEqual(faces[0]["name"], "")
+        self.assertEqual(len(faces[0]["embedding"]), 128)
 
 
 if __name__ == "__main__":

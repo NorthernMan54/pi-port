@@ -5,11 +5,12 @@
 
   * vehicle type + colour -> descriptor ``attributes`` ({val, confidence} per key,
     shape from the Protect backend decompile; values are best guesses)
-  * license plates        -> ``licensePlate`` descriptors (fast-alpr: YOLOv9 plate
-    detector + CCT OCR, both MIT) read off the full-resolution snapshot
-  * faces                 -> ``face`` descriptors (OpenCV zoo YuNet detector, MIT),
-    named via SFace embeddings (Apache-2.0) against a local gallery:
-    ``<faces dir>/<Name>/*.jpg``
+  * license plates        -> the vehicle descriptor's ``name`` (where Protect reads the
+    plate; fast-alpr: YOLOv9 plate detector + CCT OCR, both MIT), read off the
+    full-resolution snapshot
+  * faces                 -> ``face`` descriptors (OpenCV zoo YuNet detector, MIT) carrying
+    ``faceEmbed``, the SFace embedding (Apache-2.0) Protect's face service groups by;
+    optionally named against a local gallery: ``<faces dir>/<Name>/*.jpg``
 
 Each stage is optional (AIPORT_VEHICLE_ATTRS / AIPORT_LPR / AIPORT_FACE =
 auto|0|1): a missing dependency or model disables it with one warning.
@@ -180,6 +181,13 @@ def _to_norm(x1, y1, x2, y2, img_w, img_h):
     return [x1 * sx, y1 * sy, max(1.0, (x2 - x1) * sx), max(1.0, (y2 - y1) * sy)]
 
 
+def _embedding_list(emb):
+    """SFace feature (1x128 float32) -> JSON-safe list for the descriptor's faceEmbed."""
+    if emb is None:
+        return None
+    return [round(float(v), 5) for v in np.asarray(emb).ravel()]
+
+
 def _coreml_providers():
     try:
         import onnxruntime as ort
@@ -259,7 +267,8 @@ class Enricher:
         return out
 
     def faces(self, img_bgr, person_coords):
-        """Faces inside each person box: [{coord, score, name, similarity, parent}]."""
+        """Faces inside each person box: [{coord, score, embedding, name, similarity,
+        parent}]. embedding is SFace's 128-float vector (None without the SFace model)."""
         if not self.face or img_bgr is None:
             return []
         ih, iw = img_bgr.shape[:2]
@@ -283,17 +292,17 @@ class Enricher:
                     continue
                 for f in found:
                     fx, fy, fw, fh = [float(v) for v in f[:4]]
-                    name, sim = self._match(sface, crop, f)
+                    emb = sface.feature(sface.alignCrop(crop, f)) if sface is not None else None
+                    name, sim = self._match(sface, emb)
                     out.append({"coord": _to_norm(x1 + fx, y1 + fy, x1 + fx + fw, y1 + fy + fh, iw, ih),
                                 "score": float(f[14]), "name": name, "similarity": sim,
-                                "parent": parent})
+                                "embedding": _embedding_list(emb), "parent": parent})
         return out
 
-    def _match(self, sface, img, face_row):
-        if sface is None or not self._gallery:
+    def _match(self, sface, emb):
+        if emb is None or not self._gallery:
             return "", 0.0
         import cv2
-        emb = sface.feature(sface.alignCrop(img, face_row))
         best_name, best = "", 0.0
         for name, ref in self._gallery:
             sim = float(sface.match(emb, ref, cv2.FaceRecognizerSF_FR_COSINE))

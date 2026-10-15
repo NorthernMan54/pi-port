@@ -188,15 +188,6 @@ def _embedding_list(emb):
     return [round(float(v), 5) for v in np.asarray(emb).ravel()]
 
 
-def _coreml_providers():
-    try:
-        import onnxruntime as ort
-        from detector import _onnx_providers
-        return _onnx_providers(ort.get_available_providers())
-    except Exception:
-        return ["CPUExecutionProvider"]
-
-
 class Enricher:
     """Lazily-loaded plate + face models, shared across camera threads."""
 
@@ -220,8 +211,11 @@ class Enricher:
     def _get_alpr(self):
         if self._alpr is None:
             from fast_alpr import ALPR
-            # The CCT OCR graph doesn't compile for Core ML MLProgram; it's tiny on CPU.
-            self._alpr = ALPR(detector_providers=_coreml_providers(),
+            # Both on CPU: the CCT OCR graph doesn't compile for Core ML MLProgram, and the
+            # YOLOv9 end2end detector's NMS output has a dynamic shape ({-1}) that Core ML
+            # fails on at inference (seen live on passing cars; fast-alpr then returns no
+            # plates). ~33 ms per read on an M1 Pro CPU, only for moving vehicles.
+            self._alpr = ALPR(detector_providers=["CPUExecutionProvider"],
                               ocr_providers=["CPUExecutionProvider"])
         return self._alpr
 

@@ -200,6 +200,13 @@ all), 1.5 s elsewhere. Time-based thresholds (30 s miss tolerance, 30 s to count
 6 s to resume after parking) keep their durations at any rate; boxes are displayed until
 just past the next update. The RTSP pull uses `-flags low_delay`.
 
+**Box timing.** Frames reach a check a few seconds after capture (Protect's relay, decode,
+the tick wait), and Protect places boxes in playback by `clockWall`, so boxes lagged the video
+by ~3 s. `AIPORT_BOX_DELAY_MS` back-dates every frame-describing time (`clockWall`, the stream
+clocks, first-shown/idle times, `clockBestWall`) by a delay: `"3000"` for all cameras, or with
+per-camera overrides, e.g. `"2000,AABBCC3344CC=3000"` (a proxied camera has an extra hop).
+Default 0. Tune it by comparing a box's time with the video in playback.
+
 **Events.** Protect keeps one smart-detect event per camera, not per track: the first
 `leave` closes it, and a scheduled check force-ends one left open past ~5.5 minutes without
 fetching any snapshots. So tracks share a camera event: `enter` when the first track

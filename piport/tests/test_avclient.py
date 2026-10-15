@@ -601,6 +601,46 @@ class TestMultiLeave(Base):
         self.assertEqual(av._associate_faces(members), {})
 
 
+class TestBoxDelay(Base):
+    """AIPORT_BOX_DELAY_MS back-dates frame-describing timestamps per camera."""
+
+    def setUp(self):
+        super().setUp()
+        from unittest import mock
+        for name, value in (("_BOX_DELAY_DEFAULT_MS", 1000), ("_BOX_DELAY_MS", {"SLOW": 3000})):
+            patcher = mock.patch.object(av, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_parse(self):
+        self.assertEqual(av._parse_box_delay("2500, aabbcc3344cc=3000 ,8CEDE172C456=1500"),
+                         (2500, {"AABBCC3344CC": 3000, "8CEDE172C456": 1500}))
+        self.assertEqual(av._parse_box_delay(""), (0, {}))
+        self.assertEqual(av._parse_box_delay("x,DEV=y,500"), (500, {}))
+
+    def test_per_camera_delay(self):
+        self.assertEqual(av._box_delay_ms("SLOW"), 3000)
+        self.assertEqual(av._box_delay_ms("other"), 1000)
+        before = int(av.time.time() * 1000)
+        self.assertLessEqual(av._frame_wall_ms("SLOW"), before - 3000 + 50)
+
+    def test_event_backdated(self):
+        before = int(av.time.time() * 1000)
+        av._send_smart_detect_event(None, "SLOW", edge_type="enter", object_type="vehicle",
+                                    coord=[1, 2, 3, 4], confidence=0.9)
+        p = self.sent[-1][1]
+        self.assertTrue(before - 3100 <= p["clockWall"] <= before - 2900)
+        self.assertTrue(before - 3100 <= p["descriptors"][0]["firstShownTimeMs"] <= before - 2900)
+
+    def test_stream_clocks_backdated_not_negative(self):
+        av._stream_started_monotonic_ms["SLOW"] = int(av.time.monotonic() * 1000) - 10000
+        self.addCleanup(av._stream_started_monotonic_ms.pop, "SLOW", None)
+        mono, stream = av._stream_clocks("SLOW")
+        self.assertTrue(6900 <= mono <= 7100 and mono == stream)
+        av._stream_started_monotonic_ms["SLOW"] = int(av.time.monotonic() * 1000)
+        self.assertEqual(av._stream_clocks("SLOW"), (0, 0))
+
+
 class TestSnapshotUpload(Base):
     class _Resp:
         status_code = 200

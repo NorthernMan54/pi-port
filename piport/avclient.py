@@ -481,7 +481,7 @@ def _capture_best(device_id, tr, d):
     if data is None:
         return
     tr["best"] = {"jpeg": data, "coord": list(d["coord"]), "score": d["score"],
-                  "wall": int(time.time() * 1000)}
+                  "wall": _frame_wall_ms(device_id)}
 
 
 # A plate can't change on a vehicle that isn't moving, and a confident read won't improve.
@@ -834,7 +834,7 @@ def _send_multi_leave(ws, device_id, event_id, members, fallback):
     requests none of its snapshots within LEAVE_FALLBACK_S."""
     members = sorted(members, key=lambda m: (m[1]["objectType"] == "face",
                                               LEAVE_PRIORITY.get(m[1]["objectType"], 9)))
-    now_ms = int(time.time() * 1000)
+    now_ms = _frame_wall_ms(device_id)
     clock_mono, clock_stream = _stream_clocks(device_id)
     seq = _snapshot_seq_by_device.get(device_id, 0) + 1
     _snapshot_seq_by_device[device_id] = seq
@@ -954,7 +954,7 @@ def _motion_tick(ws, device_id):
         detections = _dedupe_detections(_classify_frame_detections(device_id))
         detections += _enrich_detections(device_id, detections)
     with _motion_lock:
-        now_ms = int(time.time() * 1000)
+        now_ms = _frame_wall_ms(device_id)
         dev = _motion_state.setdefault(device_id, {"tracks": {}, "next_tracker_id": 1,
                                                    "started_ms": now_ms})
         tracks = dev["tracks"]
@@ -1445,6 +1445,39 @@ def _download_face_db(uri, device_info):
              resp.headers.get("content-type"), summary)
 
 
+def _parse_box_delay(spec):
+    """AIPORT_BOX_DELAY_MS: "<default ms>[,<deviceID>=<ms>...]" -> (default, {deviceID: ms})."""
+    default, per = 0, {}
+    for part in (spec or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            if "=" in part:
+                dev, ms = part.split("=", 1)
+                per[dev.strip().upper()] = int(ms)
+            else:
+                default = int(part)
+        except ValueError:
+            log.warning("ignoring bad AIPORT_BOX_DELAY_MS entry %r", part)
+    return default, per
+
+
+# Frames reach a check seconds after capture (Protect's relay, decode, the tick wait), and
+# Protect places boxes in playback by clockWall, so boxes lagged the video by ~3 s. Every
+# frame-describing time is back-dated by this per-camera delay (default 0 = unchanged).
+_BOX_DELAY_DEFAULT_MS, _BOX_DELAY_MS = _parse_box_delay(os.environ.get("AIPORT_BOX_DELAY_MS"))
+
+
+def _box_delay_ms(device_id):
+    return _BOX_DELAY_MS.get(str(device_id).upper(), _BOX_DELAY_DEFAULT_MS)
+
+
+def _frame_wall_ms(device_id):
+    """Wall-clock ms of the frame being processed now (now minus the camera's delay)."""
+    return int(time.time() * 1000) - _box_delay_ms(device_id)
+
+
 def _stream_clocks(device_id):
     """(clockMonotonic, clockStream) in ms for a device: the device's monotonic
     clock (ms since this process started the stream) and the media-timeline
@@ -1457,7 +1490,7 @@ def _stream_clocks(device_id):
     started = _stream_started_monotonic_ms.get(device_id)
     if started is None:
         return 0, 0
-    mono = int(time.monotonic() * 1000) - started
+    mono = max(0, int(time.monotonic() * 1000) - started - _box_delay_ms(device_id))
     return mono, mono
 
 
@@ -1469,7 +1502,7 @@ def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, statio
     # also_leaving: further tracks closing on the same tick (dicts with this function's
     # per-track arguments). Real devices batch them into one leave with one snapshot
     # entry per tracker; one leave per track got only the first track's images fetched.
-    now_ms = int(time.time() * 1000)
+    now_ms = _frame_wall_ms(device_id)
     clock_mono, clock_stream = _stream_clocks(device_id)
     tracks = [{"tracker_id": tracker_id, "object_type": object_type, "coord": coord,
                "confidence": confidence, "first_shown_ms": first_shown_ms,
@@ -1581,7 +1614,7 @@ def _send_line_detect_event(ws, device_id, line, edge_type, event_id, direction,
                             first_shown_ms, tracker_id):
     """Line Crossing event: same envelope as the zone path but with
     linesStatus, so the controller selects smartDetectLine."""
-    now_ms = int(time.time() * 1000)
+    now_ms = _frame_wall_ms(device_id)
     clock_mono, clock_stream = _stream_clocks(device_id)
     real_coord = ([int(round(v)) for v in _to_protect(device_id, coord)]
                   if coord is not None else [100, 100, 200, 200])

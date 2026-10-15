@@ -268,7 +268,7 @@ class _RknnBackend:
 
 def _onnx_providers(available):
     """onnxruntime providers (AIPORT_ORT_PROVIDER = auto/coreml/cpu): Core ML on
-    macOS (MLProgram on the Neural Engine, ~10x CPU on Apple silicon), else CPU."""
+    macOS (MLProgram on the Neural Engine, ~5-6x CPU on Apple silicon), else CPU."""
     want = os.environ.get("AIPORT_ORT_PROVIDER", "auto").strip().lower()
     if want != "cpu" and "CoreMLExecutionProvider" in available:
         # Default NeuralNetwork format falls back to CPU on the fp16 Ultralytics model.

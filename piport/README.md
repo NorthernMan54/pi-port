@@ -178,7 +178,8 @@ and the vehicle-attribute values are guesses:**
 | License plates | `fast-alpr` (YOLOv9 plate detector + CCT OCR, MIT) on the full-res snapshot inside each vehicle box | plate text in the vehicle descriptor's `name` (Protect's `parseSmartDetectTrackPayload` reads it there; `recognizeTracks` recognises moving vehicles with a `name`); best-scoring read kept per track |
 | Faces | YuNet (MIT) inside each person box; SFace (Apache-2.0) embedding | its own `face` track carrying `faceEmbed` (128 floats, best-scoring face kept), which `recognizeTracks` passes to Protect's face service; an optional local-gallery match also sets `name`/`tag` on the face and parent person |
 
-Plates and faces are read from the full-res snapshot (refreshed every second while they are on),
+A vehicle that is parked, still, or already has a confident plate (score >= 0.85) isn't
+re-read: its plate can't have changed. Plates and faces are read from the full-res snapshot (refreshed every second while they are on),
 not the 640x640 detection buffer. The `smartDetect` capabilities gain `licensePlate`,
 `lprEnhancedByAiKey`, `face`, `faceEnhancedByAiKey` only when the matching stage is available.
 Knobs: `AIPORT_VEHICLE_ATTRS` / `AIPORT_LPR` / `AIPORT_FACE` (`auto`|`0`|`1`),

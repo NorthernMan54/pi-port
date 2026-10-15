@@ -465,12 +465,32 @@ def _capture_best(device_id, tr, d):
                   "wall": int(time.time() * 1000)}
 
 
+# A plate can't change on a vehicle that isn't moving, and a confident read won't improve.
+PLATE_CONFIDENT = 0.85
+SETTLED_MATCH_IOU = 0.5
+
+
+def _plate_settled(device_id, coord):
+    """True if this vehicle box belongs to a track that is parked, still, or already has a
+    confident plate -- re-reading it is wasted work."""
+    with _motion_lock:
+        tracks = list(_motion_state.get(device_id, {}).get("tracks", {}).values())
+    for tr in tracks:
+        if tr["objectType"] != "vehicle" or _iou(tr["coord"], coord) < SETTLED_MATCH_IOU:
+            continue
+        if (tr.get("stationary_coord") or tr.get("still")
+                or tr.get("extra_scores", {}).get("name", 0) >= PLATE_CONFIDENT):
+            return True
+    return False
+
+
 def _enrich_detections(device_id, detections):
     """Face detections (plus plate text on vehicles) from this tick's boxes.
     Protect reads a vehicle's plate from its descriptor `name` and recognises a
     face from its `faceEmbed`. Results are reused until a newer snapshot lands, so
     tracks don't flap; plate/name reach the parent only on a fresh read (tracks keep them)."""
-    vehicles = [d for d in detections if d["objectType"] == "vehicle"]
+    vehicles = [d for d in detections if d["objectType"] == "vehicle"
+                and not _plate_settled(device_id, d["coord"])]
     people = [d for d in detections if d["objectType"] == "person"]
     if not vehicles and not people:
         return []

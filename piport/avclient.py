@@ -127,11 +127,12 @@ _motion_lock = threading.Lock()
 _motion_poll_stop = {}  # deviceID -> threading.Event, signals the poll loop to stop
 _motion_poll_thread = {}  # deviceID -> threading.Thread, joined on stop
 _event_id_counter = itertools.count(int(time.time()))  # monotonic, avoids same-second collisions across tracks
-# Seconds between classification ticks (AIPORT_TICK_S). 0.5 s on macOS, where Core ML runs
-# a frame in ~7 ms: at 1.5 s a car crossing a far road was classified once or not at all.
+# Seconds between classification ticks (AIPORT_TICK_S). 0.33 s on macOS, where Core ML runs
+# a frame in ~8 ms: a G5 Bullet sends a moving update every ~330 ms (median of 44, 249-600 ms)
+# with displayTimeoutMSec ~326; at 1.5 s a car crossing a far road was classified once or not at all.
 # 1.5 s elsewhere (Pi/RK3588 CPU budget). The detection stream runs at least this fast.
 MOTION_POLL_INTERVAL_S = float(os.environ.get("AIPORT_TICK_S")
-                               or (0.5 if sys.platform == "darwin" else 1.5))
+                               or (0.33 if sys.platform == "darwin" else 1.5))
 DETECT_FPS = max(2, math.ceil(1 / MOTION_POLL_INTERVAL_S))
 
 
@@ -140,14 +141,27 @@ def _ticks(seconds):
     return max(1, round(seconds / MOTION_POLL_INTERVAL_S))
 
 
-# How long Protect shows each box: just past the next update. Real cameras update several
-# times a second with ~200-360 ms; at 1.5 s per update a 200 ms box flashed on and off.
-BOX_DISPLAY_MS = int(MOTION_POLL_INTERVAL_S * 1000) + 300
-# Seconds with no detection before a track closes (AIPORT_MISS_S, default 5): the event
-# ends about this long after the object was last seen. At 30 s a car passing in a few
-# seconds made a 30 s event. Needs track state to survive UiStreamControl refreshes.
-MOTION_MISS_TOLERANCE_S = float(os.environ.get("AIPORT_MISS_S") or 5)
+# How long Protect shows each box: until just past the next update (a G5 Bullet's
+# displayTimeoutMSec ~= its update gap). At 1.5 s per update a 200 ms box flashed on and off.
+BOX_DISPLAY_MS = int(MOTION_POLL_INTERVAL_S * 1000) + 100
+# Seconds with no detection before a track closes (AIPORT_MISS_S, default 3): the event
+# ends about this long after the object was last seen. A G5 Bullet sends leave ~2 s after
+# the object was last seen; 3 s allows for our detector missing a frame or two. At 30 s a
+# car passing in a few seconds made a 30 s event. Needs track state to survive
+# UiStreamControl refreshes. Parked tracks flicker in and out of detection, so they keep
+# 30 s (dropping one would re-create it as a new arrival).
+MOTION_MISS_TOLERANCE_S = float(os.environ.get("AIPORT_MISS_S") or 3)
 MOTION_MISS_TOLERANCE_TICKS = _ticks(MOTION_MISS_TOLERANCE_S)
+PARKED_MISS_TOLERANCE_TICKS = _ticks(30)
+# Reported boxes are smoothed (exponential, this weight on the newest detection) so per-frame
+# detector jitter doesn't make them jump; matching and crops use the raw box.
+BOX_SMOOTHING = 0.6
+# A moving track that no box overlaps takes the nearest same-type detection within this many
+# times its size (+ margin, 0-1000 units) of where its last movement predicts it: small, fast
+# objects (far-road cars and walkers) moved further than their width between ticks and were
+# re-created as a new track every tick.
+NN_DIST_FACTOR = 3.0
+NN_DIST_MARGIN = 30
 # Min IOU (same objectType) to match a detection to an existing track.
 IOU_MATCH_THRESHOLD = 0.3
 # Motion/scene gate: skip the classifier on a near-static frame with no open track.
@@ -551,6 +565,36 @@ def _enrich_detections(device_id, detections):
     return [dict(e, extra=dict(e["extra"])) for e in extra]
 
 
+def _nearest_detection(tr, detections, unclaimed):
+    """Index of the nearest same-type unclaimed detection to where tr's motion predicts it,
+    within NN_DIST_FACTOR x its size (+ margin, growing while it's missed); None if none."""
+    cx, cy = _zone_center_norm(tr["coord"])
+    vx, vy = tr.get("velocity", (0.0, 0.0))
+    steps = 1 + tr["miss_count"]
+    px, py = cx + vx * steps, cy + vy * steps
+    limit = (NN_DIST_FACTOR * max(tr["coord"][2], tr["coord"][3]) + NN_DIST_MARGIN) * steps
+    best, best_dist = None, limit
+    for idx in unclaimed:
+        d = detections[idx]
+        if d["objectType"] != tr["objectType"]:
+            continue
+        dx, dy = _zone_center_norm(d["coord"])
+        dist = ((dx - px) ** 2 + (dy - py) ** 2) ** 0.5
+        if dist <= best_dist:
+            best, best_dist = idx, dist
+    return best
+
+
+def _follow(tr, coord):
+    """Move a track to a new raw box: velocity per tick and the smoothed reporting box."""
+    (ox, oy), (nx, ny) = _zone_center_norm(tr["coord"]), _zone_center_norm(coord)
+    steps = 1 + tr.get("miss_count", 0)
+    tr["velocity"] = ((nx - ox) / steps, (ny - oy) / steps)
+    prev = tr.get("smooth") or tr["coord"]
+    tr["smooth"] = [BOX_SMOOTHING * c + (1 - BOX_SMOOTHING) * p for c, p in zip(coord, prev)]
+    tr["coord"] = coord
+
+
 def _merge_extra(tr, d):
     """Carry enrichment fields onto a track. Scored keys (plate text in a
     vehicle's `name`, a face's `faceEmbed`) keep the best-scoring read; other
@@ -755,7 +799,8 @@ def _park(tr):
 
 def _track_args(tracker_id, tr):
     still = bool(tr.get("still"))
-    return {"tracker_id": tracker_id, "object_type": tr["objectType"], "coord": tr["coord"],
+    return {"tracker_id": tracker_id, "object_type": tr["objectType"],
+            "coord": tr.get("smooth") or tr["coord"],
             "confidence": tr["score"], "first_shown_ms": tr["first_shown_ms"],
             "descriptor_extra": tr.get("extra"), "best": tr.get("best"),
             "still": still, "idle_since_ms": tr.get("still_since_ms") if still else None}
@@ -970,10 +1015,16 @@ def _motion_tick(ws, device_id):
         type_track_count = collections.Counter(tr["objectType"] for tr in tracks.values())
         type_detect_count = collections.Counter(d["objectType"] for d in detections)
 
-        # 1. Match each track to its best remaining same-type detection by IOU.
-        for tracker_id, tr in list(tracks.items()):
+        # 1. Match each track to its best remaining same-type detection by IOU, then let
+        #    still-unmatched moving tracks take the nearest detection where their motion
+        #    predicts them (parked tracks don't, so a passing car can't wake one).
+        matches = {}
+        for tracker_id, tr in tracks.items():
+            # One track + one detection of a type match unconditionally -- except a parked
+            # track, which a different object passing by mustn't take over.
             unambiguous = (type_track_count[tr["objectType"]] == 1
-                            and type_detect_count[tr["objectType"]] == 1)
+                            and type_detect_count[tr["objectType"]] == 1
+                            and not tr.get("stationary_coord"))
             best_idx, best_iou = None, (-1.0 if unambiguous else IOU_MATCH_THRESHOLD)
             for idx in unclaimed:
                 d = detections[idx]
@@ -983,9 +1034,20 @@ def _motion_tick(ws, device_id):
                 if iou > best_iou:
                     best_idx, best_iou = idx, iou
             if best_idx is not None:
-                d = detections[best_idx]
+                matches[tracker_id] = best_idx
                 unclaimed.remove(best_idx)
-                tr["coord"] = d["coord"]
+        for tracker_id, tr in sorted(tracks.items(), key=lambda m: m[1]["miss_count"]):
+            if tracker_id in matches or tr.get("stationary_coord"):
+                continue
+            idx = _nearest_detection(tr, detections, unclaimed)
+            if idx is not None:
+                matches[tracker_id] = idx
+                unclaimed.remove(idx)
+
+        for tracker_id, tr in list(tracks.items()):
+            if tracker_id in matches:
+                d = detections[matches[tracker_id]]
+                _follow(tr, d["coord"])
                 tr["score"] = d["score"]
                 tr["miss_count"] = 0
                 _update_still(tr, now_ms)
@@ -1012,16 +1074,18 @@ def _motion_tick(ws, device_id):
                 continue
             # No matching detection this tick for this track.
             tr["miss_count"] += 1
-            if tr["miss_count"] < MOTION_MISS_TOLERANCE_TICKS:
+            tolerance = (PARKED_MISS_TOLERANCE_TICKS if tr.get("stationary_coord")
+                         else MOTION_MISS_TOLERANCE_TICKS)
+            if tr["miss_count"] < tolerance:
                 # Within the tolerance window -- send nothing, keep the track.
                 log.debug("real motion tick: no match (miss %d/%d) for tracker_id=%s deviceID=%s -- "
                           "tolerating brief gap, track still open", tr["miss_count"],
-                          MOTION_MISS_TOLERANCE_TICKS, tracker_id, device_id)
+                          tolerance, tracker_id, device_id)
                 continue
             # Missed enough consecutive ticks -- this track is genuinely gone.
             log.info("real motion tick: no detection for %d consecutive ticks, closing smartDetectZone "
                       "track for deviceID=%s tracker_id=%s (last seen: %s score=%.2f)",
-                      MOTION_MISS_TOLERANCE_TICKS, device_id, tracker_id,
+                      tolerance, device_id, tracker_id,
                       tr["objectType"], tr["score"])
             if event is not None and not tr.get("stationary_coord"):
                 event["finished"].append((tracker_id, tr))  # its snapshot goes in the leave

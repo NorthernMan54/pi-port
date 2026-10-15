@@ -516,6 +516,50 @@ class TestCameraEvent(Base):
         self.tick()                       # nothing seen: no update at all
         self.assertEqual(self.sent, [])
 
+    def test_fast_small_walker_stays_one_track(self):
+        # Live 17:28 on Driveway: a 22-wide person moving 75 then 26 units per tick
+        # (no box overlap) became a new track every tick.
+        for coord in ([143, 54, 22, 75], [218, 31, 22, 80], [244, 32, 22, 57]):
+            self.tick(dict(self.PERSON, coord=coord))
+        tracks = av._motion_state["D"]["tracks"]
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual(tracks[1]["coord"], [244, 32, 22, 57])
+
+    def test_two_walkers_keep_their_tracks(self):
+        a, b = dict(self.PERSON, coord=[100, 300, 30, 90]), dict(self.PERSON, coord=[600, 300, 30, 90])
+        self.tick(a, b)
+        self.tick(dict(a, coord=[150, 300, 30, 90]), dict(b, coord=[650, 300, 30, 90]))
+        tracks = av._motion_state["D"]["tracks"]
+        self.assertEqual(sorted(t["coord"][0] for t in tracks.values()), [150, 650])
+        self.assertEqual(len(tracks), 2)
+
+    def test_passing_car_does_not_take_over_parked_car(self):
+        av._event_max_ms["D"] = 0
+        parked = dict(self.CAR, coord=[100, 500, 200, 100])
+        self.tick(parked)
+        self.tick(parked)               # parked
+        av._event_max_ms["D"] = 10 ** 9
+        self.sent.clear()
+        self.tick(dict(self.CAR, coord=[400, 500, 200, 100]))  # parked car missed, other car nearby
+        tracks = av._motion_state["D"]["tracks"]
+        self.assertEqual(tracks[1]["coord"], [100, 500, 200, 100])   # parked car untouched
+        self.assertEqual(len(tracks), 2)
+        self.assertEqual(self.events()[0][0], "enter")              # the passing car is new
+
+    def test_reported_box_is_smoothed(self):
+        self.tick(dict(self.PERSON, coord=[400, 200, 200, 600]))
+        self.tick(dict(self.PERSON, coord=[420, 200, 200, 600]))
+        d = self.sent[-1][1]["descriptors"][0]
+        self.assertEqual(d["coord"][0], round(0.6 * 420 + 0.4 * 400))  # between, not the raw box
+
+    def test_parked_track_outlives_active_tolerance(self):
+        av._event_max_ms["D"] = 0
+        self.tick(self.CAR)
+        self.tick(self.CAR)             # parked
+        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS + 2):
+            self.tick()
+        self.assertIn(1, av._motion_state["D"]["tracks"])
+
     def test_leave_priority(self):
         person = (1, {"objectType": "person", "score": 0.9})
         car = (2, {"objectType": "vehicle", "score": 0.95})

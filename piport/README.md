@@ -194,11 +194,19 @@ and `known/uiface.db`, a binary store), so the embedding layout can
 be compared with SFace's; matching against it (`matchedId`) is not implemented yet. Whether
 Protect's face service accepts SFace embeddings is also unconfirmed.
 
-**Tick rate.** Each camera is classified every `AIPORT_TICK_S` seconds: 0.5 s on macOS
-(Core ML runs a frame in ~7 ms; at 1.5 s a car crossing a far road was seen once or not at
-all), 1.5 s elsewhere. Time-based thresholds (5 s miss tolerance, `AIPORT_MISS_S`; 30 s to count as still,
-6 s to resume after parking) keep their durations at any rate; boxes are displayed until
-just past the next update. The RTSP pull uses `-flags low_delay`.
+**Tick rate.** Each camera is classified every `AIPORT_TICK_S` seconds: 0.33 s on macOS
+(Core ML runs a frame in ~8 ms), matching a G5 Bullet, which sends a `moving` update every
+~330 ms (median; 249-600 ms) with `displayTimeoutMSec` ~326; 1.5 s elsewhere. Boxes are
+displayed for one tick + 100 ms. Time-based thresholds keep their durations at any rate: a
+track closes after `AIPORT_MISS_S` (default 3 s; the G5 sends `leave` ~2 s after the object
+was last seen), a parked track after 30 s, 30 s still counts as parked, 6 s to resume. The
+RTSP pull uses `-flags low_delay`.
+
+**Tracking.** Detections match tracks by box overlap; a moving track no box overlaps takes
+the nearest same-type detection near where its last movement predicts it (within 3x its size),
+so small, fast objects no longer split into a new track every tick. Parked tracks never take a
+detection that doesn't overlap them (a passing car can't wake one). Reported boxes are
+smoothed (0.6 weight on the newest detection); matching and crops use the raw box.
 
 **Box timing.** Frames reach a check a few seconds after capture (Protect's relay, decode,
 the tick wait), and Protect places boxes in playback by `clockWall`, so boxes lagged the video
@@ -274,8 +282,9 @@ in `models/` next to `detector.py`.
 and 2-fps 640x640 raw RGB frames piped to Python for classification (no image-decode library
 needed). A background loop classifies the latest frame every 1.5s (`MOTION_POLL_INTERVAL_S`): a
 detection opens (`"enter"`) or refreshes (`"moving"`) a track, and a track closes (`"leave"`)
-only after `AIPORT_MISS_S` (default 5 s) of **consecutive** empty ticks. Simultaneous
-objects are tracked independently and matched frame-to-frame by bounding-box IOU within each type.
+only after `AIPORT_MISS_S` (default 3 s) of **consecutive** empty ticks. Simultaneous
+objects are tracked independently and matched frame-to-frame by bounding-box IOU within each
+type, with a nearest-neighbour fallback for moving tracks (see **Tracking** above).
 
 Capability declaration is separate. For an event to be filterable by object type in the UI, the
 camera's own `featureFlags.smartDetectTypes` / `hasMotionDetection` must be populated. This does

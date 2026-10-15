@@ -50,6 +50,32 @@ class TestBackendSelection(unittest.TestCase):
 
 
 @unittest.skipIf(detector is None, f"detector unavailable ({_IMPORT_ERR})")
+class TestOnnxProviders(unittest.TestCase):
+    """AIPORT_ORT_PROVIDER picks Core ML when onnxruntime offers it, else CPU."""
+
+    MAC = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+
+    def setUp(self):
+        saved = os.environ.pop("AIPORT_ORT_PROVIDER", None)
+        if saved is not None:
+            self.addCleanup(os.environ.__setitem__, "AIPORT_ORT_PROVIDER", saved)
+        self.addCleanup(os.environ.pop, "AIPORT_ORT_PROVIDER", None)
+
+    def test_auto_prefers_coreml(self):
+        p = detector._onnx_providers(self.MAC)
+        self.assertEqual(p[0][0], "CoreMLExecutionProvider")
+        self.assertEqual(p[-1], "CPUExecutionProvider")
+
+    def test_auto_without_coreml(self):
+        self.assertEqual(detector._onnx_providers(["CPUExecutionProvider"]),
+                         ["CPUExecutionProvider"])
+
+    def test_forced_cpu(self):
+        os.environ["AIPORT_ORT_PROVIDER"] = "cpu"
+        self.assertEqual(detector._onnx_providers(self.MAC), ["CPUExecutionProvider"])
+
+
+@unittest.skipIf(detector is None, f"detector unavailable ({_IMPORT_ERR})")
 class TestMapObjectType(unittest.TestCase):
     def test_mapping(self):
         self.assertEqual(detector._map_object_type("person"), "person")

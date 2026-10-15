@@ -77,9 +77,13 @@ class TestStreamDir(unittest.TestCase):
         self.assertNotEqual(a, b)
         self.assertEqual(config.stream_dir("/srv/x/instances/main"), a)
         # relative vs absolute of the same state dir must agree
-        os.chdir("/tmp")
+        # realpath: /tmp is a symlink to /private/tmp on macOS
+        tmp = os.path.realpath(tempfile.gettempdir())
+        old_cwd = os.getcwd()
+        os.chdir(tmp)
+        self.addCleanup(os.chdir, old_cwd)
         self.assertEqual(config.stream_dir("instances/main"),
-                         config.stream_dir("/tmp/instances/main"))
+                         config.stream_dir(os.path.join(tmp, "instances/main")))
 
     def test_tmpfs_base_writable(self):
         self.assertTrue(os.path.isdir(config._tmpfs_base()))

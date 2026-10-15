@@ -36,6 +36,7 @@ log = logging.getLogger("aiport-avclient")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
+import enrich
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ADOPT_STATE_FILE = os.path.join(HERE, "adopt_state.json")
@@ -167,6 +168,9 @@ SMART_SNAPSHOT_MARGIN = 1.6
 CAMERA_COORD_END = 1000
 _detector = None
 _detector_lock = threading.Lock()
+_enricher = None
+_snapshot_cache = {}  # deviceID -> (mtime, BGR image) of the last decoded full-res snapshot
+_enrich_cache = {}    # deviceID -> (snapshot mtime, plate/face detections read from it)
 
 
 def _get_detector():
@@ -232,12 +236,14 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
     hwdec_args = _hwdec_args(codec)
     encode_args = ["-c:v", "mjpeg_rkmpp"] if FFMPEG_BIN != "ffmpeg" else []
     size = DETECT_IMG_SIZE
+    # Plate/face reads use this full-res snapshot, so refresh it every second when they're on.
+    snap_fps = "1" if enrich.smart_detect_features() else "1/2"
     cmd = [
         FFMPEG_BIN, "-loglevel", "warning", "-rtsp_transport", "tcp",
         *hwdec_args, "-i", url,
         "-filter_complex",
         f"[0:v]split=2[snapin][detin];"
-        f"[snapin]fps=1/2[snap];[detin]fps=2,scale={size}:{size}[det]",
+        f"[snapin]fps={snap_fps}[snap];[detin]fps=2,scale={size}:{size}[det]",
         "-map", "[snap]", *encode_args, "-update", "1", "-y", out_path,
         "-map", "[det]", "-pix_fmt", "rgb24", "-f", "rawvideo", "-",
     ]
@@ -348,8 +354,100 @@ def _classify_frame_detections(device_id):
             log.info("real motion tick: %s detection outside all configured detection zones for "
                       "deviceID=%s (score=%.2f)", r["objectType"], device_id, r["score"])
             continue
-        out.append({"objectType": r["objectType"], "score": r["score"], "coord": coord})
+        d = {"objectType": r["objectType"], "score": r["score"], "coord": coord}
+        if r["objectType"] == "vehicle" and enrich.vehicle_attrs_enabled():
+            try:
+                attrs = enrich.vehicle_attributes(r.get("label"), frame, coord)
+            except Exception:
+                log.exception("vehicle attributes failed for deviceID=%s", device_id)
+                attrs = None
+            if attrs:
+                d["extra"] = {"attributes": attrs}
+        out.append(d)
     return out
+
+
+def _get_enricher():
+    global _enricher
+    with _detector_lock:
+        if _enricher is None:
+            faces_dir = os.environ.get("AIPORT_FACES_DIR") or \
+                os.path.join(STATE_DIR or HERE, "faces")
+            _enricher = enrich.Enricher(faces_dir)
+        return _enricher
+
+
+def _load_snapshot_bgr(device_id):
+    """Latest full-res snapshot (BGR) for plate/face reads, cached by mtime so a
+    2 s snapshot isn't re-decoded every tick; None if unavailable."""
+    path = os.path.join(_STREAM_DIR, f"{device_id}.jpg")
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return None, None
+    cached = _snapshot_cache.get(device_id)
+    if cached and cached[0] == mtime:
+        return cached[1], mtime
+    import cv2
+    img = cv2.imread(path)  # None on a torn write; the next tick retries
+    if img is not None:
+        _snapshot_cache[device_id] = (mtime, img)
+    return img, mtime
+
+
+def _enrich_detections(device_id, detections):
+    """Plate/face detections derived from this tick's vehicle/person boxes.
+    Results are reused until a newer snapshot lands, so tracks don't flap; a
+    plate/name lands on its parent's extra only on a fresh read (tracks keep it)."""
+    vehicles = [d for d in detections if d["objectType"] == "vehicle"]
+    people = [d for d in detections if d["objectType"] == "person"]
+    if not vehicles and not people:
+        return []
+    enricher = _get_enricher()
+    if not (enricher.lpr and vehicles) and not (enricher.face and people):
+        return []
+    img, mtime = _load_snapshot_bgr(device_id)
+    if img is None:
+        return []
+    cached = _enrich_cache.get(device_id)
+    if cached and cached[0] == mtime:
+        extra = cached[1]
+    else:
+        extra = []
+        try:
+            for p in enricher.plates(img, [v["coord"] for v in vehicles]):
+                vehicles[p["parent"]].setdefault("extra", {})["licensePlate"] = p["text"]
+                extra.append({"objectType": "licensePlate", "score": p["confidence"],
+                              "coord": p["coord"],
+                              "extra": {"licensePlate": p["text"], "name": p["text"]}})
+            for f in enricher.faces(img, [p["coord"] for p in people]):
+                extra.append({"objectType": "face", "score": f["score"], "coord": f["coord"],
+                              "extra": {"name": f["name"], "tag": f["name"]}})
+                if f["name"]:
+                    people[f["parent"]].setdefault("extra", {}).update(
+                        {"name": f["name"], "tag": f["name"]})
+        except Exception:
+            log.exception("plate/face enrichment failed for deviceID=%s", device_id)
+        _enrich_cache[device_id] = (mtime, extra)
+        for e in extra:
+            log.info("enrichment: %s for deviceID=%s (score=%.2f) %s", e["objectType"], device_id,
+                     e["score"], e["extra"])
+    return [dict(e, extra=dict(e["extra"])) for e in extra]
+
+
+def _merge_extra(tr, d):
+    """Carry enrichment fields onto a track. Plate text follows the
+    best-scoring read; other keys (attributes, names) take the newest value
+    and are never cleared by a tick that lacks them."""
+    extra = d.get("extra")
+    if not extra:
+        return
+    if tr["objectType"] == "licensePlate":
+        if d["score"] >= tr.get("extra_score", 0):
+            tr["extra"] = dict(extra)
+            tr["extra_score"] = d["score"]
+        return
+    tr.setdefault("extra", {}).update({k: v for k, v in extra.items() if v not in ("", None)})
 
 
 def _iou(box_a, box_b):
@@ -510,6 +608,7 @@ def _motion_tick(ws, device_id):
         detections = []
     else:
         detections = _dedupe_detections(_classify_frame_detections(device_id))
+        detections += _enrich_detections(device_id, detections)
     with _motion_lock:
         dev = _motion_state.setdefault(device_id, {"tracks": {}, "next_tracker_id": 1})
         tracks = dev["tracks"]
@@ -536,18 +635,21 @@ def _motion_tick(ws, device_id):
                 d = detections[best_idx]
                 unclaimed.remove(best_idx)
                 tr["coord"] = d["coord"]
+                _merge_extra(tr, d)
                 tr["score"] = d["score"]
                 tr["miss_count"] = 0
                 # Line Crossing: check this tick's movement against configured lines.
                 new_center = _zone_center_norm(d["coord"])
-                _process_line_crossings(ws, device_id, tracker_id, tr, new_center)
+                if tr["objectType"] not in ("licensePlate", "face"):
+                    _process_line_crossings(ws, device_id, tracker_id, tr, new_center)
                 tr["prev_center"] = new_center
                 # Push a "moving" update to keep the open event's smartDetectTypes/score populated.
                 try:
                     _send_smart_detect_event(ws, device_id, edge_type="moving", event_id=tr["event_id"],
                                               stationary=False, object_type=tr["objectType"],
                                               coord=tr["coord"], confidence=tr["score"],
-                                              first_shown_ms=tr["first_shown_ms"], tracker_id=tracker_id)
+                                              first_shown_ms=tr["first_shown_ms"], tracker_id=tracker_id,
+                                              descriptor_extra=tr.get("extra"))
                 except Exception:
                     log.exception("failed to send moving update for tracker_id=%s deviceID=%s",
                                   tracker_id, device_id)
@@ -569,7 +671,7 @@ def _motion_tick(ws, device_id):
                 _send_smart_detect_event(ws, device_id, edge_type="leave", event_id=tr["event_id"],
                                           stationary=True, object_type=tr["objectType"], coord=tr["coord"],
                                           confidence=tr["score"], first_shown_ms=tr["first_shown_ms"],
-                                          tracker_id=tracker_id)
+                                          tracker_id=tracker_id, descriptor_extra=tr.get("extra"))
             except Exception:
                 log.exception("failed to send leave for tracker_id=%s deviceID=%s", tracker_id, device_id)
             # Close any line events this track opened, mirroring the zone lifecycle.
@@ -600,7 +702,8 @@ def _motion_tick(ws, device_id):
                                     "coord": d["coord"], "score": d["score"],
                                     "first_shown_ms": first_shown_ms, "miss_count": 0,
                                     "prev_center": _zone_center_norm(d["coord"]),
-                                    "crossed_lines": {}}
+                                    "crossed_lines": {}, "extra": dict(d.get("extra") or {}),
+                                    "extra_score": d["score"]}
             log.info("real motion tick: %s detected (score=%.2f), opening smartDetectZone track "
                       "for deviceID=%s tracker_id=%s event_id=%s", d["objectType"], d["score"],
                       device_id, tracker_id, event_id)
@@ -608,7 +711,8 @@ def _motion_tick(ws, device_id):
                 _send_smart_detect_event(ws, device_id, edge_type="enter", event_id=event_id,
                                           stationary=False, object_type=d["objectType"],
                                           coord=d["coord"], confidence=d["score"],
-                                          first_shown_ms=first_shown_ms, tracker_id=tracker_id)
+                                          first_shown_ms=first_shown_ms, tracker_id=tracker_id,
+                                          descriptor_extra=tracks[tracker_id]["extra"])
             except Exception:
                 log.exception("failed to send enter for tracker_id=%s deviceID=%s", tracker_id, device_id)
 
@@ -748,9 +852,32 @@ def _fallback_record(device_id, what):
     return {"device_id": device_id, "kind": kind, "coord": coord}
 
 
+def _jpeg_size(path):
+    """(width, height) from a JPEG's SOF header, or None."""
+    try:
+        with open(path, "rb") as f:
+            if f.read(2) != b"\xff\xd8":
+                return None
+            while True:
+                marker = f.read(2)
+                if len(marker) < 2 or marker[0] != 0xFF:
+                    return None
+                seg_len = int.from_bytes(f.read(2), "big")
+                # SOF0-SOF15, excluding DHT (C4), JPG (C8) and DAC (CC)
+                if 0xC0 <= marker[1] <= 0xCF and marker[1] not in (0xC4, 0xC8, 0xCC):
+                    sof = f.read(5)
+                    return int.from_bytes(sof[3:5], "big"), int.from_bytes(sof[1:3], "big")
+                f.seek(seg_len - 2, 1)
+    except OSError:
+        return None
+
+
 def _crop_snapshot_jpeg(src_path, coord, fov_w, fov_h):
     """Square object-crop JPEG centered on the 0-1000 coord, scaled to
     SMART_SNAPSHOT_SIZE (ffmpeg); None on failure."""
+    # The relay can deliver a different size than UiStreamControl announced
+    # (a 1920x2560 doorbell arrived as 1504x2016); crop in the JPEG's real pixels.
+    fov_w, fov_h = _jpeg_size(src_path) or (fov_w, fov_h)
     x, y, w, h = coord
     cx = (x + w / 2) / CAMERA_COORD_END * fov_w
     cy = (y + h / 2) / CAMERA_COORD_END * fov_h
@@ -857,7 +984,7 @@ def _stream_clocks(device_id):
 
 def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, stationary=False,
                               object_type="person", coord=None, confidence=95,
-                              first_shown_ms=None, tracker_id=1):
+                              first_shown_ms=None, tracker_id=1, descriptor_extra=None):
     # Real EventSmartDetect shape; deviceID is our addition (required by AI-Port event routing).
     now_ms = int(time.time() * 1000)
     clock_mono, clock_stream = _stream_clocks(device_id)
@@ -895,6 +1022,8 @@ def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, statio
             "trackerID": tracker_id,
             # Naming the zone makes ds create a smartDetectZone (vs smartDetectLine) event.
             "zones": [int(SMART_DETECT_ZONE_ID)],
+            # Best-guess enrichment fields: attributes, licensePlate, name/tag (enrich.py).
+            **(descriptor_extra or {}),
         }],
         "displayTimeoutMSec": 200,
         "edgeType": edge_type,
@@ -1065,7 +1194,7 @@ def _send_feature_flags_event(ws, device_id):
     _feature_flags_sent.add(device_id)
     send_msg(ws, "EventFeatureFlagsUpdated", {
         "deviceID": device_id,
-        "smartDetect": ["person", "vehicle", "animal", "lineCrossing", "liveviewTracking"],
+        "smartDetect": _smart_detect_features(),
         # Real key names + genuine hardware values (echoed, not owned).
         "motionDetect": ["enhanced"],
         "privacyMask": True,
@@ -1075,6 +1204,13 @@ def _send_feature_flags_event(ws, device_id):
         "speaker": True,
         "ledStatus": True,
     }, response_expected=False)
+
+
+def _smart_detect_features():
+    # Plate/face types and the *EnhancedByAiKey flags (seen on a real doorbell's
+    # hello) are only advertised when enrich.py can actually produce them.
+    return ["person", "vehicle", "animal", "lineCrossing", "liveviewTracking",
+            *enrich.smart_detect_features()]
 
 
 def _version_from_update_uri(uri):
@@ -1338,7 +1474,7 @@ def run(host, port, device_info, token=None):
             "totalLoad": 0.1,
             "uptime": (now_ms - _PROCESS_START_MS) // 1000,
             "features": {
-                "smartDetect": ["person", "vehicle", "animal", "lineCrossing", "liveviewTracking"],
+                "smartDetect": _smart_detect_features(),
                 "motionDetect": ["enhanced"],
                 "privacyMask": True,
                 "privacyMasks": {"maxZones": 16, "rectangleOnly": False},

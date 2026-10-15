@@ -8,3 +8,7 @@ numpy
 #     (see piport/README.md for the matching librknnrt.so upgrade it requires)
 #   * CPU (x86_64 / arm64: Pi 4/5, any server): pip install onnxruntime
 # detector.py selects whichever backend is present (AIPORT_BACKEND to force).
+#
+# Optional enrichment (enrich.py), any onnxruntime host:
+#   pip install opencv-python-headless fast-alpr   # license plates (fast-alpr) + faces (OpenCV)
+#   python3 scripts/fetch_models.py --face-models-only

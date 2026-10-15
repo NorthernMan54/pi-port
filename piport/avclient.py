@@ -703,11 +703,17 @@ def _send_event_message(ws, device_id, edge_type, event_id, members, stationary=
                       [tid for tid, _ in members], device_id)
 
 
-def _send_leaves(ws, device_id, closing):
-    """Leave carrying every given track (kept for callers outside the tick loop)."""
-    if closing:
-        _send_event_message(ws, device_id, "leave", closing[0][1]["event_id"], closing,
-                            stationary=True)
+# Protect fetched snapshots for single-tracker leaves but, seen live, requested nothing
+# for a leave carrying two trackers (and logged nothing). So an event closes with one
+# tracker: the most useful participant's best frame.
+LEAVE_PRIORITY = {"face": 0, "person": 1, "vehicle": 2, "animal": 3}
+
+
+def _leave_track(members):
+    """(tracker_id, track) whose snapshot closes the event: face > person > vehicle >
+    animal, then the best-scoring frame."""
+    return min(members, key=lambda m: (LEAVE_PRIORITY.get(m[1]["objectType"], 9),
+                                       -(m[1].get("best") or {}).get("score", m[1]["score"])))
 
 
 def _close_line_events(ws, device_id, tracker_id, tr):
@@ -845,10 +851,12 @@ def _motion_tick(ws, device_id):
             timed_out = now_ms - event["started_ms"] >= max_ms
             if not active or timed_out:
                 members = event["finished"] + active
-                log.info("smartDetectZone event %s closed for deviceID=%s (%s; %d track(s))",
-                         event["id"], device_id, "time limit" if timed_out else "all gone",
-                         len(members))
-                _send_event_message(ws, device_id, "leave", event["id"], members, stationary=True)
+                lead = _leave_track(members)
+                log.info("smartDetectZone event %s closed for deviceID=%s (%s; %d track(s), "
+                         "snapshot from %s tracker_id=%s)", event["id"], device_id,
+                         "time limit" if timed_out else "all gone", len(members),
+                         lead[1]["objectType"], lead[0])
+                _send_event_message(ws, device_id, "leave", event["id"], [lead], stationary=True)
                 for _, tr in active:  # still in view: quiet until it moves again
                     tr["stationary_coord"] = list(tr["coord"])
                 dev["event"] = None

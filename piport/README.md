@@ -196,9 +196,11 @@ Protect's face service accepts SFace embeddings is also unconfirmed.
 **Events.** Protect keeps one smart-detect event per camera, not per track: the first
 `leave` closes it, and a scheduled check force-ends one left open past ~5.5 minutes without
 fetching any snapshots. So tracks share a camera event: `enter` when the first track
-appears, one batched `moving` per tick, and a single `leave` carrying every participant's
+appears, one batched `moving` per tick, and a single `leave` with one participant's
 snapshot when the last active track goes or `eventMaxDurationMSec` (from
-`ChangeSmartMotionSettings`, 5 min by default) runs out. A track still in view at the time
+`ChangeSmartMotionSettings`, 5 min by default) runs out. That leave carries a single tracker
+(face > person > vehicle > animal, then best score): seen live, Protect fetched snapshots for
+single-tracker leaves but requested nothing for one carrying two trackers. A track still in view at the time
 limit (a parked car) goes quiet until it moves again. Line-crossing events stay per track.
 
 **Coordinates and thumbnails.** Protect draws descriptor coords (and the user's zones and

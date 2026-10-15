@@ -368,7 +368,7 @@ class TestCameraEvent(Base):
         for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
             self.tick()
         ev = self.events()
-        self.assertEqual(ev[-1], ("leave", ["face", "person"], ["face", "person"]))
+        self.assertEqual(ev[-1], ("leave", ["face"], ["face"]))  # one tracker: the face
         self.assertEqual([e[0] for e in ev[:-1]], ["moving"] * (len(ev) - 1))
         self.assertIsNone(av._motion_state["D"].get("event"))
 
@@ -401,7 +401,16 @@ class TestCameraEvent(Base):
         self.assertEqual(self.events(), [("enter", ["face", "person"], [])])
         for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
             self.tick(self.CAR)
-        self.assertEqual(self.events()[-1], ("leave", ["face", "person"], ["face", "person"]))
+        self.assertEqual(self.events()[-1], ("leave", ["face"], ["face"]))
+
+    def test_leave_priority(self):
+        person = (1, {"objectType": "person", "score": 0.9})
+        car = (2, {"objectType": "vehicle", "score": 0.95})
+        face = (3, {"objectType": "face", "score": 0.5})
+        self.assertEqual(av._leave_track([car, person])[0], 1)
+        self.assertEqual(av._leave_track([car, person, face])[0], 3)
+        better = (4, {"objectType": "person", "score": 0.1, "best": {"score": 0.99}})
+        self.assertEqual(av._leave_track([person, better])[0], 4)
 
     def test_motion_settings_max_duration(self):
         av.handle_function(None, {"functionName": "ChangeSmartMotionSettings", "messageId": 1,

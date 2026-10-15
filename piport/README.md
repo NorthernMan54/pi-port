@@ -170,7 +170,7 @@ when onnxruntime offers it (never on Linux) and falls back to CPU if the model w
 
 On top of person/vehicle/animal, `enrich.py` adds three optional stages. The field names
 come from Protect's backend (7.1.75); **none is confirmed against a real AI Port capture,
-and the vehicle-attribute values are guesses:**
+and the vehicle-attribute values follow Protect's label vocabulary:**
 
 | Stage | Models | Emitted as |
 |-------|--------|------------|
@@ -227,8 +227,10 @@ sent, and zone/line checks run in it; crops and plate/face reads stay in image s
 Each track keeps its best-scoring frame (full-res JPEG, box, time); on `leave` the
 object crop, the Full-FoV image and `clockBestWall` come from it, not from the frame
 ~30 s after the object was last seen. Seen live: Protect shows vehicle attributes
-(`Truck (70%), White (70%)`, `Red (42%)`), but displayed no type for `sedan`, so that value
-is probably outside its vocabulary.
+(`Truck (70%), White (70%)`, `Red (42%)`). Attributes become labels verbatim, so only
+Protect's values show: `vehicleType` car/suv/truck/van/bus/motorcycle/bike (COCO "car" is
+sent as `car`; `sedan` displayed nothing) and `color`
+red/orange/yellow/green/blue/purple/pink/brown/black/white/gray (silver is sent as `gray`).
 
 Classification is also **gated by a cheap frame-diff**: a tick with no open track and no
 meaningful frame change skips inference entirely (on a static scene this is the difference

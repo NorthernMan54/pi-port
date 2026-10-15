@@ -57,8 +57,16 @@ class TestDominantColor(unittest.TestCase):
 class TestVehicleAttributes(unittest.TestCase):
     def test_type_and_color(self):
         a = enrich.vehicle_attributes("car", _solid((200, 20, 20)), [0, 0, 1000, 1000])
-        self.assertEqual(a["vehicleType"]["val"], "sedan")
+        self.assertEqual(a["vehicleType"]["val"], "car")
         self.assertEqual(a["color"], {"val": "red", "confidence": 100})
+
+    def test_protect_vocabulary(self):
+        silver = enrich.vehicle_attributes("bicycle", _solid((170, 170, 175)), [0, 0, 1000, 1000])
+        self.assertEqual(silver["vehicleType"]["val"], "bike")
+        self.assertEqual(silver["color"]["val"], "gray")  # Protect has no "silver"
+        for label in enrich.VEHICLE_TYPES:
+            self.assertIn(enrich.VEHICLE_TYPES[label],
+                          {"car", "suv", "truck", "van", "bus", "motorcycle", "bike"})
 
     def test_unknown_label_keeps_color(self):
         a = enrich.vehicle_attributes("train", _solid((10, 10, 10)), [0, 0, 1000, 1000])

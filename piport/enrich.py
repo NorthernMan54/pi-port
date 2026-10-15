@@ -31,16 +31,22 @@ SFACE_PATH = os.path.join(MODELS_DIR, "face_recognition_sface_2021dec.onnx")
 
 COORD_END = 1000  # descriptor coords are normalized 0-1000
 
-# COCO label -> Protect vehicleType value (vocabulary unconfirmed; "sedan" is the
-# only value seen in the backend decompile).
+# COCO label -> Protect vehicleType. Protect turns attributes into labels verbatim
+# (extractAttributeLabelSet: "vehicleType:<val>") and only knows car/suv/truck/van/bus/
+# motorcycle/bike (convertRamTagsToLabels; it relabels "sedan" as "car"). Seen live: "sedan"
+# showed no type, "truck" did. COCO's "car" also covers SUVs and vans.
 VEHICLE_TYPES = {
-    "car": "sedan",
+    "car": "car",
     "truck": "truck",
     "bus": "bus",
     "motorbike": "motorcycle",
     "motorcycle": "motorcycle",
-    "bicycle": "bicycle",
+    "bicycle": "bike",
 }
+# Protect's colour vocabulary; the classifier's "silver" has no Protect value.
+PROTECT_COLORS = {"red", "orange", "yellow", "green", "blue", "purple", "pink", "brown",
+                  "black", "white", "gray"}
+COLOR_ALIASES = {"silver": "gray"}
 
 FACE_SCORE_THRESH = float(os.environ.get("AIPORT_FACE_THRESH", "0.8"))
 # SFace's published cosine threshold for "same person".
@@ -156,7 +162,9 @@ def vehicle_attributes(label, frame_rgb, coord):
     if frame_rgb is not None:
         color = dominant_color(frame_rgb, coord)
         if color:
-            attrs["color"] = {"val": color[0], "confidence": color[1]}
+            name = COLOR_ALIASES.get(color[0], color[0])
+            if name in PROTECT_COLORS:
+                attrs["color"] = {"val": name, "confidence": color[1]}
     return attrs or None
 
 

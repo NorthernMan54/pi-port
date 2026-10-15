@@ -20,6 +20,7 @@ import logging
 import os
 import ssl
 import subprocess
+import tempfile
 import sys
 import threading
 import time
@@ -170,6 +171,9 @@ _detector = None
 _detector_lock = threading.Lock()
 _enricher = None
 _snapshot_cache = {}  # deviceID -> (mtime, BGR image) of the last decoded full-res snapshot
+_snapshot_bytes = {}  # deviceID -> (mtime, JPEG bytes) of the latest full-res snapshot
+# Records still holding a best-frame JPEG; older ones drop their bytes (memory bound).
+BEST_FRAME_RECORDS_MAX = 40
 _enrich_cache = {}    # deviceID -> (snapshot mtime, plate/face detections read from it)
 
 
@@ -307,12 +311,42 @@ def _zone_center_norm(coord):
     return x + w / 2, y + h / 2
 
 
+# Protect draws 0-1000 coords (and the user's zones/lines) on a 16:9 canvas the height
+# of the video; a camera of another aspect sits centred in it. Seen on a 1920x2560
+# doorbell: boxes normalised to the portrait image landed ~2.4x too far from centre.
+PROTECT_CANVAS_ASPECT = 16 / 9
+
+
+def _canvas_scale(device_id):
+    """(sx, sy) mapping image-normalised coords onto Protect's 16:9 canvas."""
+    w, h = _stream_dims.get(device_id, (0, 0))
+    if not w or not h or abs(w / h - PROTECT_CANVAS_ASPECT) < 0.02:
+        return 1.0, 1.0
+    a = w / h
+    if a < PROTECT_CANVAS_ASPECT:  # narrower (portrait, 4:3): pillarboxed
+        return a / PROTECT_CANVAS_ASPECT, 1.0
+    return 1.0, PROTECT_CANVAS_ASPECT / a  # wider: letterboxed
+
+
+def _to_protect(device_id, coord):
+    """Image-normalised [x, y, w, h] -> Protect canvas [x, y, w, h] (0-1000)."""
+    sx, sy = _canvas_scale(device_id)
+    x, y, w, h = coord
+    half = CAMERA_COORD_END / 2
+    return [half + (x - half) * sx, half + (y - half) * sy, w * sx, h * sy]
+
+
+def _protect_center(device_id, coord):
+    """Box center in Protect's canvas space, where zones and lines are drawn."""
+    return _zone_center_norm(_to_protect(device_id, coord))
+
+
 def _is_excluded(device_id, coord):
     """True if the detection box center falls inside any configured excludeZones."""
     polygons = _exclude_zones.get(device_id)
     if not polygons:
         return False
-    cx, cy = _zone_center_norm(coord)
+    cx, cy = _protect_center(device_id, coord)
     return any(_point_in_polygon(cx, cy, poly) for poly in polygons)
 
 
@@ -322,7 +356,7 @@ def _is_outside_detect_zones(device_id, coord):
     polygons = _detect_zones.get(device_id)
     if not polygons:
         return False
-    cx, cy = _zone_center_norm(coord)
+    cx, cy = _protect_center(device_id, coord)
     return not any(_point_in_polygon(cx, cy, poly) for poly in polygons)
 
 
@@ -377,22 +411,58 @@ def _get_enricher():
         return _enricher
 
 
-def _load_snapshot_bgr(device_id):
-    """Latest full-res snapshot (BGR) for plate/face reads, cached by mtime so a
-    2 s snapshot isn't re-decoded every tick; None if unavailable."""
+def _read_snapshot(device_id):
+    """(mtime, JPEG bytes) of the latest full-res snapshot, re-read only when the
+    file changed; (None, None) if unavailable. Face reads and best-frame capture
+    share it, so a face box always refers to the exact bytes it was found in."""
     path = os.path.join(_STREAM_DIR, f"{device_id}.jpg")
     try:
         mtime = os.path.getmtime(path)
     except OSError:
         return None, None
+    cached = _snapshot_bytes.get(device_id)
+    if cached and cached[0] == mtime:
+        return cached
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return None, None
+    if not data.endswith(b"\xff\xd9"):  # torn write; the next tick retries
+        return None, None
+    _snapshot_bytes[device_id] = (mtime, data)
+    return mtime, data
+
+
+def _load_snapshot_bgr(device_id):
+    """Latest full-res snapshot (BGR) for plate/face reads, decoded once per
+    snapshot; (None, None) if unavailable."""
+    mtime, data = _read_snapshot(device_id)
+    if data is None:
+        return None, None
     cached = _snapshot_cache.get(device_id)
     if cached and cached[0] == mtime:
         return cached[1], mtime
     import cv2
-    img = cv2.imread(path)  # None on a torn write; the next tick retries
+    import numpy as np
+    img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
     if img is not None:
         _snapshot_cache[device_id] = (mtime, img)
     return img, mtime
+
+
+def _capture_best(device_id, tr, d):
+    """Keep the track's best-scoring moment: the full-res JPEG, the box and the
+    time. On leave the thumbnails come from it, not from the frame ~30 s after
+    the object was last seen (which, for a face, no longer contains it)."""
+    best = tr.get("best")
+    if best and d["score"] < best["score"]:
+        return
+    mtime, data = d.get("frame") or _read_snapshot(device_id)
+    if data is None:
+        return
+    tr["best"] = {"jpeg": data, "coord": list(d["coord"]), "score": d["score"],
+                  "wall": int(time.time() * 1000)}
 
 
 def _enrich_detections(device_id, detections):
@@ -422,7 +492,8 @@ def _enrich_detections(device_id, detections):
                          p["text"], device_id, p["confidence"])
             for f in enricher.faces(img, [p["coord"] for p in people]):
                 face = {"objectType": "face", "score": f["score"], "coord": f["coord"],
-                        "extra": {"name": f["name"], "tag": f["name"]}}
+                        "extra": {"name": f["name"], "tag": f["name"]},
+                        "frame": _snapshot_bytes.get(device_id)}
                 if f["embedding"] is not None:
                     face["scored"] = {"faceEmbed": (f["embedding"], f["score"])}
                 extra.append(face)
@@ -639,10 +710,11 @@ def _motion_tick(ws, device_id):
                 unclaimed.remove(best_idx)
                 tr["coord"] = d["coord"]
                 _merge_extra(tr, d)
+                _capture_best(device_id, tr, d)
                 tr["score"] = d["score"]
                 tr["miss_count"] = 0
                 # Line Crossing: check this tick's movement against configured lines.
-                new_center = _zone_center_norm(d["coord"])
+                new_center = _protect_center(device_id, d["coord"])
                 if tr["objectType"] not in ("licensePlate", "face"):
                     _process_line_crossings(ws, device_id, tracker_id, tr, new_center)
                 tr["prev_center"] = new_center
@@ -674,7 +746,8 @@ def _motion_tick(ws, device_id):
                 _send_smart_detect_event(ws, device_id, edge_type="leave", event_id=tr["event_id"],
                                           stationary=True, object_type=tr["objectType"], coord=tr["coord"],
                                           confidence=tr["score"], first_shown_ms=tr["first_shown_ms"],
-                                          tracker_id=tracker_id, descriptor_extra=tr.get("extra"))
+                                          tracker_id=tracker_id, descriptor_extra=tr.get("extra"),
+                                          best=tr.get("best"))
             except Exception:
                 log.exception("failed to send leave for tracker_id=%s deviceID=%s", tracker_id, device_id)
             # Close any line events this track opened, mirroring the zone lifecycle.
@@ -704,9 +777,10 @@ def _motion_tick(ws, device_id):
             tracks[tracker_id] = {"event_id": event_id, "objectType": d["objectType"],
                                     "coord": d["coord"], "score": d["score"],
                                     "first_shown_ms": first_shown_ms, "miss_count": 0,
-                                    "prev_center": _zone_center_norm(d["coord"]),
+                                    "prev_center": _protect_center(device_id, d["coord"]),
                                     "crossed_lines": {}}
             _merge_extra(tracks[tracker_id], d)
+            _capture_best(device_id, tracks[tracker_id], d)
             log.info("real motion tick: %s detected (score=%.2f), opening smartDetectZone track "
                       "for deviceID=%s tracker_id=%s event_id=%s", d["objectType"], d["score"],
                       device_id, tracker_id, event_id)
@@ -789,12 +863,16 @@ def _start_motion_detector(ws, device_id, ip, port, uri, preserve_tracks=False):
     t.start()
 
 
-def _record_snapshot_filename(filename, device_id, kind, coord=None):
+def _record_snapshot_filename(filename, device_id, kind, coord=None, jpeg=None):
     _snapshot_filename_to_device[filename] = {
-        "device_id": device_id, "kind": kind, "coord": coord,
+        "device_id": device_id, "kind": kind, "coord": coord, "jpeg": jpeg,
     }
     while len(_snapshot_filename_to_device) > _SNAPSHOT_FILENAME_MAP_MAX:
         _snapshot_filename_to_device.popitem(last=False)
+    # Bound memory: only the newest records keep their best-frame JPEG.
+    holding = [r for r in _snapshot_filename_to_device.values() if r.get("jpeg")]
+    for r in holding[:max(0, len(holding) - BEST_FRAME_RECORDS_MAX)]:
+        r["jpeg"] = None
     # Record for the fallback; collapse consecutive repeats from one leave (two filenames).
     if not _recent_snapshot_announcements or _recent_snapshot_announcements[-1][1] != device_id:
         _recent_snapshot_announcements.append((time.monotonic(), device_id))
@@ -934,19 +1012,32 @@ def _upload_snapshot(upload_uri, device_info, requested_filename, what=None,
                   "deviceID=%s via %s", requested_filename, what, requested_device_id,
                   device_id, resolved_by)
     path = os.path.join(_STREAM_DIR, f"{device_id}.jpg")
-    if not _wait_for_frame(path):
-        log.warning("snapshot upload requested for deviceID=%s (filename=%s) but no captured "
-                    "frame available yet at %s", device_id, requested_filename, path)
-        return
-    try:
-        with open(path, "rb") as f:
-            data = f.read()
-    except OSError as e:
-        log.warning("failed to read %s for snapshot upload: %s", path, e)
-        return
+    best_path = None
+    if record.get("jpeg"):
+        # The track's best-scoring frame, kept at detection time.
+        data = record["jpeg"]
+        if record["kind"] == "object" and record["coord"]:
+            fd, best_path = tempfile.mkstemp(suffix=".jpg", dir=_STREAM_DIR)
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+    else:
+        if not _wait_for_frame(path):
+            log.warning("snapshot upload requested for deviceID=%s (filename=%s) but no captured "
+                        "frame available yet at %s", device_id, requested_filename, path)
+            return
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            log.warning("failed to read %s for snapshot upload: %s", path, e)
+            return
     if record["kind"] == "object" and record["coord"]:
         fov_w, fov_h = _stream_dims.get(device_id, (DETECT_IMG_SIZE, DETECT_IMG_SIZE))
-        cropped = _crop_snapshot_jpeg(path, record["coord"], fov_w, fov_h)
+        try:
+            cropped = _crop_snapshot_jpeg(best_path or path, record["coord"], fov_w, fov_h)
+        finally:
+            if best_path:
+                os.remove(best_path)
         if cropped is not None:
             log.info("snapshot crop for deviceID=%s coord=%s -> %d bytes (from %d-byte full frame)",
                       device_id, record["coord"], len(cropped), len(data))
@@ -1064,12 +1155,13 @@ def _stream_clocks(device_id):
 
 def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, stationary=False,
                               object_type="person", coord=None, confidence=95,
-                              first_shown_ms=None, tracker_id=1, descriptor_extra=None):
+                              first_shown_ms=None, tracker_id=1, descriptor_extra=None, best=None):
     # Real EventSmartDetect shape; deviceID is our addition (required by AI-Port event routing).
     now_ms = int(time.time() * 1000)
     clock_mono, clock_stream = _stream_clocks(device_id)
     # Placeholder box is only a fallback; tracks open on real detections.
-    real_coord = [int(round(v)) for v in coord] if coord is not None else [100, 100, 200, 200]
+    real_coord = ([int(round(v)) for v in _to_protect(device_id, coord)]
+                  if coord is not None else [100, 100, 200, 200])
     # firstShownTimeMs must stay at the track's first-seen time (recomputing looks like a new track).
     first_shown = first_shown_ms if first_shown_ms is not None else now_ms
     confidence_level = int(round(confidence * 100)) if confidence <= 1 else int(round(confidence))
@@ -1126,19 +1218,27 @@ def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, statio
         seq = _snapshot_seq_by_device.get(device_id, 0) + 1
         _snapshot_seq_by_device[device_id] = seq
         fov_w, fov_h = _stream_dims.get(device_id, (DETECT_IMG_SIZE, DETECT_IMG_SIZE))
+        # Thumbnails come from the track's best-scoring moment when we kept one.
+        best_jpeg = best["jpeg"] if best else None
+        # Crop in image space; report the box in Protect's canvas space.
+        crop_coord = list(best["coord"]) if best else (list(coord) if coord is not None else None)
+        snap_coord = ([int(round(v)) for v in _to_protect(device_id, best["coord"])]
+                      if best else real_coord)
+        best_wall = best["wall"] if best else first_shown
         fullfov_filename = f"smartdetectsnap_zone_{seq:08d}_fullfov.jpg"
-        snapshot_filename = f"smartdetectsnap_zone_{tracker_id}{now_ms}.jpg"
-        _record_snapshot_filename(fullfov_filename, device_id, kind="fullfov")
-        _record_snapshot_filename(snapshot_filename, device_id, kind="object", coord=real_coord)
+        snapshot_filename = f"smartdetectsnap_zone_{tracker_id}{best_wall}.jpg"
+        _record_snapshot_filename(fullfov_filename, device_id, kind="fullfov", jpeg=best_jpeg)
+        _record_snapshot_filename(snapshot_filename, device_id, kind="object", coord=crop_coord,
+                                  jpeg=best_jpeg)
         payload["smartDetectSnapshotFullFoV"] = fullfov_filename
         payload["smartDetectSnapshotFullFoVHeight"] = fov_h
         payload["smartDetectSnapshotFullFoVWidth"] = fov_w
         payload["smartDetectSnapshots"] = [{
             "clockBestMonotonic": 0,
-            "clockBestWall": first_shown,
+            "clockBestWall": best_wall,
             "confidenceLevel": confidence_level,
-            "coord": real_coord,
-            "framingRect": real_coord,
+            "coord": snap_coord,
+            "framingRect": snap_coord,
             "reVerifyEligible": False,
             "smartDetectSnapshot": snapshot_filename,
             # Matches the object-crop image, not the full frame.
@@ -1158,7 +1258,8 @@ def _send_line_detect_event(ws, device_id, line, edge_type, event_id, direction,
     linesStatus, so the controller selects smartDetectLine."""
     now_ms = int(time.time() * 1000)
     clock_mono, clock_stream = _stream_clocks(device_id)
-    real_coord = [int(round(v)) for v in coord] if coord is not None else [100, 100, 200, 200]
+    real_coord = ([int(round(v)) for v in _to_protect(device_id, coord)]
+                  if coord is not None else [100, 100, 200, 200])
     first_shown = first_shown_ms if first_shown_ms is not None else now_ms
     confidence_level = int(round(confidence * 100)) if confidence <= 1 else int(round(confidence))
     line_ref = _line_ref(line["id"])
@@ -1222,7 +1323,9 @@ def _send_line_detect_event(ws, device_id, line, edge_type, event_id, direction,
         fullfov_filename = f"smartdetectsnap_line_{seq:08d}_fullfov.jpg"
         snapshot_filename = f"smartdetectsnap_line_{tracker_id}{now_ms}.jpg"
         _record_snapshot_filename(fullfov_filename, device_id, kind="fullfov")
-        _record_snapshot_filename(snapshot_filename, device_id, kind="object", coord=real_coord)
+        # Crop in image space; the payload's coord/framingRect stay in canvas space.
+        _record_snapshot_filename(snapshot_filename, device_id, kind="object",
+                                  coord=list(coord) if coord is not None else real_coord)
         payload["smartDetectSnapshotFullFoV"] = fullfov_filename
         payload["smartDetectSnapshotFullFoVHeight"] = fov_h
         payload["smartDetectSnapshotFullFoVWidth"] = fov_w

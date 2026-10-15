@@ -193,6 +193,16 @@ and `known/uiface.db`, a binary store), so the embedding layout can
 be compared with SFace's; matching against it (`matchedId`) is not implemented yet. Whether
 Protect's face service accepts SFace embeddings is also unconfirmed.
 
+**Coordinates and thumbnails.** Protect draws descriptor coords (and the user's zones and
+lines) on a 16:9 canvas the height of the video; a camera of another aspect sits centred
+in it (a 1920x2560 doorbell fills the middle 42%). Boxes are converted to that canvas when
+sent, and zone/line checks run in it; crops and plate/face reads stay in image space.
+Each track keeps its best-scoring frame (full-res JPEG, box, time); on `leave` the
+object crop, the Full-FoV image and `clockBestWall` come from it, not from the frame
+~30 s after the object was last seen. Seen live: Protect shows vehicle attributes
+(`Truck (70%), White (70%)`, `Red (42%)`), but displayed no type for `sedan`, so that value
+is probably outside its vocabulary.
+
 Classification is also **gated by a cheap frame-diff**: a tick with no open track and no
 meaningful frame change skips inference entirely (on a static scene this is the difference
 between a busied core and ~1% CPU). `AIPORT_MOTION_GATE=0` disables it and

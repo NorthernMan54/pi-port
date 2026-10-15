@@ -262,6 +262,70 @@ class TestSnapshotCrop(unittest.TestCase):
         self.assertTrue(out and out.startswith(b"\xff\xd8"))
 
 
+class TestProtectCanvas(Base):
+    """Protect draws 0-1000 coords on a 16:9 canvas; other aspects sit centred in it."""
+
+    def test_16_9_unchanged(self):
+        av._stream_dims["W"] = (2560, 1440)
+        self.assertEqual(av._to_protect("W", [100, 200, 300, 400]), [100, 200, 300, 400])
+
+    def test_portrait_pillarboxed(self):
+        # 1920x2560 doorbell: x squeezes toward the centre by 0.75 / (16/9).
+        av._stream_dims["D"] = (1920, 2560)
+        x, y, w, h = av._to_protect("D", [0, 244, 1000, 747])
+        self.assertAlmostEqual(x, 500 - 500 * 0.421875)
+        self.assertAlmostEqual(w, 421.875)
+        self.assertEqual((y, h), (244, 747))
+
+    def test_ultrawide_letterboxed(self):
+        av._stream_dims["U"] = (3200, 1200)
+        x, y, w, h = av._to_protect("U", [0, 0, 1000, 1000])
+        self.assertEqual((x, w), (0, 1000))
+        self.assertAlmostEqual(h, 1000 * (16 / 9) / (3200 / 1200))
+
+    def test_zone_check_in_canvas_space(self):
+        # A zone on the canvas's middle third covers the whole portrait image.
+        av._stream_dims["D"] = (1920, 2560)
+        av._detect_zones["D"] = [[(290, 0), (710, 0), (710, 1000), (290, 1000)]]
+        self.assertFalse(av._is_outside_detect_zones("D", [0, 400, 100, 100]))
+        av._stream_dims["D"] = (2560, 1440)
+        self.assertTrue(av._is_outside_detect_zones("D", [0, 400, 100, 100]))
+
+
+class TestBestFrame(Base):
+    def test_leave_uses_best_frame(self):
+        av._stream_dims["D"] = (1920, 2560)
+        best = {"jpeg": b"\xff\xd8best\xff\xd9", "coord": [500, 300, 100, 100],
+                "score": 0.9, "wall": 1234}
+        av._send_smart_detect_event(None, "D", edge_type="leave", object_type="face",
+                                    coord=[0, 0, 10, 10], confidence=0.5, tracker_id=4,
+                                    best=best)
+        payload = self.sent[-1][1]
+        snap = payload["smartDetectSnapshots"][0]
+        self.assertEqual(snap["clockBestWall"], 1234)
+        self.assertEqual(snap["smartDetectSnapshot"], "smartdetectsnap_zone_41234.jpg")
+        self.assertEqual(snap["coord"], [round(v) for v in av._to_protect("D", best["coord"])])
+        record = av._snapshot_filename_to_device["smartdetectsnap_zone_41234.jpg"]
+        self.assertEqual(record["coord"], best["coord"])  # crop stays in image space
+        self.assertEqual(record["jpeg"], best["jpeg"])
+        fullfov = av._snapshot_filename_to_device[payload["smartDetectSnapshotFullFoV"]]
+        self.assertEqual(fullfov["jpeg"], best["jpeg"])
+
+    def test_capture_keeps_best_score(self):
+        tr = {}
+        av._capture_best("D", tr, {"score": 0.8, "coord": [1, 2, 3, 4], "frame": (1, b"a")})
+        av._capture_best("D", tr, {"score": 0.6, "coord": [5, 6, 7, 8], "frame": (2, b"b")})
+        self.assertEqual((tr["best"]["jpeg"], tr["best"]["coord"]), (b"a", [1, 2, 3, 4]))
+        av._capture_best("D", tr, {"score": 0.9, "coord": [5, 6, 7, 8], "frame": (2, b"b")})
+        self.assertEqual(tr["best"]["jpeg"], b"b")
+
+    def test_jpeg_bytes_bounded(self):
+        for i in range(av.BEST_FRAME_RECORDS_MAX + 5):
+            av._record_snapshot_filename(f"f{i}.jpg", "D", kind="fullfov", jpeg=b"x")
+        held = [r for r in av._snapshot_filename_to_device.values() if r.get("jpeg")]
+        self.assertEqual(len(held), av.BEST_FRAME_RECORDS_MAX)
+
+
 class TestSnapshotUpload(Base):
     class _Resp:
         status_code = 200
@@ -290,6 +354,27 @@ class TestSnapshotUpload(Base):
         av._upload_snapshot("https://c/upload/t", self.INFO, "full.jpg", "smartDetectZoneSnapshotFullFoV")
         self.assertEqual(len(self.posted), 1)
         self.assertTrue(self.posted[0].endswith(b"AAA"))
+
+    def test_kept_best_frame_wins_over_current(self):
+        self._with_stream("AAA")
+        av._record_snapshot_filename("full.jpg", "AAA", kind="fullfov", jpeg=b"\xff\xd8BEST\xff\xd9")
+        av._upload_snapshot("https://c/upload/t", self.INFO, "full.jpg", "smartDetectZoneSnapshotFullFoV")
+        self.assertEqual(self.posted, [b"\xff\xd8BEST\xff\xd9"])
+
+    @unittest.skipUnless(_FFMPEG, "ffmpeg not installed")
+    def test_kept_best_frame_is_cropped(self):
+        self._with_stream("AAA")
+        frame = os.path.join(self._dir, "best-src.jpg")
+        make_frame(frame, 1504, 2016)
+        with open(frame, "rb") as f:
+            best = f.read()
+        av._record_snapshot_filename("obj.jpg", "AAA", kind="object", coord=[400, 300, 100, 100],
+                                     jpeg=best)
+        av._upload_snapshot("https://c/upload/t", self.INFO, "obj.jpg", "smartDetectZoneSnapshot")
+        self.assertEqual(len(self.posted), 1)
+        self.assertTrue(self.posted[0].startswith(b"\xff\xd8"))
+        self.assertNotEqual(self.posted[0], best)  # cropped, not the whole frame
+        self.assertFalse([f for f in os.listdir(self._dir) if f.startswith("tmp")])  # temp removed
 
     def test_unknown_ambiguous_refuses(self):
         self._with_stream("AAA", "BBB")

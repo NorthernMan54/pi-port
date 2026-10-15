@@ -261,25 +261,6 @@ sudo caffeinate -is venv/bin/python piport/run_all.py --iface en0 --state-dir ~/
 - Without the optional enrichment packages it runs person/vehicle/animal only; plate models
   download to `~/.cache` on the first plate read.
 
-### Moving an AI Port to another Mac
-
-To run the same adopted AI Port on a different Mac (same device in Protect, cameras still
-paired), move its identity with it: the adoption state and certificate, the advertised MAC and
-device_id, and the model files. Stop pi-port on the old Mac first; two hosts with one identity
-fight over the adoption.
-
-```bash
-# old Mac (after stopping pi-port)
-sudo scripts/macos_move_host.sh export ~/piport-move.tgz
-# copy ~/piport-move.tgz to the new Mac securely (it holds the private key and adoption token),
-# then on the new Mac, after the install steps above (clone, ffmpeg, venv):
-sudo scripts/macos_move_host.sh import ~/piport-move.tgz
-```
-
-`import` restores `~/.piport-state` and `piport/models/` and prints the start command with the
-MAC pinned (`--mac`); without it the MAC would be derived from the new Mac's interface and
-Protect would see a different device. The new IP is reported to Protect on connect.
-
 ### Manual install
 
 ```bash

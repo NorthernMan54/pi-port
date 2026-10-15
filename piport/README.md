@@ -196,7 +196,7 @@ Protect's face service accepts SFace embeddings is also unconfirmed.
 
 **Tick rate.** Each camera is classified every `AIPORT_TICK_S` seconds: 0.5 s on macOS
 (Core ML runs a frame in ~7 ms; at 1.5 s a car crossing a far road was seen once or not at
-all), 1.5 s elsewhere. Time-based thresholds (30 s miss tolerance, 30 s to count as still,
+all), 1.5 s elsewhere. Time-based thresholds (5 s miss tolerance, `AIPORT_MISS_S`; 30 s to count as still,
 6 s to resume after parking) keep their durations at any rate; boxes are displayed until
 just past the next update. The RTSP pull uses `-flags low_delay`.
 
@@ -233,7 +233,7 @@ in it (a 1920x2560 doorbell fills the middle 42%). Boxes are converted to that c
 sent, and zone/line checks run in it; crops and plate/face reads stay in image space.
 Each track keeps its best-scoring frame (full-res JPEG, box, time); on `leave` the
 object crop, the Full-FoV image and `clockBestWall` come from it, not from the frame
-~30 s after the object was last seen. Seen live: Protect shows vehicle attributes
+seconds after the object was last seen. Seen live: Protect shows vehicle attributes
 (`Truck (70%), White (70%)`, `Red (42%)`). Attributes become labels verbatim, so only
 Protect's values show: `vehicleType` car/suv/truck/van/bus/motorcycle/bike (COCO "car" is
 sent as `car`; `sedan` displayed nothing) and `color`
@@ -274,7 +274,7 @@ in `models/` next to `detector.py`.
 and 2-fps 640x640 raw RGB frames piped to Python for classification (no image-decode library
 needed). A background loop classifies the latest frame every 1.5s (`MOTION_POLL_INTERVAL_S`): a
 detection opens (`"enter"`) or refreshes (`"moving"`) a track, and a track closes (`"leave"`)
-only after `MOTION_MISS_TOLERANCE_TICKS` (20, ~30s) of **consecutive** empty ticks. Simultaneous
+only after `AIPORT_MISS_S` (default 5 s) of **consecutive** empty ticks. Simultaneous
 objects are tracked independently and matched frame-to-frame by bounding-box IOU within each type.
 
 Capability declaration is separate. For an event to be filterable by object type in the UI, the

@@ -143,9 +143,11 @@ def _ticks(seconds):
 # How long Protect shows each box: just past the next update. Real cameras update several
 # times a second with ~200-360 ms; at 1.5 s per update a 200 ms box flashed on and off.
 BOX_DISPLAY_MS = int(MOTION_POLL_INTERVAL_S * 1000) + 300
-# Empty ticks before a track closes (~30 s); a real departure takes that long to
-# register. Needs track state to survive UiStreamControl refreshes.
-MOTION_MISS_TOLERANCE_TICKS = _ticks(30)
+# Seconds with no detection before a track closes (AIPORT_MISS_S, default 5): the event
+# ends about this long after the object was last seen. At 30 s a car passing in a few
+# seconds made a 30 s event. Needs track state to survive UiStreamControl refreshes.
+MOTION_MISS_TOLERANCE_S = float(os.environ.get("AIPORT_MISS_S") or 5)
+MOTION_MISS_TOLERANCE_TICKS = _ticks(MOTION_MISS_TOLERANCE_S)
 # Min IOU (same objectType) to match a detection to an existing track.
 IOU_MATCH_THRESHOLD = 0.3
 # Motion/scene gate: skip the classifier on a near-static frame with no open track.
@@ -472,7 +474,7 @@ def _load_snapshot_bgr(device_id):
 
 def _capture_best(device_id, tr, d):
     """Keep the track's best-scoring moment: the full-res JPEG, the box and the
-    time. On leave the thumbnails come from it, not from the frame ~30 s after
+    time. On leave the thumbnails come from it, not from the frame several seconds after
     the object was last seen (which, for a face, no longer contains it)."""
     best = tr.get("best")
     if best and d["score"] < best["score"]:

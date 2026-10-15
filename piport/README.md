@@ -166,6 +166,26 @@ On macOS (Apple silicon, bare metal) the onnx backend uses onnxruntime's **Core 
 with the same detections. `AIPORT_ORT_PROVIDER=cpu` forces CPU; `auto` (default) picks Core ML
 when onnxruntime offers it (never on Linux) and falls back to CPU if the model won't compile.
 
+### Enrichment: vehicle attributes, license plates, faces (`enrich.py`, best-guess wire format)
+
+On top of person/vehicle/animal, `enrich.py` adds three optional stages. **The wire format
+for all three is a best guess, not confirmed against a real AI Port capture:**
+
+| Stage | Models | Emitted as |
+|-------|--------|------------|
+| Vehicle type + colour | YOLO class + HSV colour vote (no extra model) | `attributes: {vehicleType: {val, confidence}, color: {val, confidence}}` on vehicle descriptors (shape from the Protect backend; value vocabulary unconfirmed) |
+| License plates | `fast-alpr` (YOLOv9 plate detector + CCT OCR, MIT) on the full-res snapshot inside each vehicle box | its own `licensePlate` track (`licensePlate` + `name` = text), and `licensePlate` on the parent vehicle descriptor |
+| Faces | YuNet (MIT) inside each person box; SFace (Apache-2.0) against a local gallery | its own `face` track; a gallery match sets `name`/`tag` on the face and parent person |
+
+Plates and faces are read from the full-res snapshot (refreshed every second while they are on),
+not the 640x640 detection buffer. The `smartDetect` capabilities gain `licensePlate`,
+`lprEnhancedByAiKey`, `face`, `faceEnhancedByAiKey` only when the matching stage is available.
+Knobs: `AIPORT_VEHICLE_ATTRS` / `AIPORT_LPR` / `AIPORT_FACE` (`auto`|`0`|`1`),
+`AIPORT_LPR_THRESH`, `AIPORT_FACE_THRESH`, `AIPORT_FACE_MATCH_THRESH`, and
+`AIPORT_FACES_DIR` (default `<state-dir>/faces`): one sub-directory per person, named after
+them, holding a few clear face photos; edits are picked up without a restart. Protect's own
+face enrolment is not synced to the device (that protocol is unknown).
+
 Classification is also **gated by a cheap frame-diff**: a tick with no open track and no
 meaningful frame change skips inference entirely (on a static scene this is the difference
 between a busied core and ~1% CPU). `AIPORT_MOTION_GATE=0` disables it and

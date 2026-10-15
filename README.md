@@ -321,7 +321,7 @@ Device identity, network mode and the console address live in
 | `[console] host` / `port` | — / `7442` | The Protect console to dial when not yet adopted |
 
 Detector/runtime environment overrides: `AIPORT_BACKEND`, `AIPORT_MODEL_PATH`,
-`AIPORT_OBJ_THRESH`, `AIPORT_HWDEC`, `AIPORT_ORT_INTRA_THREADS`, `AIPORT_ORT_PROVIDER`,
+`AIPORT_OBJ_THRESH`, `AIPORT_HWDEC`, `AIPORT_ORT_INTRA_THREADS`, `AIPORT_ORT_PROVIDER`, `AIPORT_LPR`, `AIPORT_FACE`,
 `AIPORT_MOTION_GATE` / `AIPORT_MOTION_GATE_THRESH` (see `piport/README.md`).
 
 ## Verification
@@ -344,7 +344,9 @@ Detector/runtime environment overrides: `AIPORT_BACKEND`, `AIPORT_MODEL_PATH`,
 ## Roadmap / known limitations
 
 - **Known:** detection is stock YOLOv5 (person/vehicle/animal), not Ubiquiti's
-  classifier; face, license-plate and vehicle-classification are not implemented.
+  classifier. Vehicle type/colour, license plates and faces (`enrich.py`, optional) use
+  open models and a **best-guess wire format** not yet confirmed against Protect; faces
+  match a local gallery, not Protect's own face enrolment.
 - **Known:** on the Raspberry Pi 4 the H.264 hardware decoder is instance-limited
   and known-flaky; the Pi 5 has no H.264 hardware decoder at all. See
   `implementation.md` (CPU-x86 only) and `docker/README.md`.

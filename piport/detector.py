@@ -373,6 +373,7 @@ class Detector:
             if not mapped:
                 continue
             x1, y1, x2, y2 = [float(v) for v in box]
-            results.append({"objectType": mapped, "score": float(score), "box": (x1, y1, x2, y2)})
+            results.append({"objectType": mapped, "label": coco_label.strip(),
+                            "score": float(score), "box": (x1, y1, x2, y2)})
         results.sort(key=lambda r: -r["score"])
         return results

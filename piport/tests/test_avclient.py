@@ -240,6 +240,28 @@ class TestSnapshotResolution(Base):
             self.assertTrue(av._wait_for_frame(late, timeout=2.0))
 
 
+@unittest.skipUnless(_FFMPEG, "ffmpeg not installed")
+class TestSnapshotCrop(unittest.TestCase):
+    def setUp(self):
+        self._dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self._dir, True)
+        self.path = os.path.join(self._dir, "f.jpg")
+        make_frame(self.path, 1504, 2016)
+
+    def test_jpeg_size(self):
+        self.assertEqual(av._jpeg_size(self.path), (1504, 2016))
+        bogus = os.path.join(self._dir, "x.jpg")
+        with open(bogus, "wb") as f:
+            f.write(b"not a jpeg")
+        self.assertIsNone(av._jpeg_size(bogus))
+
+    def test_crop_uses_real_frame_size(self):
+        # Announced 1920x2560 but delivered 1504x2016 (seen live on a doorbell):
+        # the crop must fit the real frame instead of failing.
+        out = av._crop_snapshot_jpeg(self.path, [308, 346, 306, 620], 1920, 2560)
+        self.assertTrue(out and out.startswith(b"\xff\xd8"))
+
+
 class TestSnapshotUpload(Base):
     class _Resp:
         status_code = 200

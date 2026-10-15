@@ -50,6 +50,65 @@ class TestBackendSelection(unittest.TestCase):
 
 
 @unittest.skipIf(detector is None, f"detector unavailable ({_IMPORT_ERR})")
+class TestOnnxProviders(unittest.TestCase):
+    """AIPORT_ORT_PROVIDER picks Core ML when onnxruntime offers it, else CPU."""
+
+    MAC = ["CoreMLExecutionProvider", "CPUExecutionProvider"]
+
+    def setUp(self):
+        saved = os.environ.pop("AIPORT_ORT_PROVIDER", None)
+        if saved is not None:
+            self.addCleanup(os.environ.__setitem__, "AIPORT_ORT_PROVIDER", saved)
+        self.addCleanup(os.environ.pop, "AIPORT_ORT_PROVIDER", None)
+
+    def test_auto_prefers_coreml(self):
+        p = detector._onnx_providers(self.MAC)
+        self.assertEqual(p[0][0], "CoreMLExecutionProvider")
+        self.assertEqual(p[-1], "CPUExecutionProvider")
+
+    def test_auto_without_coreml(self):
+        self.assertEqual(detector._onnx_providers(["CPUExecutionProvider"]),
+                         ["CPUExecutionProvider"])
+
+    def test_forced_cpu(self):
+        os.environ["AIPORT_ORT_PROVIDER"] = "cpu"
+        self.assertEqual(detector._onnx_providers(self.MAC), ["CPUExecutionProvider"])
+
+    def test_coreml_compile_failure_falls_back_to_cpu(self):
+        import types
+        from unittest import mock
+
+        class _IO:
+            name, type, shape = "images", "tensor(float)", [1, 25200, 85]
+
+        class _Session:
+            def __init__(self, path, so, providers):
+                if providers[0] != "CPUExecutionProvider":
+                    raise RuntimeError("Unable to parse ML Program")
+                self.providers = providers
+
+            def get_providers(self):
+                return self.providers
+
+            def get_inputs(self):
+                return [_IO()]
+
+            def get_outputs(self):
+                return [_IO()]
+
+        class _Opts:
+            def add_session_config_entry(self, k, v):
+                pass
+
+        fake = types.SimpleNamespace(InferenceSession=_Session, SessionOptions=_Opts,
+                                     get_available_providers=lambda: self.MAC)
+        with mock.patch.dict(sys.modules, {"onnxruntime": fake}), \
+                self.assertLogs("aiport-detector", "ERROR"):
+            backend = detector._OnnxBackend()
+        self.assertEqual(backend.provider, "CPUExecutionProvider")
+
+
+@unittest.skipIf(detector is None, f"detector unavailable ({_IMPORT_ERR})")
 class TestMapObjectType(unittest.TestCase):
     def test_mapping(self):
         self.assertEqual(detector._map_object_type("person"), "person")

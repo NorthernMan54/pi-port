@@ -266,8 +266,22 @@ class _RknnBackend:
         return _post_process(raw_outputs, self._anchors)
 
 
+def _onnx_providers(available):
+    """onnxruntime providers (AIPORT_ORT_PROVIDER = auto/coreml/cpu): Core ML on
+    macOS (MLProgram on the Neural Engine, ~10x CPU on Apple silicon), else CPU."""
+    want = os.environ.get("AIPORT_ORT_PROVIDER", "auto").strip().lower()
+    if want != "cpu" and "CoreMLExecutionProvider" in available:
+        # Default NeuralNetwork format falls back to CPU on the fp16 Ultralytics model.
+        return [("CoreMLExecutionProvider",
+                 {"ModelFormat": "MLProgram", "MLComputeUnits": "CPUAndNeuralEngine"}),
+                "CPUExecutionProvider"]
+    if want == "coreml":
+        log.warning("AIPORT_ORT_PROVIDER=coreml but onnxruntime has no Core ML provider; using CPU")
+    return ["CPUExecutionProvider"]
+
+
 class _OnnxBackend:
-    """One shared onnxruntime InferenceSession behind a lock (CPU)."""
+    """One shared onnxruntime InferenceSession behind a lock (CPU or Core ML)."""
 
     name = "onnx"
 
@@ -295,7 +309,17 @@ class _OnnxBackend:
                 so.add_session_config_entry(key, "0")
             except Exception:
                 pass
-        self._session = ort.InferenceSession(self.model_path, so, providers=["CPUExecutionProvider"])
+        providers = _onnx_providers(ort.get_available_providers())
+        try:
+            self._session = ort.InferenceSession(self.model_path, so, providers=providers)
+        except Exception:
+            if providers == ["CPUExecutionProvider"]:
+                raise
+            # Not every graph compiles for Core ML; CPU always works.
+            log.exception("Core ML session failed for %s; falling back to CPU", self.model_path)
+            self._session = ort.InferenceSession(self.model_path, so,
+                                                 providers=["CPUExecutionProvider"])
+        self.provider = self._session.get_providers()[0]
         inp = self._session.get_inputs()[0]
         self._input_name = inp.name
         # Ultralytics release ONNX is fp16; honour the graph's input dtype.
@@ -329,8 +353,9 @@ class Detector:
         backend = _resolve_backend()
         self._labels = _load_labels()
         self._backend = _RknnBackend() if backend == "rknn" else _OnnxBackend()
-        log.info("Detector initialized (backend=%s, model=%s)",
-                 self._backend.name, self._backend.model_path)
+        log.info("Detector initialized (backend=%s, provider=%s, model=%s)",
+                 self._backend.name, getattr(self._backend, "provider", "-"),
+                 self._backend.model_path)
 
     def detect(self, frame_rgb):
         """frame_rgb: HxWx3 uint8 RGB, already resized to IMG_SIZE (plain

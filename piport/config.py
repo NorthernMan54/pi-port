@@ -9,6 +9,7 @@ values. Defaults to ``<project root>/aiport.cfg``.
 import argparse
 import configparser
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -123,12 +124,35 @@ def load_config_and_logging(argv=None):
     return cfg
 
 
+def _run(cmd):
+    """stdout of a short command, or "" if it's missing/fails."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=5).stdout
+    except (subprocess.SubprocessError, OSError):
+        return ""
+
+
+def _ifconfig_field(iface, key):
+    """First value after `key` in BSD/macOS `ifconfig <iface>` (no /sys, no `ip`)."""
+    for line in _run(["ifconfig", iface]).splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[0] == key:
+            return fields[1]
+    return ""
+
+
 def _iface_mac(iface):
     try:
         with open(f"/sys/class/net/{iface}/address") as f:
             return f.read().strip().upper().replace(":", "")
     except OSError:
-        return ""
+        pass
+    # macOS masks `ifconfig` ether as 02:00:00:00:00:00 for most processes; networksetup doesn't.
+    out = _run(["networksetup", "-getmacaddress", iface]).split()
+    mac = out[2] if len(out) > 2 and out[:2] == ["Ethernet", "Address:"] else ""
+    mac = mac or _ifconfig_field(iface, "ether")
+    mac = mac.upper().replace(":", "")
+    return "" if mac == "020000000000" else mac
 
 
 def _default_iface():
@@ -155,6 +179,11 @@ def _default_iface():
                 continue
     except OSError:
         pass
+    # macOS/BSD: no /proc or /sys, ask the routing table.
+    for line in _run(["route", "-n", "get", "default"]).splitlines():
+        key, _, value = line.partition(":")
+        if key.strip() == "interface" and value.strip():
+            return value.strip()
     return ""
 
 
@@ -198,7 +227,12 @@ def _iface_ip(iface):
                     return addr["local"]
     except (subprocess.SubprocessError, json.JSONDecodeError, OSError, KeyError):
         pass
-    return None
+    # BSD/macOS ifconfig; reject busybox's "addr:1.2.3.4" form rather than misparse it.
+    ip = _ifconfig_field(iface, "inet")
+    try:
+        return str(ipaddress.IPv4Address(ip))
+    except ValueError:
+        return None
 
 
 def resolve_ip(iface, cfg=None, bind_ip=None):

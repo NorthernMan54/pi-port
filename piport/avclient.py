@@ -17,6 +17,7 @@ import collections
 import itertools
 import json
 import logging
+import math
 import os
 import ssl
 import subprocess
@@ -126,10 +127,25 @@ _motion_lock = threading.Lock()
 _motion_poll_stop = {}  # deviceID -> threading.Event, signals the poll loop to stop
 _motion_poll_thread = {}  # deviceID -> threading.Thread, joined on stop
 _event_id_counter = itertools.count(int(time.time()))  # monotonic, avoids same-second collisions across tracks
-MOTION_POLL_INTERVAL_S = 1.5
-# Empty ticks before a track closes (~30s at 1.5s polls); a real departure takes
-# that long to register. Needs track state to survive UiStreamControl refreshes.
-MOTION_MISS_TOLERANCE_TICKS = 20
+# Seconds between classification ticks (AIPORT_TICK_S). 0.5 s on macOS, where Core ML runs
+# a frame in ~7 ms: at 1.5 s a car crossing a far road was classified once or not at all.
+# 1.5 s elsewhere (Pi/RK3588 CPU budget). The detection stream runs at least this fast.
+MOTION_POLL_INTERVAL_S = float(os.environ.get("AIPORT_TICK_S")
+                               or (0.5 if sys.platform == "darwin" else 1.5))
+DETECT_FPS = max(2, math.ceil(1 / MOTION_POLL_INTERVAL_S))
+
+
+def _ticks(seconds):
+    """Tick count for a duration, so time-based thresholds don't change with the tick rate."""
+    return max(1, round(seconds / MOTION_POLL_INTERVAL_S))
+
+
+# How long Protect shows each box: just past the next update. Real cameras update several
+# times a second with ~200-360 ms; at 1.5 s per update a 200 ms box flashed on and off.
+BOX_DISPLAY_MS = int(MOTION_POLL_INTERVAL_S * 1000) + 300
+# Empty ticks before a track closes (~30 s); a real departure takes that long to
+# register. Needs track state to survive UiStreamControl refreshes.
+MOTION_MISS_TOLERANCE_TICKS = _ticks(30)
 # Min IOU (same objectType) to match a detection to an existing track.
 IOU_MATCH_THRESHOLD = 0.3
 # Motion/scene gate: skip the classifier on a near-static frame with no open track.
@@ -244,10 +260,13 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
     snap_fps = "1" if enrich.smart_detect_features() else "1/2"
     cmd = [
         FFMPEG_BIN, "-loglevel", "warning", "-rtsp_transport", "tcp",
+        # Low-latency decode (no B-frame reorder delay). Not "-fflags nobuffer": with this
+        # split/fps pipeline it left the rawvideo detection output empty (ffmpeg 8).
+        "-flags", "low_delay",
         *hwdec_args, "-i", url,
         "-filter_complex",
         f"[0:v]split=2[snapin][detin];"
-        f"[snapin]fps={snap_fps}[snap];[detin]fps=2,scale={size}:{size}[det]",
+        f"[snapin]fps={snap_fps}[snap];[detin]fps={DETECT_FPS},scale={size}:{size}[det]",
         "-map", "[snap]", *encode_args, "-update", "1", "-y", out_path,
         "-map", "[det]", "-pix_fmt", "rgb24", "-f", "rawvideo", "-",
     ]
@@ -462,7 +481,26 @@ def _capture_best(device_id, tr, d):
     if data is None:
         return
     tr["best"] = {"jpeg": data, "coord": list(d["coord"]), "score": d["score"],
-                  "wall": int(time.time() * 1000)}
+                  "wall": _frame_wall_ms(device_id)}
+
+
+# A plate can't change on a vehicle that isn't moving, and a confident read won't improve.
+PLATE_CONFIDENT = 0.85
+SETTLED_MATCH_IOU = 0.5
+
+
+def _plate_settled(device_id, coord):
+    """True if this vehicle box belongs to a track that is parked, still, or already has a
+    confident plate -- re-reading it is wasted work."""
+    with _motion_lock:
+        tracks = list(_motion_state.get(device_id, {}).get("tracks", {}).values())
+    for tr in tracks:
+        if tr["objectType"] != "vehicle" or _iou(tr["coord"], coord) < SETTLED_MATCH_IOU:
+            continue
+        if (tr.get("stationary_coord") or tr.get("still")
+                or tr.get("extra_scores", {}).get("name", 0) >= PLATE_CONFIDENT):
+            return True
+    return False
 
 
 def _enrich_detections(device_id, detections):
@@ -470,7 +508,8 @@ def _enrich_detections(device_id, detections):
     Protect reads a vehicle's plate from its descriptor `name` and recognises a
     face from its `faceEmbed`. Results are reused until a newer snapshot lands, so
     tracks don't flap; plate/name reach the parent only on a fresh read (tracks keep them)."""
-    vehicles = [d for d in detections if d["objectType"] == "vehicle"]
+    vehicles = [d for d in detections if d["objectType"] == "vehicle"
+                and not _plate_settled(device_id, d["coord"])]
     people = [d for d in detections if d["objectType"] == "person"]
     if not vehicles and not people:
         return []
@@ -683,14 +722,41 @@ _event_max_ms = {}  # deviceID -> eventMaxDurationMSec from ChangeSmartMotionSet
 # walking past shrinks the box for a moment without moving it off its spot.
 STATIONARY_LEFT_IOU = 0.3
 STATIONARY_RESUME_DISTANCE = 50
-STATIONARY_RESUME_TICKS = 4
+STATIONARY_RESUME_TICKS = _ticks(6)
 STATIONARY_SIZE_RATIO = (0.7, 1.4)
+# A track whose box keeps overlapping its anchor (IoU >= STILL_IOU) for STILL_TICKS ticks
+# (~30 s) is still: its descriptors say stationary, and a still vehicle is parked (its
+# snapshot stays in the event's leave). Objects found within STARTUP_WINDOW_MS of a camera's
+# tracker starting (cars already parked there) are parked at once instead of opening an event.
+STILL_IOU = 0.7
+STILL_TICKS = _ticks(30)
+STARTUP_WINDOW_MS = 15000
+PARK_WHEN_STILL = ("vehicle",)
+
+
+def _update_still(tr, now_ms):
+    """Advance a track's stillness against its anchor box (detector jitter tolerated)."""
+    anchor = tr.get("anchor")
+    if anchor is None or _iou(tr["coord"], anchor) < STILL_IOU:
+        tr["anchor"] = list(tr["coord"])
+        tr["still_ticks"] = 0
+        tr["still_since_ms"] = now_ms
+    else:
+        tr["still_ticks"] = tr.get("still_ticks", 0) + 1
+    tr["still"] = tr["still_ticks"] >= STILL_TICKS
+
+
+def _park(tr):
+    tr["stationary_coord"] = list(tr["coord"])
+    tr["moved_ticks"] = 0
 
 
 def _track_args(tracker_id, tr):
+    still = bool(tr.get("still"))
     return {"tracker_id": tracker_id, "object_type": tr["objectType"], "coord": tr["coord"],
             "confidence": tr["score"], "first_shown_ms": tr["first_shown_ms"],
-            "descriptor_extra": tr.get("extra"), "best": tr.get("best")}
+            "descriptor_extra": tr.get("extra"), "best": tr.get("best"),
+            "still": still, "idle_since_ms": tr.get("still_since_ms") if still else None}
 
 
 def _send_event_message(ws, device_id, edge_type, event_id, members, stationary=False):
@@ -768,7 +834,7 @@ def _send_multi_leave(ws, device_id, event_id, members, fallback):
     requests none of its snapshots within LEAVE_FALLBACK_S."""
     members = sorted(members, key=lambda m: (m[1]["objectType"] == "face",
                                               LEAVE_PRIORITY.get(m[1]["objectType"], 9)))
-    now_ms = int(time.time() * 1000)
+    now_ms = _frame_wall_ms(device_id)
     clock_mono, clock_stream = _stream_clocks(device_id)
     seq = _snapshot_seq_by_device.get(device_id, 0) + 1
     _snapshot_seq_by_device[device_id] = seq
@@ -888,11 +954,13 @@ def _motion_tick(ws, device_id):
         detections = _dedupe_detections(_classify_frame_detections(device_id))
         detections += _enrich_detections(device_id, detections)
     with _motion_lock:
-        dev = _motion_state.setdefault(device_id, {"tracks": {}, "next_tracker_id": 1})
+        now_ms = _frame_wall_ms(device_id)
+        dev = _motion_state.setdefault(device_id, {"tracks": {}, "next_tracker_id": 1,
+                                                   "started_ms": now_ms})
         tracks = dev["tracks"]
-        event = dev.get("event")  # {"id", "started_ms", "finished": [(tid, tr)]} or None
+        event = dev.get("event")
+        starting = now_ms - dev.get("started_ms", 0) <= STARTUP_WINDOW_MS  # {"id", "started_ms", "finished": [(tid, tr)]} or None
         unclaimed = list(range(len(detections)))
-        now_ms = int(time.time() * 1000)
         joining = []  # tracks that start (or resume) taking part in the event this tick
 
         # IOU only disambiguates multiple same-type candidates; with one track and one
@@ -918,6 +986,7 @@ def _motion_tick(ws, device_id):
                 tr["coord"] = d["coord"]
                 tr["score"] = d["score"]
                 tr["miss_count"] = 0
+                _update_still(tr, now_ms)
                 if tr.get("stationary_coord") and _moved_since(tr):
                     # A stationary object moved again: it rejoins as a fresh participant.
                     log.info("real motion tick: stationary %s tracker_id=%s moved, rejoining "
@@ -926,6 +995,10 @@ def _motion_tick(ws, device_id):
                     tr.pop("moved_ticks", None)
                     tr["first_shown_ms"] = now_ms
                     tr.pop("best", None)
+                    tr.pop("anchor", None)
+                    _update_still(tr, now_ms)
+                    if event is not None:  # parked earlier in this same event
+                        event["finished"] = [m for m in event["finished"] if m[0] != tracker_id]
                     joining.append((tracker_id, tr))
                 _merge_extra(tr, d)
                 _capture_best(device_id, tr, d)
@@ -939,7 +1012,7 @@ def _motion_tick(ws, device_id):
             tr["miss_count"] += 1
             if tr["miss_count"] < MOTION_MISS_TOLERANCE_TICKS:
                 # Within the tolerance window -- send nothing, keep the track.
-                log.info("real motion tick: no match (miss %d/%d) for tracker_id=%s deviceID=%s -- "
+                log.debug("real motion tick: no match (miss %d/%d) for tracker_id=%s deviceID=%s -- "
                           "tolerating brief gap, track still open", tr["miss_count"],
                           MOTION_MISS_TOLERANCE_TICKS, tracker_id, device_id)
                 continue
@@ -963,14 +1036,31 @@ def _motion_tick(ws, device_id):
                                   "first_shown_ms": now_ms, "miss_count": 0,
                                   "prev_center": _protect_center(device_id, d["coord"]),
                                   "crossed_lines": {}}
+            _update_still(tracks[tracker_id], now_ms)
             _merge_extra(tracks[tracker_id], d)
             _capture_best(device_id, tracks[tracker_id], d)
+            if starting:
+                # Already there when the tracker started (a parked car): no event until it moves.
+                _park(tracks[tracker_id])
+                log.info("real motion tick: %s already present at start, parked for deviceID=%s "
+                         "tracker_id=%s", d["objectType"], device_id, tracker_id)
+                continue
             log.info("real motion tick: %s detected (score=%.2f), opening smartDetectZone track "
                       "for deviceID=%s tracker_id=%s", d["objectType"], d["score"],
                       device_id, tracker_id)
             joining.append((tracker_id, tracks[tracker_id]))
 
-        # 3. Camera event lifecycle.
+        # 3. A vehicle that has stopped (still ~30 s) parks; its snapshot stays in the leave.
+        for tid, tr in tracks.items():
+            if (not tr.get("stationary_coord") and tr.get("still")
+                    and tr["objectType"] in PARK_WHEN_STILL):
+                log.info("real motion tick: %s tracker_id=%s still for %d ticks, parked for "
+                         "deviceID=%s", tr["objectType"], tid, tr["still_ticks"], device_id)
+                _park(tr)
+                if event is not None and tr.get("event_id") == event["id"]:
+                    event["finished"].append((tid, tr))
+
+        # 4. Camera event lifecycle.
         active = [(tid, tr) for tid, tr in tracks.items() if not tr.get("stationary_coord")]
         if event is None and joining:
             event = dev["event"] = {"id": next(_event_id_counter), "started_ms": now_ms,
@@ -1002,11 +1092,14 @@ def _motion_tick(ws, device_id):
                 else:
                     single()
                 for _, tr in active:  # still in view: quiet until it moves again
-                    tr["stationary_coord"] = list(tr["coord"])
-                    tr["moved_ticks"] = 0
+                    _park(tr)
                 dev["event"] = None
             else:
-                _send_event_message(ws, device_id, "moving", event["id"], active)
+                # Only boxes seen this tick: a track inside its miss tolerance stays in the
+                # event (and its leave) but isn't drawn where it was last seen.
+                seen = [m for m in active if m[1]["miss_count"] == 0]
+                if seen:
+                    _send_event_message(ws, device_id, "moving", event["id"], seen)
 
         if not detections and not tracks and not gated:
             # Classified and found nothing = non-smart motion (lighting/noise); ignore.
@@ -1352,6 +1445,39 @@ def _download_face_db(uri, device_info):
              resp.headers.get("content-type"), summary)
 
 
+def _parse_box_delay(spec):
+    """AIPORT_BOX_DELAY_MS: "<default ms>[,<deviceID>=<ms>...]" -> (default, {deviceID: ms})."""
+    default, per = 0, {}
+    for part in (spec or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            if "=" in part:
+                dev, ms = part.split("=", 1)
+                per[dev.strip().upper()] = int(ms)
+            else:
+                default = int(part)
+        except ValueError:
+            log.warning("ignoring bad AIPORT_BOX_DELAY_MS entry %r", part)
+    return default, per
+
+
+# Frames reach a check seconds after capture (Protect's relay, decode, the tick wait), and
+# Protect places boxes in playback by clockWall, so boxes lagged the video by ~3 s. Every
+# frame-describing time is back-dated by this per-camera delay (default 0 = unchanged).
+_BOX_DELAY_DEFAULT_MS, _BOX_DELAY_MS = _parse_box_delay(os.environ.get("AIPORT_BOX_DELAY_MS"))
+
+
+def _box_delay_ms(device_id):
+    return _BOX_DELAY_MS.get(str(device_id).upper(), _BOX_DELAY_DEFAULT_MS)
+
+
+def _frame_wall_ms(device_id):
+    """Wall-clock ms of the frame being processed now (now minus the camera's delay)."""
+    return int(time.time() * 1000) - _box_delay_ms(device_id)
+
+
 def _stream_clocks(device_id):
     """(clockMonotonic, clockStream) in ms for a device: the device's monotonic
     clock (ms since this process started the stream) and the media-timeline
@@ -1364,23 +1490,24 @@ def _stream_clocks(device_id):
     started = _stream_started_monotonic_ms.get(device_id)
     if started is None:
         return 0, 0
-    mono = int(time.monotonic() * 1000) - started
+    mono = max(0, int(time.monotonic() * 1000) - started - _box_delay_ms(device_id))
     return mono, mono
 
 
 def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, stationary=False,
                               object_type="person", coord=None, confidence=95,
                               first_shown_ms=None, tracker_id=1, descriptor_extra=None, best=None,
-                              also_leaving=None):
+                              also_leaving=None, still=False, idle_since_ms=None):
     # Real EventSmartDetect shape; deviceID is our addition (required by AI-Port event routing).
     # also_leaving: further tracks closing on the same tick (dicts with this function's
     # per-track arguments). Real devices batch them into one leave with one snapshot
     # entry per tracker; one leave per track got only the first track's images fetched.
-    now_ms = int(time.time() * 1000)
+    now_ms = _frame_wall_ms(device_id)
     clock_mono, clock_stream = _stream_clocks(device_id)
     tracks = [{"tracker_id": tracker_id, "object_type": object_type, "coord": coord,
                "confidence": confidence, "first_shown_ms": first_shown_ms,
-               "descriptor_extra": descriptor_extra, "best": best}, *(also_leaving or [])]
+               "descriptor_extra": descriptor_extra, "best": best, "still": still,
+               "idle_since_ms": idle_since_ms}, *(also_leaving or [])]
     for t in tracks:
         # Placeholder box is only a fallback; tracks open on real detections.
         t["real_coord"] = ([int(round(v)) for v in _to_protect(device_id, t["coord"])]
@@ -1406,15 +1533,16 @@ def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, statio
             "coord": t["real_coord"],
             "coord3d": [-1, -1],
             "firstShownTimeMs": t["first_shown"],
-            # Real capture had idleSinceTimeMs == firstShownTimeMs; per-tick semantics unconfirmed.
-            "idleSinceTimeMs": t["first_shown"],
+            # Real capture had idleSinceTimeMs == firstShownTimeMs; a still track reports
+            # when it stopped moving (Protect's idle tracker reads it with stationary).
+            "idleSinceTimeMs": t.get("idle_since_ms") or t["first_shown"],
             "intelligenceZones": [],
             "lines": [],
             "loiterZones": [],
             "name": "",
             "objectType": t["object_type"],
             "secondLensZones": [],
-            "stationary": stationary,
+            "stationary": stationary or bool(t.get("still")),
             "tag": "",
             "trackerID": t["tracker_id"],
             # Naming the zone makes ds create a smartDetectZone (vs smartDetectLine) event.
@@ -1422,7 +1550,7 @@ def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, statio
             # Enrichment fields: attributes, plate text in name, faceEmbed, name/tag (enrich.py).
             **(t["descriptor_extra"] or {}),
         } for t in tracks],
-        "displayTimeoutMSec": 200,
+        "displayTimeoutMSec": BOX_DISPLAY_MS,
         "edgeType": edge_type,
         "eventId": event_id,
         # Top-level objectTypes; likely what add_smart_detect_types() reads.
@@ -1486,7 +1614,7 @@ def _send_line_detect_event(ws, device_id, line, edge_type, event_id, direction,
                             first_shown_ms, tracker_id):
     """Line Crossing event: same envelope as the zone path but with
     linesStatus, so the controller selects smartDetectLine."""
-    now_ms = int(time.time() * 1000)
+    now_ms = _frame_wall_ms(device_id)
     clock_mono, clock_stream = _stream_clocks(device_id)
     real_coord = ([int(round(v)) for v in _to_protect(device_id, coord)]
                   if coord is not None else [100, 100, 200, 200])
@@ -1526,7 +1654,7 @@ def _send_line_detect_event(ws, device_id, line, edge_type, event_id, direction,
             "crosslineA2BAdd": 1 if direction == "A2B" else 0,
             "crosslineB2AAdd": 1 if direction == "B2A" else 0,
         }],
-        "displayTimeoutMSec": 200,
+        "displayTimeoutMSec": BOX_DISPLAY_MS,
         "edgeType": edge_type,
         "eventId": event_id,
         "objectTypes": [object_type] if object_type else [],

@@ -170,7 +170,7 @@ when onnxruntime offers it (never on Linux) and falls back to CPU if the model w
 
 On top of person/vehicle/animal, `enrich.py` adds three optional stages. The field names
 come from Protect's backend (7.1.75); **none is confirmed against a real AI Port capture,
-and the vehicle-attribute values are guesses:**
+and the vehicle-attribute values follow Protect's label vocabulary:**
 
 | Stage | Models | Emitted as |
 |-------|--------|------------|
@@ -178,7 +178,8 @@ and the vehicle-attribute values are guesses:**
 | License plates | `fast-alpr` (YOLOv9 plate detector + CCT OCR, MIT) on the full-res snapshot inside each vehicle box | plate text in the vehicle descriptor's `name` (Protect's `parseSmartDetectTrackPayload` reads it there; `recognizeTracks` recognises moving vehicles with a `name`); best-scoring read kept per track |
 | Faces | YuNet (MIT) inside each person box; SFace (Apache-2.0) embedding | its own `face` track carrying `faceEmbed` (128 floats, best-scoring face kept), which `recognizeTracks` passes to Protect's face service; an optional local-gallery match also sets `name`/`tag` on the face and parent person |
 
-Plates and faces are read from the full-res snapshot (refreshed every second while they are on),
+A vehicle that is parked, still, or already has a confident plate (score >= 0.85) isn't
+re-read: its plate can't have changed. Plates and faces are read from the full-res snapshot (refreshed every second while they are on),
 not the 640x640 detection buffer. The `smartDetect` capabilities gain `licensePlate`,
 `lprEnhancedByAiKey`, `face`, `faceEnhancedByAiKey` only when the matching stage is available.
 Knobs: `AIPORT_VEHICLE_ATTRS` / `AIPORT_LPR` / `AIPORT_FACE` (`auto`|`0`|`1`),
@@ -193,6 +194,19 @@ and `known/uiface.db`, a binary store), so the embedding layout can
 be compared with SFace's; matching against it (`matchedId`) is not implemented yet. Whether
 Protect's face service accepts SFace embeddings is also unconfirmed.
 
+**Tick rate.** Each camera is classified every `AIPORT_TICK_S` seconds: 0.5 s on macOS
+(Core ML runs a frame in ~7 ms; at 1.5 s a car crossing a far road was seen once or not at
+all), 1.5 s elsewhere. Time-based thresholds (30 s miss tolerance, 30 s to count as still,
+6 s to resume after parking) keep their durations at any rate; boxes are displayed until
+just past the next update. The RTSP pull uses `-flags low_delay`.
+
+**Box timing.** Frames reach a check a few seconds after capture (Protect's relay, decode,
+the tick wait), and Protect places boxes in playback by `clockWall`, so boxes lagged the video
+by ~3 s. `AIPORT_BOX_DELAY_MS` back-dates every frame-describing time (`clockWall`, the stream
+clocks, first-shown/idle times, `clockBestWall`) by a delay: `"3000"` for all cameras, or with
+per-camera overrides, e.g. `"2000,AABBCC3344CC=3000"` (a proxied camera has an extra hop).
+Default 0. Tune it by comparing a box's time with the video in playback.
+
 **Events.** Protect keeps one smart-detect event per camera, not per track: the first
 `leave` closes it, and a scheduled check force-ends one left open past ~5.5 minutes without
 fetching any snapshots. So tracks share a camera event: `enter` when the first track
@@ -206,7 +220,11 @@ per participant, and `trackerIDAttrMap` carrying `faceEmbed` (face), `associated
 vehicles. If Protect requests none of its snapshots within 4 s, the single-tracker leave (face >
 person > vehicle > animal) is resent. Seen live: Protect recorded faces in its faces section from
 pi-port's face events, so its face service accepts SFace embeddings. A track still in view at the time
-limit (a parked car) goes quiet until it really moves: its box mostly leaves the parked spot,
+limit, or a vehicle still for ~30 s (box overlapping its anchor, so detector jitter doesn't
+count), parks: it goes quiet, its snapshot stays in the event's leave, and the event closes
+once nothing else is active. Objects already present in a camera's first 15 s (cars parked
+there when pi-port starts) are parked at once and open no event. Still tracks report
+`stationary: true` with `idleSinceTimeMs` set to when they stopped. A parked object resumes only when it really moves: its box mostly leaves the parked spot,
 or shifts at about the same size for ~6 s (someone walking past only shrinks it for a moment). Line-crossing events stay per track.
 
 **Coordinates and thumbnails.** Protect draws descriptor coords (and the user's zones and
@@ -216,8 +234,10 @@ sent, and zone/line checks run in it; crops and plate/face reads stay in image s
 Each track keeps its best-scoring frame (full-res JPEG, box, time); on `leave` the
 object crop, the Full-FoV image and `clockBestWall` come from it, not from the frame
 ~30 s after the object was last seen. Seen live: Protect shows vehicle attributes
-(`Truck (70%), White (70%)`, `Red (42%)`), but displayed no type for `sedan`, so that value
-is probably outside its vocabulary.
+(`Truck (70%), White (70%)`, `Red (42%)`). Attributes become labels verbatim, so only
+Protect's values show: `vehicleType` car/suv/truck/van/bus/motorcycle/bike (COCO "car" is
+sent as `car`; `sedan` displayed nothing) and `color`
+red/orange/yellow/green/blue/purple/pink/brown/black/white/gray (silver is sent as `gray`).
 
 Classification is also **gated by a cheap frame-diff**: a tick with no open track and no
 meaningful frame change skips inference entirely (on a static scene this is the difference

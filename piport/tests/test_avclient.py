@@ -351,9 +351,10 @@ class TestCameraEvent(Base):
         av._motion_state.pop("D", None)
         self.addCleanup(av._motion_state.pop, "D", None)
         self.addCleanup(av._event_max_ms.pop, "D", None)
-        patcher = mock.patch.object(av, "LEAVE_FALLBACK_S", 3600)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for name, value in (("LEAVE_FALLBACK_S", 3600), ("STARTUP_WINDOW_MS", -1)):
+            patcher = mock.patch.object(av, name, value)  # start outside the startup window
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def tick(self, *objs):
         self._faces = [o for o in objs if o["objectType"] == "face"]
@@ -460,6 +461,61 @@ class TestCameraEvent(Base):
         self.tick(self.CAR)
         self.assertEqual(self.events()[-1], ("leave", ["vehicle"], ["vehicle"]))
 
+    def test_present_at_startup_is_parked(self):
+        from unittest import mock
+        with mock.patch.object(av, "STARTUP_WINDOW_MS", 10 ** 9):
+            self.tick(self.CAR)
+            self.tick(self.CAR)
+        self.assertEqual(self.sent, [])   # the parked car opens no event
+        self.assertTrue(av._motion_state["D"]["tracks"][1].get("stationary_coord"))
+        self.tick(dict(self.CAR, coord=[600, 500, 200, 100]))  # drives off
+        self.assertEqual(self.events(), [("enter", ["vehicle"], [])])
+
+    def test_still_vehicle_parks_and_closes_event(self):
+        self.tick(self.CAR)
+        for _ in range(av.STILL_TICKS):
+            self.tick(self.CAR)
+        ev = self.events()
+        self.assertEqual(ev[-1], ("leave", ["vehicle"], ["vehicle"]))  # not after 5 minutes
+        self.assertIsNone(av._motion_state["D"].get("event"))
+        self.sent.clear()
+        self.tick(self.CAR)
+        self.assertEqual(self.sent, [])
+
+    def test_still_descriptor_is_stationary(self):
+        self.tick(self.PERSON)
+        for _ in range(av.STILL_TICKS):
+            self.tick(self.PERSON)
+        d = self.sent[-1][1]["descriptors"][0]
+        self.assertEqual((d["objectType"], d["stationary"]), ("person", True))
+        tr = av._motion_state["D"]["tracks"][1]
+        self.assertEqual(d["idleSinceTimeMs"], tr["still_since_ms"])
+        self.assertIsNotNone(av._motion_state["D"].get("event"))  # people are not parked
+
+    def test_jitter_still_counts_as_still(self):
+        tr = {"coord": [100, 100, 200, 200]}
+        for i in range(av.STILL_TICKS + 1):
+            tr["coord"] = [100 + (i % 3), 100, 200 + (i % 2), 200]
+            av._update_still(tr, 1000 + i)
+        self.assertTrue(tr["still"])
+        tr["coord"] = [400, 100, 200, 200]
+        av._update_still(tr, 9999)
+        self.assertFalse(tr["still"])
+
+    def test_box_display_outlasts_update_interval(self):
+        self.tick(self.PERSON)
+        self.assertGreater(self.sent[-1][1]["displayTimeoutMSec"],
+                           av.MOTION_POLL_INTERVAL_S * 1000)
+
+    def test_missed_track_not_drawn(self):
+        self.tick(self.PERSON, self.CAR)
+        self.sent.clear()
+        self.tick(self.PERSON)            # car missed this tick
+        self.assertEqual(self.events(), [("moving", ["person"], [])])
+        self.sent.clear()
+        self.tick()                       # nothing seen: no update at all
+        self.assertEqual(self.sent, [])
+
     def test_leave_priority(self):
         person = (1, {"objectType": "person", "score": 0.9})
         car = (2, {"objectType": "vehicle", "score": 0.95})
@@ -543,6 +599,46 @@ class TestMultiLeave(Base):
         members = self.members()
         members[0][1]["best"]["coord"] = [900, 900, 20, 20]
         self.assertEqual(av._associate_faces(members), {})
+
+
+class TestBoxDelay(Base):
+    """AIPORT_BOX_DELAY_MS back-dates frame-describing timestamps per camera."""
+
+    def setUp(self):
+        super().setUp()
+        from unittest import mock
+        for name, value in (("_BOX_DELAY_DEFAULT_MS", 1000), ("_BOX_DELAY_MS", {"SLOW": 3000})):
+            patcher = mock.patch.object(av, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_parse(self):
+        self.assertEqual(av._parse_box_delay("2500, aabbcc3344cc=3000 ,8CEDE172C456=1500"),
+                         (2500, {"AABBCC3344CC": 3000, "8CEDE172C456": 1500}))
+        self.assertEqual(av._parse_box_delay(""), (0, {}))
+        self.assertEqual(av._parse_box_delay("x,DEV=y,500"), (500, {}))
+
+    def test_per_camera_delay(self):
+        self.assertEqual(av._box_delay_ms("SLOW"), 3000)
+        self.assertEqual(av._box_delay_ms("other"), 1000)
+        before = int(av.time.time() * 1000)
+        self.assertLessEqual(av._frame_wall_ms("SLOW"), before - 3000 + 50)
+
+    def test_event_backdated(self):
+        before = int(av.time.time() * 1000)
+        av._send_smart_detect_event(None, "SLOW", edge_type="enter", object_type="vehicle",
+                                    coord=[1, 2, 3, 4], confidence=0.9)
+        p = self.sent[-1][1]
+        self.assertTrue(before - 3100 <= p["clockWall"] <= before - 2900)
+        self.assertTrue(before - 3100 <= p["descriptors"][0]["firstShownTimeMs"] <= before - 2900)
+
+    def test_stream_clocks_backdated_not_negative(self):
+        av._stream_started_monotonic_ms["SLOW"] = int(av.time.monotonic() * 1000) - 10000
+        self.addCleanup(av._stream_started_monotonic_ms.pop, "SLOW", None)
+        mono, stream = av._stream_clocks("SLOW")
+        self.assertTrue(6900 <= mono <= 7100 and mono == stream)
+        av._stream_started_monotonic_ms["SLOW"] = int(av.time.monotonic() * 1000)
+        self.assertEqual(av._stream_clocks("SLOW"), (0, 0))
 
 
 class TestSnapshotUpload(Base):

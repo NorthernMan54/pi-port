@@ -57,8 +57,16 @@ class TestDominantColor(unittest.TestCase):
 class TestVehicleAttributes(unittest.TestCase):
     def test_type_and_color(self):
         a = enrich.vehicle_attributes("car", _solid((200, 20, 20)), [0, 0, 1000, 1000])
-        self.assertEqual(a["vehicleType"]["val"], "sedan")
+        self.assertEqual(a["vehicleType"]["val"], "car")
         self.assertEqual(a["color"], {"val": "red", "confidence": 100})
+
+    def test_protect_vocabulary(self):
+        silver = enrich.vehicle_attributes("bicycle", _solid((170, 170, 175)), [0, 0, 1000, 1000])
+        self.assertEqual(silver["vehicleType"]["val"], "bike")
+        self.assertEqual(silver["color"]["val"], "gray")  # Protect has no "silver"
+        for label in enrich.VEHICLE_TYPES:
+            self.assertIn(enrich.VEHICLE_TYPES[label],
+                          {"car", "suv", "truck", "van", "bus", "motorcycle", "bike"})
 
     def test_unknown_label_keeps_color(self):
         a = enrich.vehicle_attributes("train", _solid((10, 10, 10)), [0, 0, 1000, 1000])
@@ -158,6 +166,39 @@ class TestEnrichDetections(unittest.TestCase):
             self.addCleanup(patcher.stop)
         avclient._enrich_cache.pop("DEV", None)
         self.addCleanup(avclient._enrich_cache.pop, "DEV", None)
+
+    def _track(self, **kw):
+        tr = {"objectType": "vehicle", "coord": [0, 0, 100, 100]}
+        tr.update(kw)
+        avclient._motion_state["DEV"] = {"tracks": {1: tr}}
+        self.addCleanup(avclient._motion_state.pop, "DEV", None)
+
+    def _plates_read(self):
+        calls = []
+        enricher = self._Enricher()
+        enricher.plates = lambda img, coords: calls.append(coords) or []
+        from unittest import mock
+        with mock.patch.object(avclient, "_get_enricher", lambda: enricher):
+            avclient._enrich_cache.pop("DEV", None)
+            avclient._enrich_detections(
+                "DEV", [{"objectType": "vehicle", "score": 0.8, "coord": [0, 0, 100, 100]}])
+        return calls
+
+    def test_parked_vehicle_not_reread(self):
+        self._track(stationary_coord=[0, 0, 100, 100])
+        self.assertEqual(self._plates_read(), [])
+
+    def test_still_vehicle_not_reread(self):
+        self._track(still=True)
+        self.assertEqual(self._plates_read(), [])
+
+    def test_confident_plate_not_reread(self):
+        self._track(extra_scores={"name": 0.9})
+        self.assertEqual(self._plates_read(), [])
+
+    def test_moving_vehicle_without_plate_is_read(self):
+        self._track(extra_scores={"name": 0.6})
+        self.assertEqual(self._plates_read(), [[[0, 0, 100, 100]]])
 
     def test_plate_and_face(self):
         vehicle = {"objectType": "vehicle", "score": 0.8, "coord": [0, 0, 100, 100]}

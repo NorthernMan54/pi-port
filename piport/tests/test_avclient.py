@@ -351,9 +351,10 @@ class TestCameraEvent(Base):
         av._motion_state.pop("D", None)
         self.addCleanup(av._motion_state.pop, "D", None)
         self.addCleanup(av._event_max_ms.pop, "D", None)
-        patcher = mock.patch.object(av, "LEAVE_FALLBACK_S", 3600)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for name, value in (("LEAVE_FALLBACK_S", 3600), ("STARTUP_WINDOW_MS", -1)):
+            patcher = mock.patch.object(av, name, value)  # start outside the startup window
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def tick(self, *objs):
         self._faces = [o for o in objs if o["objectType"] == "face"]
@@ -459,6 +460,47 @@ class TestCameraEvent(Base):
         self.tick(self.CAR)
         self.tick(self.CAR)
         self.assertEqual(self.events()[-1], ("leave", ["vehicle"], ["vehicle"]))
+
+    def test_present_at_startup_is_parked(self):
+        from unittest import mock
+        with mock.patch.object(av, "STARTUP_WINDOW_MS", 10 ** 9):
+            self.tick(self.CAR)
+            self.tick(self.CAR)
+        self.assertEqual(self.sent, [])   # the parked car opens no event
+        self.assertTrue(av._motion_state["D"]["tracks"][1].get("stationary_coord"))
+        self.tick(dict(self.CAR, coord=[600, 500, 200, 100]))  # drives off
+        self.assertEqual(self.events(), [("enter", ["vehicle"], [])])
+
+    def test_still_vehicle_parks_and_closes_event(self):
+        self.tick(self.CAR)
+        for _ in range(av.STILL_TICKS):
+            self.tick(self.CAR)
+        ev = self.events()
+        self.assertEqual(ev[-1], ("leave", ["vehicle"], ["vehicle"]))  # not after 5 minutes
+        self.assertIsNone(av._motion_state["D"].get("event"))
+        self.sent.clear()
+        self.tick(self.CAR)
+        self.assertEqual(self.sent, [])
+
+    def test_still_descriptor_is_stationary(self):
+        self.tick(self.PERSON)
+        for _ in range(av.STILL_TICKS):
+            self.tick(self.PERSON)
+        d = self.sent[-1][1]["descriptors"][0]
+        self.assertEqual((d["objectType"], d["stationary"]), ("person", True))
+        tr = av._motion_state["D"]["tracks"][1]
+        self.assertEqual(d["idleSinceTimeMs"], tr["still_since_ms"])
+        self.assertIsNotNone(av._motion_state["D"].get("event"))  # people are not parked
+
+    def test_jitter_still_counts_as_still(self):
+        tr = {"coord": [100, 100, 200, 200]}
+        for i in range(av.STILL_TICKS + 1):
+            tr["coord"] = [100 + (i % 3), 100, 200 + (i % 2), 200]
+            av._update_still(tr, 1000 + i)
+        self.assertTrue(tr["still"])
+        tr["coord"] = [400, 100, 200, 200]
+        av._update_still(tr, 9999)
+        self.assertFalse(tr["still"])
 
     def test_leave_priority(self):
         person = (1, {"objectType": "person", "score": 0.9})

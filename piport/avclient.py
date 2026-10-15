@@ -127,6 +127,9 @@ _motion_poll_stop = {}  # deviceID -> threading.Event, signals the poll loop to 
 _motion_poll_thread = {}  # deviceID -> threading.Thread, joined on stop
 _event_id_counter = itertools.count(int(time.time()))  # monotonic, avoids same-second collisions across tracks
 MOTION_POLL_INTERVAL_S = 1.5
+# How long Protect shows each box: just past the next update. Real cameras update several
+# times a second with ~200-360 ms; at 1.5 s per update a 200 ms box flashed on and off.
+BOX_DISPLAY_MS = int(MOTION_POLL_INTERVAL_S * 1000) + 300
 # Empty ticks before a track closes (~30s at 1.5s polls); a real departure takes
 # that long to register. Needs track state to survive UiStreamControl refreshes.
 MOTION_MISS_TOLERANCE_TICKS = 20
@@ -1076,7 +1079,11 @@ def _motion_tick(ws, device_id):
                     _park(tr)
                 dev["event"] = None
             else:
-                _send_event_message(ws, device_id, "moving", event["id"], active)
+                # Only boxes seen this tick: a track inside its miss tolerance stays in the
+                # event (and its leave) but isn't drawn where it was last seen.
+                seen = [m for m in active if m[1]["miss_count"] == 0]
+                if seen:
+                    _send_event_message(ws, device_id, "moving", event["id"], seen)
 
         if not detections and not tracks and not gated:
             # Classified and found nothing = non-smart motion (lighting/noise); ignore.
@@ -1494,7 +1501,7 @@ def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, statio
             # Enrichment fields: attributes, plate text in name, faceEmbed, name/tag (enrich.py).
             **(t["descriptor_extra"] or {}),
         } for t in tracks],
-        "displayTimeoutMSec": 200,
+        "displayTimeoutMSec": BOX_DISPLAY_MS,
         "edgeType": edge_type,
         "eventId": event_id,
         # Top-level objectTypes; likely what add_smart_detect_types() reads.
@@ -1598,7 +1605,7 @@ def _send_line_detect_event(ws, device_id, line, edge_type, event_id, direction,
             "crosslineA2BAdd": 1 if direction == "A2B" else 0,
             "crosslineB2AAdd": 1 if direction == "B2A" else 0,
         }],
-        "displayTimeoutMSec": 200,
+        "displayTimeoutMSec": BOX_DISPLAY_MS,
         "edgeType": edge_type,
         "eventId": event_id,
         "objectTypes": [object_type] if object_type else [],

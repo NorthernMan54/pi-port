@@ -502,6 +502,20 @@ class TestCameraEvent(Base):
         av._update_still(tr, 9999)
         self.assertFalse(tr["still"])
 
+    def test_box_display_outlasts_update_interval(self):
+        self.tick(self.PERSON)
+        self.assertGreater(self.sent[-1][1]["displayTimeoutMSec"],
+                           av.MOTION_POLL_INTERVAL_S * 1000)
+
+    def test_missed_track_not_drawn(self):
+        self.tick(self.PERSON, self.CAR)
+        self.sent.clear()
+        self.tick(self.PERSON)            # car missed this tick
+        self.assertEqual(self.events(), [("moving", ["person"], [])])
+        self.sent.clear()
+        self.tick()                       # nothing seen: no update at all
+        self.assertEqual(self.sent, [])
+
     def test_leave_priority(self):
         person = (1, {"objectType": "person", "score": 0.9})
         car = (2, {"objectType": "vehicle", "score": 0.95})

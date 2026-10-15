@@ -678,8 +678,13 @@ def _scene_changed(device_id):
 DEFAULT_EVENT_MAX_MS = 300000
 _event_max_ms = {}  # deviceID -> eventMaxDurationMSec from ChangeSmartMotionSettings
 # A track still present when its event hit the time limit goes quiet (stationary, e.g. a
-# parked car) until its centre moves this far (0-1000 image units).
+# parked car) until it really moves: its box mostly leaves the parked spot, or its centre
+# stays shifted (0-1000 image units) for several ticks at about the same size. Someone
+# walking past shrinks the box for a moment without moving it off its spot.
+STATIONARY_LEFT_IOU = 0.3
 STATIONARY_RESUME_DISTANCE = 50
+STATIONARY_RESUME_TICKS = 4
+STATIONARY_SIZE_RATIO = (0.7, 1.4)
 
 
 def _track_args(tracker_id, tr):
@@ -735,9 +740,17 @@ def _close_line_events(ws, device_id, tracker_id, tr):
 
 
 def _moved_since(tr):
-    cx, cy = _zone_center_norm(tr["coord"])
-    sx, sy = _zone_center_norm(tr["stationary_coord"])
-    return ((cx - sx) ** 2 + (cy - sy) ** 2) ** 0.5 > STATIONARY_RESUME_DISTANCE
+    """True once a stationary track has really moved off its parked spot (occlusion-proof)."""
+    cur, parked = tr["coord"], tr["stationary_coord"]
+    if _iou(cur, parked) < STATIONARY_LEFT_IOU:
+        return True
+    cx, cy = _zone_center_norm(cur)
+    sx, sy = _zone_center_norm(parked)
+    shifted = ((cx - sx) ** 2 + (cy - sy) ** 2) ** 0.5 > STATIONARY_RESUME_DISTANCE
+    ratio = (cur[2] * cur[3]) / max(1.0, parked[2] * parked[3])
+    same_size = STATIONARY_SIZE_RATIO[0] <= ratio <= STATIONARY_SIZE_RATIO[1]
+    tr["moved_ticks"] = tr.get("moved_ticks", 0) + 1 if shifted and same_size else 0
+    return tr["moved_ticks"] >= STATIONARY_RESUME_TICKS
 
 
 def _motion_tick(ws, device_id):
@@ -789,6 +802,7 @@ def _motion_tick(ws, device_id):
                     log.info("real motion tick: stationary %s tracker_id=%s moved, rejoining "
                              "for deviceID=%s", tr["objectType"], tracker_id, device_id)
                     tr.pop("stationary_coord")
+                    tr.pop("moved_ticks", None)
                     tr["first_shown_ms"] = now_ms
                     tr.pop("best", None)
                     joining.append((tracker_id, tr))
@@ -859,6 +873,7 @@ def _motion_tick(ws, device_id):
                 _send_event_message(ws, device_id, "leave", event["id"], [lead], stationary=True)
                 for _, tr in active:  # still in view: quiet until it moves again
                     tr["stationary_coord"] = list(tr["coord"])
+                    tr["moved_ticks"] = 0
                 dev["event"] = None
             else:
                 _send_event_message(ws, device_id, "moving", event["id"], active)

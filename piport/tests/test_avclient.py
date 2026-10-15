@@ -403,6 +403,52 @@ class TestCameraEvent(Base):
             self.tick(self.CAR)
         self.assertEqual(self.events()[-1], ("leave", ["face"], ["face"]))
 
+    def test_occlusion_does_not_wake_parked_car(self):
+        # Live 10:27:24: someone walked in front of a parked car; its box narrowed
+        # (centre shifted) though the car never moved.
+        parked = [391, 434, 146, 169]
+        tr = {"coord": parked, "stationary_coord": list(parked)}
+        for _ in range(av.STATIONARY_RESUME_TICKS * 3):
+            tr["coord"] = [391, 437, 88, 165]
+            self.assertFalse(av._moved_since(tr))
+
+    def test_driving_off_wakes_immediately(self):
+        tr = {"coord": [700, 434, 146, 169], "stationary_coord": [391, 434, 146, 169]}
+        self.assertTrue(av._moved_since(tr))
+
+    def test_sustained_same_size_shift_wakes(self):
+        parked = [391, 434, 146, 169]
+        tr = {"coord": [451, 434, 146, 169], "stationary_coord": list(parked)}  # IoU > 0.3
+        results = [av._moved_since(tr) for _ in range(av.STATIONARY_RESUME_TICKS)]
+        self.assertEqual(results, [False] * (av.STATIONARY_RESUME_TICKS - 1) + [True])
+
+    def test_brief_shift_resets(self):
+        parked = [391, 434, 146, 169]
+        tr = {"coord": [451, 434, 146, 169], "stationary_coord": list(parked)}
+        for _ in range(av.STATIONARY_RESUME_TICKS - 1):
+            self.assertFalse(av._moved_since(tr))
+        tr["coord"] = list(parked)  # back in place
+        self.assertFalse(av._moved_since(tr))
+        tr["coord"] = [451, 434, 146, 169]
+        self.assertFalse(av._moved_since(tr))  # count restarted
+
+    def test_visitor_in_front_of_parked_car_closes_promptly(self):
+        av._event_max_ms["D"] = 0
+        car = dict(self.CAR, coord=[391, 434, 146, 169])
+        self.tick(car)
+        self.tick(car)                       # parked
+        av._event_max_ms["D"] = 10 ** 9
+        self.sent.clear()
+        occluded = dict(car, coord=[391, 437, 88, 165])
+        for _ in range(5):
+            self.tick(occluded, self.PERSON, self.FACE)
+        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
+            self.tick(car)
+        ev = self.events()
+        self.assertEqual(ev[0][0], "enter")
+        self.assertNotIn("vehicle", ev[0][1])   # the car stayed parked
+        self.assertEqual(ev[-1], ("leave", ["face"], ["face"]))  # closed without the time limit
+
     def test_leave_priority(self):
         person = (1, {"objectType": "person", "score": 0.9})
         car = (2, {"objectType": "vehicle", "score": 0.95})

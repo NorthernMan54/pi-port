@@ -201,7 +201,8 @@ snapshot when the last active track goes or `eventMaxDurationMSec` (from
 `ChangeSmartMotionSettings`, 5 min by default) runs out. That leave carries a single tracker
 (face > person > vehicle > animal, then best score): seen live, Protect fetched snapshots for
 single-tracker leaves but requested nothing for one carrying two trackers. A track still in view at the time
-limit (a parked car) goes quiet until it moves again. Line-crossing events stay per track.
+limit (a parked car) goes quiet until it really moves: its box mostly leaves the parked spot,
+or shifts at about the same size for ~6 s (someone walking past only shrinks it for a moment). Line-crossing events stay per track.
 
 **Coordinates and thumbnails.** Protect draws descriptor coords (and the user's zones and
 lines) on a 16:9 canvas the height of the video; a camera of another aspect sits centred

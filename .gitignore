@@ -31,3 +31,4 @@ __pycache__/
 
 # Windows metadata
 *:Zone.Identifier
+/venv

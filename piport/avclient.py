@@ -17,6 +17,7 @@ import collections
 import itertools
 import json
 import logging
+import math
 import os
 import ssl
 import subprocess
@@ -126,13 +127,25 @@ _motion_lock = threading.Lock()
 _motion_poll_stop = {}  # deviceID -> threading.Event, signals the poll loop to stop
 _motion_poll_thread = {}  # deviceID -> threading.Thread, joined on stop
 _event_id_counter = itertools.count(int(time.time()))  # monotonic, avoids same-second collisions across tracks
-MOTION_POLL_INTERVAL_S = 1.5
+# Seconds between classification ticks (AIPORT_TICK_S). 0.5 s on macOS, where Core ML runs
+# a frame in ~7 ms: at 1.5 s a car crossing a far road was classified once or not at all.
+# 1.5 s elsewhere (Pi/RK3588 CPU budget). The detection stream runs at least this fast.
+MOTION_POLL_INTERVAL_S = float(os.environ.get("AIPORT_TICK_S")
+                               or (0.5 if sys.platform == "darwin" else 1.5))
+DETECT_FPS = max(2, math.ceil(1 / MOTION_POLL_INTERVAL_S))
+
+
+def _ticks(seconds):
+    """Tick count for a duration, so time-based thresholds don't change with the tick rate."""
+    return max(1, round(seconds / MOTION_POLL_INTERVAL_S))
+
+
 # How long Protect shows each box: just past the next update. Real cameras update several
 # times a second with ~200-360 ms; at 1.5 s per update a 200 ms box flashed on and off.
 BOX_DISPLAY_MS = int(MOTION_POLL_INTERVAL_S * 1000) + 300
-# Empty ticks before a track closes (~30s at 1.5s polls); a real departure takes
-# that long to register. Needs track state to survive UiStreamControl refreshes.
-MOTION_MISS_TOLERANCE_TICKS = 20
+# Empty ticks before a track closes (~30 s); a real departure takes that long to
+# register. Needs track state to survive UiStreamControl refreshes.
+MOTION_MISS_TOLERANCE_TICKS = _ticks(30)
 # Min IOU (same objectType) to match a detection to an existing track.
 IOU_MATCH_THRESHOLD = 0.3
 # Motion/scene gate: skip the classifier on a near-static frame with no open track.
@@ -247,10 +260,13 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
     snap_fps = "1" if enrich.smart_detect_features() else "1/2"
     cmd = [
         FFMPEG_BIN, "-loglevel", "warning", "-rtsp_transport", "tcp",
+        # Low-latency decode (no B-frame reorder delay). Not "-fflags nobuffer": with this
+        # split/fps pipeline it left the rawvideo detection output empty (ffmpeg 8).
+        "-flags", "low_delay",
         *hwdec_args, "-i", url,
         "-filter_complex",
         f"[0:v]split=2[snapin][detin];"
-        f"[snapin]fps={snap_fps}[snap];[detin]fps=2,scale={size}:{size}[det]",
+        f"[snapin]fps={snap_fps}[snap];[detin]fps={DETECT_FPS},scale={size}:{size}[det]",
         "-map", "[snap]", *encode_args, "-update", "1", "-y", out_path,
         "-map", "[det]", "-pix_fmt", "rgb24", "-f", "rawvideo", "-",
     ]
@@ -706,14 +722,14 @@ _event_max_ms = {}  # deviceID -> eventMaxDurationMSec from ChangeSmartMotionSet
 # walking past shrinks the box for a moment without moving it off its spot.
 STATIONARY_LEFT_IOU = 0.3
 STATIONARY_RESUME_DISTANCE = 50
-STATIONARY_RESUME_TICKS = 4
+STATIONARY_RESUME_TICKS = _ticks(6)
 STATIONARY_SIZE_RATIO = (0.7, 1.4)
 # A track whose box keeps overlapping its anchor (IoU >= STILL_IOU) for STILL_TICKS ticks
 # (~30 s) is still: its descriptors say stationary, and a still vehicle is parked (its
 # snapshot stays in the event's leave). Objects found within STARTUP_WINDOW_MS of a camera's
 # tracker starting (cars already parked there) are parked at once instead of opening an event.
 STILL_IOU = 0.7
-STILL_TICKS = 20
+STILL_TICKS = _ticks(30)
 STARTUP_WINDOW_MS = 15000
 PARK_WHEN_STILL = ("vehicle",)
 
@@ -996,7 +1012,7 @@ def _motion_tick(ws, device_id):
             tr["miss_count"] += 1
             if tr["miss_count"] < MOTION_MISS_TOLERANCE_TICKS:
                 # Within the tolerance window -- send nothing, keep the track.
-                log.info("real motion tick: no match (miss %d/%d) for tracker_id=%s deviceID=%s -- "
+                log.debug("real motion tick: no match (miss %d/%d) for tracker_id=%s deviceID=%s -- "
                           "tolerating brief gap, track still open", tr["miss_count"],
                           MOTION_MISS_TOLERANCE_TICKS, tracker_id, device_id)
                 continue

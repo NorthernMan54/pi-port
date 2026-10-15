@@ -194,6 +194,12 @@ and `known/uiface.db`, a binary store), so the embedding layout can
 be compared with SFace's; matching against it (`matchedId`) is not implemented yet. Whether
 Protect's face service accepts SFace embeddings is also unconfirmed.
 
+**Tick rate.** Each camera is classified every `AIPORT_TICK_S` seconds: 0.5 s on macOS
+(Core ML runs a frame in ~7 ms; at 1.5 s a car crossing a far road was seen once or not at
+all), 1.5 s elsewhere. Time-based thresholds (30 s miss tolerance, 30 s to count as still,
+6 s to resume after parking) keep their durations at any rate; boxes are displayed until
+just past the next update. The RTSP pull uses `-flags low_delay`.
+
 **Events.** Protect keeps one smart-detect event per camera, not per track: the first
 `leave` closes it, and a scheduled check force-ends one left open past ~5.5 minutes without
 fetching any snapshots. So tracks share a camera event: `enter` when the first track

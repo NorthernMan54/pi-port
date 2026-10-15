@@ -184,6 +184,23 @@ class TestFaceDb(unittest.TestCase):
         self.assertIn("faces(1 rows", summary)
         self.assertIn("'embedding': 512", summary)
 
+    def test_describe_tar(self):
+        import io
+        import tarfile
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(), "known.db")
+        self.addCleanup(os.remove, path)
+        with tarfile.open(path, "w") as tar:
+            for name, data in (("known/uiface.json", b'{"SubjectIdToNameMap": [[1, "Alex"]], "IgnoredSubjectIds": []}'),
+                               ("known/uiface.db", bytes(8) + b"\x01\x02")):
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+        summary = avclient._describe_face_db(path)
+        self.assertIn("known/uiface.json (", summary)
+        self.assertIn("SubjectIdToNameMap=1", summary)
+        self.assertIn("known/uiface.db (10 bytes; 2 non-zero bytes)", summary)
+
     def test_describe_unknown(self):
         import tempfile
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:

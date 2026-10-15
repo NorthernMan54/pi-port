@@ -970,8 +970,31 @@ def _upload_snapshot(upload_uri, device_info, requested_filename, what=None,
 
 
 def _describe_face_db(path):
-    """One-line summary of a downloaded face DB: its format and, for SQLite,
-    each table's row count and columns (embedding size shows up as blob length)."""
+    """One-line summary of a downloaded face DB. Protect 7.3 sends a tar of
+    known/uiface.json (subject/name maps) + known/uiface.db (binary store): list
+    members with sizes, JSON keys with entry counts, and non-zero bytes per binary.
+    SQLite gets each table's row count and columns (blob length = embedding size)."""
+    import tarfile
+    try:
+        is_tar = tarfile.is_tarfile(path)
+    except Exception:  # e.g. a truncated gzip raises instead of returning False
+        is_tar = False
+    if is_tar:
+        parts = []
+        with tarfile.open(path) as tar:
+            for m in tar.getmembers():
+                if not m.isfile():
+                    continue
+                data = tar.extractfile(m).read()
+                desc = f"{m.name} ({m.size} bytes"
+                try:
+                    doc = json.loads(data)
+                    desc += "; " + ", ".join(f"{k}={len(v) if isinstance(v, (list, dict)) else v!r}"
+                                             for k, v in doc.items())
+                except ValueError:
+                    desc += f"; {sum(1 for x in data if x)} non-zero bytes"
+                parts.append(desc + ")")
+        return "tar: " + "; ".join(parts)
     with open(path, "rb") as f:
         head = f.read(16)
     if not head.startswith(b"SQLite format 3"):

@@ -188,7 +188,8 @@ them, holding a few clear face photos; edits are picked up without a restart.
 
 Protect also sends `UpdateFaceDBRequest` with a URL for its known-faces database (named
 groups, for on-device matching). `avclient.py` downloads it to `<state-dir>/facedb/known.db`
-and logs its format (for SQLite: tables, row counts, blob sizes), so the embedding layout can
+and logs its contents (Protect 7.3 sends a tar of `known/uiface.json`, the subject/name maps,
+and `known/uiface.db`, a binary store), so the embedding layout can
 be compared with SFace's; matching against it (`matchedId`) is not implemented yet. Whether
 Protect's face service accepts SFace embeddings is also unconfirmed.
 

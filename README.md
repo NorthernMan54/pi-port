@@ -243,12 +243,23 @@ The detector runs on the Neural Engine through onnxruntime's Core ML provider
 brew install ffmpeg
 python3 -m venv venv
 venv/bin/pip install -r piport/requirements.txt onnxruntime
-python3 scripts/fetch_models.py                 # downloads yolov5n.onnx
-$EDITOR piport/aiport.cfg                        # set [console] host (+ identity)
+venv/bin/pip install fast-alpr opencv-python-headless      # optional: plates + faces (enrich.py)
+venv/bin/python scripts/fetch_models.py                    # downloads yolov5n.onnx
+venv/bin/python scripts/fetch_models.py --face-models-only # optional: YuNet/SFace face models
+$EDITOR piport/aiport.cfg                                   # set [console] host + device_id
 sudo caffeinate -is venv/bin/python piport/run_all.py --iface en0 --state-dir ~/.piport-state
 ```
 
-`caffeinate -is` stops the Mac sleeping while it runs (a sleeping Mac drops off the console).
+- `caffeinate -is` stops the Mac sleeping while it runs (a sleeping Mac drops off the console).
+- `--iface` is the default-route interface (`route -n get default`); the MAC is derived from it,
+  so each Mac gets its own.
+- **Every AI Port needs its own, stable `device_id`.** The default in `aiport.cfg` is shared, so on
+  a second machine set a fresh one once (e.g. `uuidgen | tr A-Z a-z`) in `aiport.cfg`, or pass the
+  same `--device-id` on every start; changing it makes Protect see a different device.
+- A new machine (empty `--state-dir`) appears in Protect as a new "AI Port": adopt it and pair
+  cameras to it. Adoption state lives in the state dir, so keep it across restarts.
+- Without the optional enrichment packages it runs person/vehicle/animal only; plate models
+  download to `~/.cache` on the first plate read.
 
 ### Manual install
 

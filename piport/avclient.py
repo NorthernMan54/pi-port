@@ -510,6 +510,25 @@ def _enrich_detections(device_id, detections):
     return [dict(e, extra=dict(e["extra"])) for e in extra]
 
 
+def _send_leaves(ws, device_id, closing):
+    """One leave for every track closing this tick, so Protect fetches each one's
+    snapshot (faces last: the Full-FoV comes from the first track's best frame)."""
+    if not closing:
+        return
+    closing = sorted(closing, key=lambda c: c[1]["objectType"] == "face")
+    args = [{"tracker_id": tid, "object_type": tr["objectType"], "coord": tr["coord"],
+             "confidence": tr["score"], "first_shown_ms": tr["first_shown_ms"],
+             "descriptor_extra": tr.get("extra"), "best": tr.get("best")} for tid, tr in closing]
+    first = args[0]
+    try:
+        _send_smart_detect_event(ws, device_id, edge_type="leave",
+                                  event_id=closing[0][1]["event_id"], stationary=True,
+                                  also_leaving=args[1:], **first)
+    except Exception:
+        log.exception("failed to send leave for tracker_ids=%s deviceID=%s",
+                      [tid for tid, _ in closing], device_id)
+
+
 def _merge_extra(tr, d):
     """Carry enrichment fields onto a track. Scored keys (plate text in a
     vehicle's `name`, a face's `faceEmbed`) keep the best-scoring read; other
@@ -693,6 +712,7 @@ def _motion_tick(ws, device_id):
         type_track_count = collections.Counter(tr["objectType"] for tr in tracks.values())
         type_detect_count = collections.Counter(d["objectType"] for d in detections)
 
+        closing = []  # tracks that close this tick; they leave in one batched message
         # 1. Match each track to its best remaining same-type detection by IOU.
         for tracker_id, tr in list(tracks.items()):
             unambiguous = (type_track_count[tr["objectType"]] == 1
@@ -742,14 +762,7 @@ def _motion_tick(ws, device_id):
                       "track for deviceID=%s tracker_id=%s event_id=%s (last seen: %s score=%.2f)",
                       MOTION_MISS_TOLERANCE_TICKS, device_id, tracker_id, tr["event_id"],
                       tr["objectType"], tr["score"])
-            try:
-                _send_smart_detect_event(ws, device_id, edge_type="leave", event_id=tr["event_id"],
-                                          stationary=True, object_type=tr["objectType"], coord=tr["coord"],
-                                          confidence=tr["score"], first_shown_ms=tr["first_shown_ms"],
-                                          tracker_id=tracker_id, descriptor_extra=tr.get("extra"),
-                                          best=tr.get("best"))
-            except Exception:
-                log.exception("failed to send leave for tracker_id=%s deviceID=%s", tracker_id, device_id)
+            closing.append((tracker_id, tr))
             # Close any line events this track opened, mirroring the zone lifecycle.
             for line_id, entry in tr.get("crossed_lines", {}).items():
                 if entry["event_id"] is None:
@@ -766,6 +779,7 @@ def _motion_tick(ws, device_id):
                     log.exception("failed to send line leave for line=%s tracker_id=%s deviceID=%s",
                                   line_id, tracker_id, device_id)
             del tracks[tracker_id]
+        _send_leaves(ws, device_id, closing)
 
         # 2. Any unclaimed detection opens a new track with its own trackerID/eventId.
         for idx in unclaimed:
@@ -1155,16 +1169,26 @@ def _stream_clocks(device_id):
 
 def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, stationary=False,
                               object_type="person", coord=None, confidence=95,
-                              first_shown_ms=None, tracker_id=1, descriptor_extra=None, best=None):
+                              first_shown_ms=None, tracker_id=1, descriptor_extra=None, best=None,
+                              also_leaving=None):
     # Real EventSmartDetect shape; deviceID is our addition (required by AI-Port event routing).
+    # also_leaving: further tracks closing on the same tick (dicts with this function's
+    # per-track arguments). Real devices batch them into one leave with one snapshot
+    # entry per tracker; one leave per track got only the first track's images fetched.
     now_ms = int(time.time() * 1000)
     clock_mono, clock_stream = _stream_clocks(device_id)
-    # Placeholder box is only a fallback; tracks open on real detections.
-    real_coord = ([int(round(v)) for v in _to_protect(device_id, coord)]
-                  if coord is not None else [100, 100, 200, 200])
-    # firstShownTimeMs must stay at the track's first-seen time (recomputing looks like a new track).
-    first_shown = first_shown_ms if first_shown_ms is not None else now_ms
-    confidence_level = int(round(confidence * 100)) if confidence <= 1 else int(round(confidence))
+    tracks = [{"tracker_id": tracker_id, "object_type": object_type, "coord": coord,
+               "confidence": confidence, "first_shown_ms": first_shown_ms,
+               "descriptor_extra": descriptor_extra, "best": best}, *(also_leaving or [])]
+    for t in tracks:
+        # Placeholder box is only a fallback; tracks open on real detections.
+        t["real_coord"] = ([int(round(v)) for v in _to_protect(device_id, t["coord"])]
+                           if t["coord"] is not None else [100, 100, 200, 200])
+        # firstShownTimeMs must stay at the track's first-seen time (recomputing looks like a new track).
+        t["first_shown"] = t["first_shown_ms"] if t["first_shown_ms"] is not None else now_ms
+        c = t["confidence"]
+        t["level"] = int(round(c * 100)) if c <= 1 else int(round(c))
+    confidence_level = tracks[0]["level"]
     # zonesStatus mirrors edgeType with a non-zero level; an empty one blocks add_smart_detect_types().
     zone_status = "none" if edge_type == "none" else edge_type
     zone_level = 0 if edge_type == "none" else confidence_level
@@ -1177,31 +1201,31 @@ def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, statio
         "descriptors": [{
             "attributes": None,
             "boxColor": "cyan",
-            "confidenceLevel": confidence_level,
-            "coord": real_coord,
+            "confidenceLevel": t["level"],
+            "coord": t["real_coord"],
             "coord3d": [-1, -1],
-            "firstShownTimeMs": first_shown,
+            "firstShownTimeMs": t["first_shown"],
             # Real capture had idleSinceTimeMs == firstShownTimeMs; per-tick semantics unconfirmed.
-            "idleSinceTimeMs": first_shown,
+            "idleSinceTimeMs": t["first_shown"],
             "intelligenceZones": [],
             "lines": [],
             "loiterZones": [],
             "name": "",
-            "objectType": object_type,
+            "objectType": t["object_type"],
             "secondLensZones": [],
             "stationary": stationary,
             "tag": "",
-            "trackerID": tracker_id,
+            "trackerID": t["tracker_id"],
             # Naming the zone makes ds create a smartDetectZone (vs smartDetectLine) event.
             "zones": [int(SMART_DETECT_ZONE_ID)],
-            # Best-guess enrichment fields: attributes, licensePlate, name/tag (enrich.py).
-            **(descriptor_extra or {}),
-        }],
+            # Enrichment fields: attributes, plate text in name, faceEmbed, name/tag (enrich.py).
+            **(t["descriptor_extra"] or {}),
+        } for t in tracks],
         "displayTimeoutMSec": 200,
         "edgeType": edge_type,
         "eventId": event_id,
         # Top-level objectTypes; likely what add_smart_detect_types() reads.
-        "objectTypes": [object_type] if object_type else [],
+        "objectTypes": list(dict.fromkeys(t["object_type"] for t in tracks if t["object_type"])),
         "smartDetectSnapshotFullFoV": "",
         "smartDetectSnapshotFullFoVHeight": 0,
         "smartDetectSnapshotFullFoVWidth": 0,
@@ -1212,42 +1236,47 @@ def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, statio
     if edge_type == "leave":
         # "leave" carries the final classification in trackerIDAttrMap (likely read by add_smart_detect_types()).
         payload["trackerIDAttrMap"] = {
-            str(tracker_id): {"objectType": object_type, "zone": [int(SMART_DETECT_ZONE_ID)]}
+            str(t["tracker_id"]): {"objectType": t["object_type"], "zone": [int(SMART_DETECT_ZONE_ID)]}
+            for t in tracks
         }
         # Full-FoV dims use the real stream resolution, not the square detection buffer.
         seq = _snapshot_seq_by_device.get(device_id, 0) + 1
         _snapshot_seq_by_device[device_id] = seq
         fov_w, fov_h = _stream_dims.get(device_id, (DETECT_IMG_SIZE, DETECT_IMG_SIZE))
-        # Thumbnails come from the track's best-scoring moment when we kept one.
-        best_jpeg = best["jpeg"] if best else None
-        # Crop in image space; report the box in Protect's canvas space.
-        crop_coord = list(best["coord"]) if best else (list(coord) if coord is not None else None)
-        snap_coord = ([int(round(v)) for v in _to_protect(device_id, best["coord"])]
-                      if best else real_coord)
-        best_wall = best["wall"] if best else first_shown
         fullfov_filename = f"smartdetectsnap_zone_{seq:08d}_fullfov.jpg"
-        snapshot_filename = f"smartdetectsnap_zone_{tracker_id}{best_wall}.jpg"
-        _record_snapshot_filename(fullfov_filename, device_id, kind="fullfov", jpeg=best_jpeg)
-        _record_snapshot_filename(snapshot_filename, device_id, kind="object", coord=crop_coord,
-                                  jpeg=best_jpeg)
+        # One Full-FoV per message, from the first track's best-scoring moment if kept.
+        first_best = tracks[0]["best"]
+        _record_snapshot_filename(fullfov_filename, device_id, kind="fullfov",
+                                  jpeg=first_best["jpeg"] if first_best else None)
         payload["smartDetectSnapshotFullFoV"] = fullfov_filename
         payload["smartDetectSnapshotFullFoVHeight"] = fov_h
         payload["smartDetectSnapshotFullFoVWidth"] = fov_w
-        payload["smartDetectSnapshots"] = [{
-            "clockBestMonotonic": 0,
-            "clockBestWall": best_wall,
-            "confidenceLevel": confidence_level,
-            "coord": snap_coord,
-            "framingRect": snap_coord,
-            "reVerifyEligible": False,
-            "smartDetectSnapshot": snapshot_filename,
-            # Matches the object-crop image, not the full frame.
-            "smartDetectSnapshotHeight": SMART_SNAPSHOT_SIZE,
-            "smartDetectSnapshotName": "",
-            "smartDetectSnapshotType": object_type,
-            "smartDetectSnapshotWidth": SMART_SNAPSHOT_SIZE,
-            "trackerID": tracker_id,
-        }]
+        for t in tracks:
+            b = t["best"]
+            # Thumbnails come from the track's best-scoring moment when we kept one.
+            # Crop in image space; report the box in Protect's canvas space.
+            crop_coord = list(b["coord"]) if b else (list(t["coord"]) if t["coord"] is not None else None)
+            snap_coord = ([int(round(v)) for v in _to_protect(device_id, b["coord"])]
+                          if b else t["real_coord"])
+            best_wall = b["wall"] if b else t["first_shown"]
+            snapshot_filename = f"smartdetectsnap_zone_{t['tracker_id']}{best_wall}.jpg"
+            _record_snapshot_filename(snapshot_filename, device_id, kind="object", coord=crop_coord,
+                                      jpeg=b["jpeg"] if b else None)
+            payload["smartDetectSnapshots"].append({
+                "clockBestMonotonic": 0,
+                "clockBestWall": best_wall,
+                "confidenceLevel": t["level"],
+                "coord": snap_coord,
+                "framingRect": snap_coord,
+                "reVerifyEligible": False,
+                "smartDetectSnapshot": snapshot_filename,
+                # Matches the object-crop image, not the full frame.
+                "smartDetectSnapshotHeight": SMART_SNAPSHOT_SIZE,
+                "smartDetectSnapshotName": "",
+                "smartDetectSnapshotType": t["object_type"],
+                "smartDetectSnapshotWidth": SMART_SNAPSHOT_SIZE,
+                "trackerID": t["tracker_id"],
+            })
     send_msg(ws, "EventSmartDetect", payload, response_expected=False)
 
 

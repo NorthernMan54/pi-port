@@ -311,6 +311,33 @@ class TestBestFrame(Base):
         fullfov = av._snapshot_filename_to_device[payload["smartDetectSnapshotFullFoV"]]
         self.assertEqual(fullfov["jpeg"], best["jpeg"])
 
+    def test_tracks_closing_together_share_one_leave(self):
+        av._stream_dims["D"] = (2560, 1440)
+        face = {"objectType": "face", "coord": [500, 300, 50, 50], "score": 0.9, "event_id": 7,
+                "first_shown_ms": 100, "extra": {"faceEmbed": [0.1]},
+                "best": {"jpeg": b"FACE", "coord": [510, 300, 40, 40], "score": 0.93, "wall": 222}}
+        person = {"objectType": "person", "coord": [400, 200, 300, 700], "score": 0.85,
+                  "event_id": 6, "first_shown_ms": 90, "extra": {},
+                  "best": {"jpeg": b"PERSON", "coord": [400, 210, 300, 690], "score": 0.88, "wall": 111}}
+        av._send_leaves(None, "D", [(3, face), (2, person)])
+        self.assertEqual(len(self.sent), 1)
+        payload = self.sent[0][1]
+        self.assertEqual(payload["edgeType"], "leave")
+        self.assertEqual(payload["eventId"], 6)  # person first, face last
+        self.assertEqual(set(payload["trackerIDAttrMap"]), {"2", "3"})
+        snaps = payload["smartDetectSnapshots"]
+        self.assertEqual([(x["trackerID"], x["smartDetectSnapshotType"]) for x in snaps],
+                         [(2, "person"), (3, "face")])
+        self.assertEqual([x["smartDetectSnapshot"] for x in snaps],
+                         ["smartdetectsnap_zone_2111.jpg", "smartdetectsnap_zone_3222.jpg"])
+        recs = av._snapshot_filename_to_device
+        self.assertEqual(recs["smartdetectsnap_zone_3222.jpg"]["jpeg"], b"FACE")
+        self.assertEqual(recs["smartdetectsnap_zone_3222.jpg"]["coord"], [510, 300, 40, 40])
+        self.assertEqual(recs[payload["smartDetectSnapshotFullFoV"]]["jpeg"], b"PERSON")
+        self.assertEqual([d["trackerID"] for d in payload["descriptors"]], [2, 3])
+        self.assertEqual(payload["descriptors"][1]["faceEmbed"], [0.1])
+        self.assertEqual(payload["objectTypes"], ["person", "face"])
+
     def test_capture_keeps_best_score(self):
         tr = {}
         av._capture_best("D", tr, {"score": 0.8, "coord": [1, 2, 3, 4], "frame": (1, b"a")})

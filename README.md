@@ -332,7 +332,7 @@ Device identity, network mode and the console address live in
 | `[console] host` / `port` | — / `7442` | The Protect console to dial when not yet adopted |
 
 Detector/runtime environment overrides: `AIPORT_BACKEND`, `AIPORT_MODEL_PATH`,
-`AIPORT_OBJ_THRESH`, `AIPORT_HWDEC`, `AIPORT_ORT_INTRA_THREADS`, `AIPORT_ORT_PROVIDER`, `AIPORT_TICK_S`, `AIPORT_MISS_S`, `AIPORT_BOX_DELAY_MS`, `AIPORT_LPR`, `AIPORT_FACE`,
+`AIPORT_OBJ_THRESH`, `AIPORT_HWDEC`, `AIPORT_ORT_INTRA_THREADS`, `AIPORT_ORT_PROVIDER`, `AIPORT_TICK_S`, `AIPORT_DETECT_FPS`, `AIPORT_CONFIRM_MS`, `AIPORT_MISS_S`, `AIPORT_BOX_DELAY_MS`, `AIPORT_LPR`, `AIPORT_FACE`,
 `AIPORT_MOTION_GATE` / `AIPORT_MOTION_GATE_THRESH` (see `piport/README.md`).
 
 ## Verification

@@ -194,13 +194,23 @@ and `known/uiface.db`, a binary store), so the embedding layout can
 be compared with SFace's; matching against it (`matchedId`) is not implemented yet. Whether
 Protect's face service accepts SFace embeddings is also unconfirmed.
 
-**Tick rate.** Each camera is classified every `AIPORT_TICK_S` seconds: 0.33 s on macOS
-(Core ML runs a frame in ~8 ms), matching a G5 Bullet, which sends a `moving` update every
-~330 ms (median; 249-600 ms) with `displayTimeoutMSec` ~326; 1.5 s elsewhere. Boxes are
-displayed for one tick + 100 ms. Time-based thresholds keep their durations at any rate: a
-track closes after `AIPORT_MISS_S` (default 3 s; the G5 sends `leave` ~2 s after the object
-was last seen), a parked track after 30 s, 30 s still counts as parked, 6 s to resume. The
+**Detection and report rates.** Detecting and reporting run at separate rates. Each camera's
+detector analyses up to `AIPORT_DETECT_FPS` frames per second (10 on macOS, where Core ML runs
+a frame in ~8 ms; elsewhere one frame per tick), each frame once, and tracking runs on every
+analysed frame. `moving` updates go to Protect once per `AIPORT_TICK_S` (0.33 s on macOS,
+matching a G5 Bullet's `moving` every ~330 ms, median 249-600 ms, with `displayTimeoutMSec`
+~326; 1.5 s elsewhere), batching every track seen since the last update; `enter` and
+`leave` go out as they happen. Boxes are displayed for one tick + 100 ms. Time-based
+thresholds keep their durations at any rate: a track closes after `AIPORT_MISS_S` (default
+3 s; the G5 sends `leave` ~2 s after the object was last seen), a parked track after 30 s,
+30 s still counts as parked, 6 s to resume. The motion gate compares against a reference
+frame held for one tick, so slow movement still registers at higher detection rates. The
 RTSP pull uses `-flags low_delay`.
+
+**Confirmation.** A new track joins the camera event only after it has been seen for
+Protect's `eventStartMSec` (from `ChangeSmartDetectSettings`; 0 until Protect sends it), so
+a detection lasting a frame or two never opens a dashboard event. A track lost before then
+is dropped without any event. `AIPORT_CONFIRM_MS` overrides Protect's value.
 
 **Tracking.** Detections match tracks by box overlap; a moving track no box overlaps takes
 the nearest same-type detection near where its last movement predicts it (within 3x its size),

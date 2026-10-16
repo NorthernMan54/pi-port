@@ -360,7 +360,11 @@ class TestCameraEvent(Base):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def tick(self, *objs):
+    def tick(self, *objs, after_ms=None):
+        # Each tick analyses a new frame one report interval after the last (or after_ms).
+        self.clock_ms = getattr(self, "clock_ms", 0) + (
+            av.REPORT_INTERVAL_MS if after_ms is None else after_ms)
+        av._analysed_frame_time["D"] = (1_760_000_000_000 + self.clock_ms, self.clock_ms)
         self._faces = [o for o in objs if o["objectType"] == "face"]
         self.frames.append(list(objs))
         av._motion_tick(None, "D")
@@ -519,6 +523,64 @@ class TestCameraEvent(Base):
         self.sent.clear()
         self.tick()                       # nothing seen: no update at all
         self.assertEqual(self.sent, [])
+
+    def test_fast_frames_report_once_per_interval(self):
+        self.tick(self.PERSON)
+        self.assertEqual(self.events(), [("enter", ["person"], [])])
+        self.sent.clear()
+        step = av.REPORT_INTERVAL_MS // 4
+        for _ in range(3):                # frames analysed faster than reports go out
+            self.tick(self.PERSON, after_ms=step)
+        self.assertEqual(self.sent, [])
+        self.tick(self.PERSON, after_ms=av.REPORT_INTERVAL_MS - 3 * step)  # a full interval
+        self.assertEqual(self.events(), [("moving", ["person"], [])])
+
+    def test_track_seen_between_reports_is_drawn(self):
+        self.tick(self.PERSON, self.CAR)
+        self.sent.clear()
+        half = av.REPORT_INTERVAL_MS // 2
+        self.tick(self.PERSON, self.CAR, after_ms=half)  # car seen mid-interval...
+        self.tick(self.PERSON, after_ms=half)            # ...missed on the reporting frame
+        self.assertEqual(self.events(), [("moving", ["person", "vehicle"], [])])
+
+    def confirm_after(self, ms):
+        av._event_start_ms["D"] = ms
+        self.addCleanup(av._event_start_ms.pop, "D", None)
+
+    def test_enter_waits_for_confirmation(self):
+        self.confirm_after(1000)
+        self.tick(self.PERSON)
+        self.tick(self.PERSON, after_ms=500)
+        self.assertEqual(self.sent, [])
+        first_seen = av._motion_state["D"]["tracks"][1]["first_shown_ms"]
+        self.tick(self.PERSON, after_ms=500)
+        self.assertEqual(self.events(), [("enter", ["person"], [])])
+        enter = [p for fn, p in self.sent if fn == "EventSmartDetect"][0]
+        self.assertEqual(enter["descriptors"][0]["firstShownTimeMs"], first_seen)
+
+    def test_unconfirmed_track_dropped_without_event(self):
+        self.confirm_after(5000)
+        self.tick(self.PERSON)
+        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
+            self.tick()
+        self.assertEqual(self.sent, [])
+        self.assertEqual(av._motion_state["D"]["tracks"], {})
+
+    def test_unconfirmed_track_survives_brief_miss(self):
+        self.confirm_after(1000)
+        self.tick(self.PERSON)
+        self.tick(after_ms=500)           # one missed frame doesn't reset it
+        self.tick(self.PERSON, after_ms=500)
+        self.assertEqual(self.events(), [("enter", ["person"], [])])
+
+    def test_confirm_override_env(self):
+        from unittest import mock
+        self.confirm_after(5000)
+        with mock.patch.dict(os.environ, {"AIPORT_CONFIRM_MS": "0"}):
+            self.tick(self.PERSON)
+        self.assertEqual(self.events(), [("enter", ["person"], [])])
+        with mock.patch.dict(os.environ, {"AIPORT_CONFIRM_MS": "soon"}):
+            self.assertEqual(av._confirm_ms("D"), 5000)  # bad value ignored
 
     def test_fast_small_walker_stays_one_track(self):
         # Live 17:28 on Driveway: a 22-wide person moving 75 then 26 units per tick
@@ -840,6 +902,27 @@ class TestStreamClocks(Base):
         self.assertNotIn("D", av._analysed_frame_time)
 
 
+class TestDetectionRate(Base):
+    def test_ticks_count_analysed_frames(self):
+        self.assertEqual(av._ticks(3), max(1, round(3 / av.DETECT_INTERVAL_S)))
+
+    def test_detection_never_slower_than_reporting(self):
+        self.assertLessEqual(av.DETECT_INTERVAL_S, av.MOTION_POLL_INTERVAL_S)
+        self.assertGreaterEqual(av.DETECT_FPS, round(1 / av.DETECT_INTERVAL_S))
+
+    def test_event_start_ms_from_protect(self):
+        self.addCleanup(av._event_start_ms.pop, "CAM", None)
+        msg = {"functionName": "ChangeSmartDetectSettings", "messageId": 1,
+               "payload": {"deviceID": "CAM", "eventStartMSec": 1000}}
+        av.handle_function(None, msg, {})
+        self.assertEqual(av._confirm_ms("CAM"), 1000)
+        # A partial update without the key (e.g. the LPR flag) keeps the value.
+        av.handle_function(None, {"functionName": "ChangeSmartDetectSettings", "messageId": 2,
+                                  "payload": {"deviceID": "CAM", "isLprCamera": 0}}, {})
+        self.assertEqual(av._confirm_ms("CAM"), 1000)
+        self.assertEqual(av._confirm_ms("OTHER"), 0)
+
+
 class TestFrameTiming(Base):
     """Event times describe the analysed frame (when it left ffmpeg), not the send time."""
 
@@ -939,7 +1022,19 @@ class TestMotionLoopLifecycle(Base):
         self._orig_interval = av.MOTION_POLL_INTERVAL_S
         av.MOTION_POLL_INTERVAL_S = 0.05
         self.addCleanup(lambda: setattr(av, "MOTION_POLL_INTERVAL_S", self._orig_interval))
+        self.addCleanup(setattr, av, "DETECT_INTERVAL_S", av.DETECT_INTERVAL_S)
+        av.DETECT_INTERVAL_S = 0.02
         self.addCleanup(lambda: av._stop_motion_detector("D"))
+
+    def test_each_frame_analysed_once(self):
+        av._latest_frame_time["D"] = (1, 1)
+        av._start_motion_detector(None, "D", "ip", 1, "uri")
+        time.sleep(0.2)
+        self.assertEqual(self.ticks, ["D"])        # same frame: analysed once, then waits
+        av._latest_frame_time["D"] = (2, 2)
+        time.sleep(0.2)
+        self.assertEqual(self.ticks, ["D", "D"])   # a new frame is analysed
+        av._stop_motion_detector("D")
 
     def test_restart_does_not_leave_overlapping_loops(self):
         # A stream restart calls _start_motion_detector again; the previous loop
@@ -1268,6 +1363,16 @@ class MotionGate(unittest.TestCase):
     def test_first_frame_triggers(self):
         av._latest_frame["d"] = _np.zeros((640, 640, 3), _np.uint8)
         self.assertTrue(av._scene_changed("d"))
+
+    def test_slow_change_accumulates_within_interval(self):
+        # Frames analysed faster than reports differ only a little from each other; the
+        # reference is held for a report interval, so slow movement still adds up.
+        av._latest_frame["d"] = _np.full((640, 640, 3), 100, _np.uint8)
+        av._scene_changed("d")
+        av._latest_frame["d"] = _np.full((640, 640, 3), 103, _np.uint8)
+        self.assertFalse(av._scene_changed("d"))   # 3/255 below the 0.02 gate
+        av._latest_frame["d"] = _np.full((640, 640, 3), 106, _np.uint8)
+        self.assertTrue(av._scene_changed("d"))    # 6/255 against the held reference
 
     def test_static_scene_does_not_trigger(self):
         av._latest_frame["d"] = _np.full((640, 640, 3), 100, _np.uint8)

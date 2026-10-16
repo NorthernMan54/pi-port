@@ -25,8 +25,9 @@ once Flynn is running.
 | --- | --- | --- |
 | Console | `AIPORT_CONSOLE_HOST=192.168.1.1` | the Protect console (Cottage GW) |
 | Detector model | `AIPORT_MODEL_PATH=…/piport/models/yolov5s.onnx` | YOLOv5s on Core ML (~8 ms/frame on M1 Pro): better on small/distant objects than YOLOv5n. To try YOLOv9: `AIPORT_MODEL_PATH=…/piport/models/yolov9-s-320.onnx` (copied from Frigate's `model_cache`, 3.4 ms/frame on M2; see `piport/README.md`) |
-| Box delay | `AIPORT_BOX_DELAY_MS=3000,AABBCC3344CC=1800` | back-dates boxes to their frame time; Driveway measured 2.2-3.1 s with the old pipeline, ~1.8 s from a passing sedan on 2026-10-16 (being checked) |
-| Tick rate | default 0.33 s on macOS (`AIPORT_TICK_S`) | matches a G5 Bullet's ~330 ms update rate |
+| Box delay | `AIPORT_BOX_DELAY_MS=3000,AABBCC3344CC=1800` | back-dates boxes to their frame time. 2.2-3.1 s was measured on Driveway **before** frames were stamped on read; 1800 ms was estimated from a passing sedan on 2026-10-16, also before. Event times now come from each frame's stamp, so re-measure: the residual should be smaller |
+| Tick rate | default 0.33 s on macOS (`AIPORT_TICK_S`) | how often `moving` updates go out; matches a G5 Bullet's ~330 ms update rate |
+| Detection rate | default 10 frames/s per camera on macOS (`AIPORT_DETECT_FPS`) | frames analysed per second; lower it if the Mac struggles with many cameras |
 | Event end | default 3 s with no detection (`AIPORT_MISS_S`) | a G5 Bullet sends `leave` ~2 s after the object leaves |
 | Tracks | keep at score 0.3 (`AIPORT_KEEP_THRESH`), resume within 60 s (`AIPORT_RESUME_S`) | a parked car behind people unloading it kept coming back as a new vehicle |
 | Log | `2>&1 \| tee -a ~/piport.log` | the terminal keeps only a few minutes |

@@ -139,12 +139,23 @@ _event_id_counter = itertools.count(int(time.time()))  # monotonic, avoids same-
 # 1.5 s elsewhere (Pi/RK3588 CPU budget). The detection stream runs at least this fast.
 MOTION_POLL_INTERVAL_S = float(os.environ.get("AIPORT_TICK_S")
                                or (0.33 if sys.platform == "darwin" else 1.5))
-DETECT_FPS = max(2, math.ceil(1 / MOTION_POLL_INTERVAL_S))
+# How often `moving` updates go to Protect: once per AIPORT_TICK_S.
+REPORT_INTERVAL_MS = int(MOTION_POLL_INTERVAL_S * 1000)
+# How many frames per second each camera's detector analyses (AIPORT_DETECT_FPS). More frames
+# mean objects move less between checks, so tracks match more reliably, and enter/leave
+# land closer to the truth; reports still go out once per tick. 10 on macOS (Core ML runs
+# a frame in ~8 ms); elsewhere one frame per tick, as before. Never slower than reporting.
+DETECT_INTERVAL_S = min(MOTION_POLL_INTERVAL_S,
+                        1 / float(os.environ.get("AIPORT_DETECT_FPS")
+                                  or (10 if sys.platform == "darwin"
+                                      else 1 / MOTION_POLL_INTERVAL_S)))
+DETECT_FPS = max(2, math.ceil(1 / DETECT_INTERVAL_S))
 
 
 def _ticks(seconds):
-    """Tick count for a duration, so time-based thresholds don't change with the tick rate."""
-    return max(1, round(seconds / MOTION_POLL_INTERVAL_S))
+    """Analysed-frame count for a duration. Track counters advance once per analysed
+    frame, so time-based thresholds don't change with the detection rate."""
+    return max(1, round(seconds / DETECT_INTERVAL_S))
 
 
 # How long Protect shows each box: until just past the next update (a G5 Bullet's
@@ -198,11 +209,19 @@ _latest_frame_seq = {}  # deviceID -> number of the frame in _latest_frame (1 = 
 # deviceID -> recent (seq, full-res JPEG) of the same frames, numbered alike: a track's best
 # frame is the one it was detected in, not the next snapshot (a passing bus had moved on).
 _frame_jpegs = {}
+# deviceID -> (wall ms, monotonic ms) when _latest_frame was read from ffmpeg.
+_latest_frame_time = {}
+# deviceID -> (wall ms, monotonic ms) of the frame the detector last analysed; every
+# event time describes that frame, not the moment the event is sent.
+_analysed_frame_time = {}
 _frame_lock = threading.Lock()
 _frame_cond = threading.Condition(_frame_lock)  # notified when a frame JPEG arrives
 FRAME_JPEG_KEEP_S = 2.0
 FRAME_JPEG_WAIT_S = 0.5  # how long a detection waits for its frame's JPEG
 _stream_dims = {}    # deviceID -> (width, height) of the real camera stream
+# deviceID -> capacity points of each stream UiStreamControl started. Kept apart from
+# _active_streams, which briefly drops a device while its ffmpeg restarts.
+_stream_points = {}
 # deviceID -> exclusion polygons in the normalized 0-1000 space.
 _exclude_zones = {}
 # Prototype app exposes `zones` (not excludeZones): when non-default, a detection must be inside one.
@@ -287,6 +306,8 @@ def _stop_stream(device_id):
         _latest_frame.pop(device_id, None)
         _latest_frame_seq.pop(device_id, None)
         _frame_jpegs.pop(device_id, None)
+        _latest_frame_time.pop(device_id, None)
+        _analysed_frame_time.pop(device_id, None)
 
 
 def _jpeg_end(buf):
@@ -451,11 +472,15 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
                 buf = proc.stdout.read(frame_bytes)
                 if len(buf) < frame_bytes:
                     break
+                # Stamp the frame as it leaves ffmpeg: events describe this moment, not
+                # the later tick that analyses it.
+                stamp = _now_ms()
                 frame = np.frombuffer(buf, dtype=np.uint8).reshape((size, size, 3))
                 seq += 1
                 with _frame_lock:
                     _latest_frame[device_id] = frame
                     _latest_frame_seq[device_id] = seq
+                    _latest_frame_time[device_id] = stamp
         except Exception:
             log.exception("frame reader crashed for deviceID=%s", device_id)
         rc = proc.wait()
@@ -556,6 +581,8 @@ def _classify_frame_detections(device_id):
     with _frame_lock:
         frame = _latest_frame.get(device_id)
         seq = _latest_frame_seq.get(device_id)
+        if frame is not None:
+            _analysed_frame_time[device_id] = _latest_frame_time.get(device_id) or _now_ms()
     if frame is None:
         return []
     try:
@@ -899,20 +926,24 @@ def _dedupe_detections(detections, iou_thresh=0.4):
     return out
 
 
-_scene_ref = {}  # deviceID -> last tick's downsampled grayscale frame (motion gate)
+_scene_ref = {}  # deviceID -> (downsampled grayscale reference frame, monotonic ms taken)
 
 
 def _scene_changed(device_id):
-    """True if this tick's frame differs enough from the previous tick's. Always
-    advances the reference so a genuinely static scene stays below the gate."""
+    """True if this frame differs enough from the reference frame. The reference
+    advances at most once per report interval: frames analysed faster than that are only
+    a little apart, and slow movement would otherwise stay under the gate. A static scene
+    still stays below it."""
     import numpy as np  # lazy, like the detector path: avclient imports without numpy
     with _frame_lock:
         frame = _latest_frame.get(device_id)
     if frame is None:
         return False
     gray = frame[::_GATE_STRIDE, ::_GATE_STRIDE].mean(axis=2)
-    ref = _scene_ref.get(device_id)
-    _scene_ref[device_id] = gray
+    now = int(time.monotonic() * 1000)
+    ref, ref_ms = _scene_ref.get(device_id) or (None, None)
+    if ref is None or now - ref_ms >= REPORT_INTERVAL_MS:
+        _scene_ref[device_id] = (gray, now)
     if ref is None or ref.shape != gray.shape:
         return True
     return float(np.abs(gray - ref).mean()) / 255.0 >= MOTION_GATE_THRESH
@@ -925,6 +956,20 @@ def _scene_changed(device_id):
 # track goes or eventMaxDurationMSec (sent in ChangeSmartMotionSettings) runs out.
 DEFAULT_EVENT_MAX_MS = 300000
 _event_max_ms = {}  # deviceID -> eventMaxDurationMSec from ChangeSmartMotionSettings
+# A new track joins the camera event only once it has been seen for this long, so a
+# detection that lasts a frame or two never opens a dashboard event. Protect sends it as
+# eventStartMSec in ChangeSmartDetectSettings; AIPORT_CONFIRM_MS overrides it. 0 = at once.
+_event_start_ms = {}  # deviceID -> eventStartMSec from ChangeSmartDetectSettings
+
+
+def _confirm_ms(device_id):
+    override = os.environ.get("AIPORT_CONFIRM_MS")
+    if override:
+        try:
+            return max(0, int(override))
+        except ValueError:
+            log.warning("ignoring bad AIPORT_CONFIRM_MS %r", override)
+    return _event_start_ms.get(device_id, 0)
 # A track still present when its event hit the time limit goes quiet (stationary, e.g. a
 # parked car) until it really moves: its box mostly leaves the parked spot, or its centre
 # stays shifted (0-1000 image units) for several ticks at about the same size. Someone
@@ -1200,6 +1245,7 @@ def _motion_tick(ws, device_id):
             device_id, [d for d in detections if d["score"] >= OPEN_THRESH])
     with _motion_lock:
         now_ms = _frame_wall_ms(device_id)
+        confirm_ms = _confirm_ms(device_id)
         dev = _motion_state.setdefault(device_id, {"tracks": {}, "next_tracker_id": 1,
                                                    "started_ms": now_ms})
         tracks = dev["tracks"]
@@ -1280,16 +1326,31 @@ def _motion_tick(ws, device_id):
                     joining.append((tracker_id, tr))
                 _merge_extra(tr, d)
                 _capture_best(device_id, tr, d)
-                # Line Crossing: check this tick's movement against configured lines.
+                tr["seen_ms"] = now_ms
+                # Only a full-strength box confirms: weak ones keep a track, never promote it.
+                if (not tr.get("confirmed", True) and d["score"] >= OPEN_THRESH
+                        and now_ms - tr["first_shown_ms"] >= confirm_ms):
+                    tr["confirmed"] = True
+                    log.info("real motion tick: %s tracker_id=%s confirmed after %d ms, joining "
+                             "for deviceID=%s", tr["objectType"], tracker_id,
+                             now_ms - tr["first_shown_ms"], device_id)
+                    joining.append((tracker_id, tr))
+                # Line Crossing: check this frame's movement against configured lines.
                 new_center = _protect_center(device_id, d["coord"])
-                if tr["objectType"] not in ("licensePlate", "face"):
+                if tr["objectType"] not in ("licensePlate", "face") and tr.get("confirmed", True):
                     _process_line_crossings(ws, device_id, tracker_id, tr, new_center)
                 tr["prev_center"] = new_center
                 continue
-            # No matching detection this tick for this track.
+            # No matching detection this frame for this track.
             tr["miss_count"] += 1
             tolerance = (PARKED_MISS_TOLERANCE_TICKS if tr.get("stationary_coord")
                          else MOTION_MISS_TOLERANCE_TICKS)
+            if not tr.get("confirmed", True) and tr["miss_count"] >= tolerance:
+                # Gone before it was confirmed: a passing false detection, no event.
+                log.info("real motion tick: unconfirmed %s tracker_id=%s lost, dropped for "
+                         "deviceID=%s", tr["objectType"], tracker_id, device_id)
+                del tracks[tracker_id]
+                continue
             if tr["miss_count"] < tolerance:
                 # Within the tolerance window -- send nothing, keep the track.
                 log.debug("real motion tick: no match (miss %d/%d) for tracker_id=%s deviceID=%s -- "
@@ -1323,6 +1384,7 @@ def _motion_tick(ws, device_id):
                 _follow(tr, d["coord"])
                 tr["score"] = d["score"]
                 tr["miss_count"] = 0
+                tr["seen_ms"] = now_ms
                 tr["prev_center"] = _protect_center(device_id, d["coord"])
                 _update_still(tr, now_ms)
                 _merge_extra(tr, d)
@@ -1341,10 +1403,11 @@ def _motion_tick(ws, device_id):
             dev["next_tracker_id"] += 1
             tracks[tracker_id] = {"objectType": d["objectType"],
                                   "coord": d["coord"], "score": d["score"],
-                                  "first_shown_ms": now_ms, "miss_count": 0,
+                                  "first_shown_ms": now_ms, "seen_ms": now_ms, "miss_count": 0,
                                   "first_coord": list(d["coord"]),
                                   "prev_center": _protect_center(device_id, d["coord"]),
-                                  "crossed_lines": {}}
+                                  "crossed_lines": {},
+                                  "confirmed": starting or confirm_ms <= 0}
             _update_still(tracks[tracker_id], now_ms)
             _merge_extra(tracks[tracker_id], d)
             _capture_best(device_id, tracks[tracker_id], d)
@@ -1354,6 +1417,11 @@ def _motion_tick(ws, device_id):
                 log.info("real motion tick: %s already present at start, parked for deviceID=%s "
                          "tracker_id=%s", d["objectType"], device_id, tracker_id)
                 continue
+            if not tracks[tracker_id]["confirmed"]:
+                log.info("real motion tick: %s detected (score=%.2f), tracker_id=%s waiting %d ms "
+                         "to confirm for deviceID=%s", d["objectType"], d["score"], tracker_id,
+                         confirm_ms, device_id)
+                continue
             log.info("real motion tick: %s detected (score=%.2f), opening smartDetectZone track "
                       "for deviceID=%s tracker_id=%s", d["objectType"], d["score"],
                       device_id, tracker_id)
@@ -1362,15 +1430,16 @@ def _motion_tick(ws, device_id):
         # 3. A vehicle that has stopped (still ~30 s) parks; its snapshot stays in the leave.
         for tid, tr in tracks.items():
             if (not tr.get("stationary_coord") and tr.get("still")
-                    and tr["objectType"] in PARK_WHEN_STILL):
+                    and tr["objectType"] in PARK_WHEN_STILL and tr.get("confirmed", True)):
                 log.info("real motion tick: %s tracker_id=%s still for %d ticks, parked for "
                          "deviceID=%s", tr["objectType"], tid, tr["still_ticks"], device_id)
                 _park(tr)
                 if event is not None and tr.get("event_id") == event["id"]:
                     event["finished"].append((tid, tr))
 
-        # 4. Camera event lifecycle.
-        active = [(tid, tr) for tid, tr in tracks.items() if not tr.get("stationary_coord")]
+        # 4. Camera event lifecycle. Unconfirmed tracks aren't part of it yet.
+        active = [(tid, tr) for tid, tr in tracks.items()
+                  if not tr.get("stationary_coord") and tr.get("confirmed", True)]
         if event is None and joining:
             event = dev["event"] = {"id": next(_event_id_counter), "started_ms": now_ms,
                                     "finished": []}
@@ -1378,6 +1447,7 @@ def _motion_tick(ws, device_id):
                 tr["event_id"] = event["id"]
             log.info("smartDetectZone event %s opened for deviceID=%s", event["id"], device_id)
             _send_event_message(ws, device_id, "enter", event["id"], active)
+            dev["last_report_ms"] = now_ms
         elif event is not None:
             for _, tr in joining:
                 tr["event_id"] = event["id"]
@@ -1403,12 +1473,16 @@ def _motion_tick(ws, device_id):
                 for _, tr in active:  # still in view: quiet until it moves again
                     _park(tr)
                 dev["event"] = None
-            else:
-                # Only boxes seen this tick: a track inside its miss tolerance stays in the
-                # event (and its leave) but isn't drawn where it was last seen.
-                seen = [m for m in active if m[1]["miss_count"] == 0]
+            elif now_ms - dev.get("last_report_ms", now_ms - REPORT_INTERVAL_MS) >= REPORT_INTERVAL_MS:
+                # One batched update per report interval, with only the tracks seen since the
+                # last one: a track inside its miss tolerance stays in the event (and its
+                # leave) but isn't drawn where it was last seen.
+                last = dev.get("last_report_ms")
+                seen = [m for m in active
+                        if last is None or m[1].get("seen_ms", now_ms) > last]
                 if seen:
                     _send_event_message(ws, device_id, "moving", event["id"], seen)
+                    dev["last_report_ms"] = now_ms
 
         if (not any(d["score"] >= OPEN_THRESH for d in detections)
                 and not tracks and not gated):
@@ -1464,18 +1538,25 @@ def _start_motion_detector(ws, device_id, ip, port, uri, preserve_tracks=False):
     _motion_poll_stop[device_id] = stop_event
 
     def _poll_loop():
-        while not stop_event.wait(MOTION_POLL_INTERVAL_S):
+        last_stamp = None
+        while not stop_event.wait(DETECT_INTERVAL_S):
             # Superseded by a newer loop -> this one must not touch shared state.
             if _motion_poll_stop.get(device_id) is not stop_event:
                 log.info("motion poll loop superseded for deviceID=%s -- exiting", device_id)
                 return
+            # Analyse each frame once: with no new frame since the last pass, wait.
+            with _frame_lock:
+                stamp = _latest_frame_time.get(device_id)
+            if stamp is not None and stamp == last_stamp:
+                continue
+            last_stamp = stamp
             try:
                 _motion_tick(ws, device_id)
             except Exception:
                 log.exception("motion poll tick crashed for deviceID=%s", device_id)
 
-    log.info("starting real motion detector (periodic classification, every %.1fs) for deviceID=%s",
-              MOTION_POLL_INTERVAL_S, device_id)
+    log.info("starting real motion detector (up to %.0f frames/s, reports every %.2fs) for "
+             "deviceID=%s", 1 / DETECT_INTERVAL_S, MOTION_POLL_INTERVAL_S, device_id)
     t = threading.Thread(target=_poll_loop, daemon=True)
     _motion_poll_thread[device_id] = t
     t.start()
@@ -1773,9 +1854,10 @@ def _parse_box_delay(spec):
     return default, per
 
 
-# Frames reach a check seconds after capture (Protect's relay, decode, the tick wait), and
-# Protect places boxes in playback by clockWall, so boxes lagged the video by ~3 s. Every
-# frame-describing time is back-dated by this per-camera delay (default 0 = unchanged).
+# Protect places boxes in playback by clockWall. Event times come from when the analysed
+# frame left ffmpeg, so the tick wait and inference no longer delay them; what's left is
+# Protect's relay and our decode. This per-camera delay back-dates every frame-describing
+# time by that remainder (default 0 = unchanged).
 _BOX_DELAY_DEFAULT_MS, _BOX_DELAY_MS = _parse_box_delay(os.environ.get("AIPORT_BOX_DELAY_MS"))
 
 
@@ -1783,9 +1865,22 @@ def _box_delay_ms(device_id):
     return _BOX_DELAY_MS.get(str(device_id).upper(), _BOX_DELAY_DEFAULT_MS)
 
 
+def _now_ms():
+    """(wall ms, monotonic ms) right now."""
+    return int(time.time() * 1000), int(time.monotonic() * 1000)
+
+
+def _frame_time(device_id):
+    """(wall ms, monotonic ms) when the analysed frame was read from ffmpeg; now if no
+    frame has been analysed yet."""
+    with _frame_lock:
+        stamp = _analysed_frame_time.get(device_id)
+    return stamp or _now_ms()
+
+
 def _frame_wall_ms(device_id):
-    """Wall-clock ms of the frame being processed now (now minus the camera's delay)."""
-    return int(time.time() * 1000) - _box_delay_ms(device_id)
+    """Wall-clock ms of the analysed frame, minus the camera's residual delay."""
+    return _frame_time(device_id)[0] - _box_delay_ms(device_id)
 
 
 def _stream_clocks(device_id):
@@ -1800,7 +1895,7 @@ def _stream_clocks(device_id):
     started = _stream_started_monotonic_ms.get(device_id)
     if started is None:
         return 0, 0
-    mono = max(0, int(time.monotonic() * 1000) - started - _box_delay_ms(device_id))
+    mono = max(0, _frame_time(device_id)[1] - started - _box_delay_ms(device_id))
     return mono, mono
 
 
@@ -2064,6 +2159,45 @@ def _smart_detect_features():
             *enrich.smart_detect_features()]
 
 
+# Capacity points per stream, measured from the real AI Port's ubnt_onvifd
+# (GetUiStreamPoints, firmware 5.1.12): tiered on width x height x fps, the same
+# thresholds Protect uses for its own estimate (it divides usedPoints by 10 and
+# allows 1.0 in total). Orientation doesn't matter.
+STREAM_POINT_TIERS = ((62208000, 2), (121927680, 2.5), (248832000, 5))
+STREAM_POINTS_MAX = 10
+
+
+def _points_value(points):
+    """2.0 -> 2, 2.5 stays: the real device sends whole points as integers."""
+    points = round(points, 1)
+    return int(points) if points == int(points) else points
+
+
+def _stream_points_for(width, height, fps):
+    """Capacity points for one stream, or None if width/height/fps aren't positive numbers."""
+    try:
+        rate = int(width) * int(height) * int(fps)
+    except (TypeError, ValueError):
+        return None
+    if rate <= 0:
+        return None
+    for limit, points in STREAM_POINT_TIERS:
+        if rate <= limit:
+            return points
+    return STREAM_POINTS_MAX
+
+
+def _used_points():
+    return _points_value(sum(_stream_points.values()))
+
+
+def _stop_all_streams(preserve_tracks=False):
+    for device_id in list(set(_active_streams) | set(_stream_points)):
+        _stop_stream(device_id)
+        _stop_motion_detector(device_id, preserve_tracks=preserve_tracks)
+    _stream_points.clear()
+
+
 def _version_from_update_uri(uri):
     """Target version out of the controller's update URL, or None.
 
@@ -2104,19 +2238,24 @@ def handle_function(ws, msg, device_info):
                 # event is abandoned and prev_center resets (line crossing breaks).
                 _start_motion_detector(ws, device_id, payload["ip"], payload["port"],
                                        payload["uri"], preserve_tracks=True)
+                points = _stream_points_for(payload.get("width"), payload.get("height"),
+                                            payload.get("fps"))
+                # Protect always sends width/height/fps; without them, assume the lowest tier.
+                _stream_points[device_id] = points if points is not None else STREAM_POINT_TIERS[0][1]
                 reply_status = "started"
             except Exception:
                 log.exception("failed to start RTSP pull for deviceID=%s", device_id)
+                _stream_points.pop(device_id, None)
                 reply_status = "stopped"
         else:
             if device_id:
                 _stop_stream(device_id)
                 _stop_motion_detector(device_id)
+                _stream_points.pop(device_id, None)
             reply_status = "stopped"
-        # usedPoints MUST be on every reply (start and stop); omitting it breaks re-pairing
-        # with estimated_capacity_exceeded.
-        active_count = len(_active_streams)
-        reply = {"status": reply_status, "usedPoints": active_count * 2}
+        # usedPoints MUST be on every reply (start and stop): without it Protect sets
+        # utilization to the maximum and re-pairing fails with estimated_capacity_exceeded.
+        reply = {"status": reply_status, "usedPoints": _used_points()}
         send_msg(ws, "UiStreamControl", reply, in_response_to=msg_id)
         if device_id:
             # smart_ready is the likely gate for AI-task dispatch.
@@ -2131,8 +2270,30 @@ def handle_function(ws, msg, device_info):
         send_msg(ws, "OnvifStreamControl", {"status": reply_status}, in_response_to=msg_id)
         return
     if fn == "GetStreamList":
-        # aiportUpdateHandler requires this before re-issuing UiStreamControl; reply needs `list`.
-        send_msg(ws, "GetStreamList", {"list": []}, in_response_to=msg_id)
+        # Protect asks on every connect; a non-empty list makes it send ResetAIPortStreams
+        # before re-issuing UiStreamControl for each paired camera.
+        send_msg(ws, "GetStreamList", {"list": [
+            {"deviceID": d, "points": _points_value(p)} for d, p in _stream_points.items()
+        ]}, in_response_to=msg_id)
+        return
+    if fn == "GetUiStreamPoints":
+        # Cost of each proposed stream; entries without a positive width/height/fps are skipped.
+        result = []
+        for item in payload.get("list") or []:
+            if not isinstance(item, dict):
+                continue
+            points = _stream_points_for(item.get("width"), item.get("height"), item.get("fps"))
+            if points is not None:
+                result.append({"deviceID": item.get("deviceID"), "points": points})
+        send_msg(ws, fn, {"list": result}, in_response_to=msg_id)
+        return
+    if fn == "ResetAIPortStreams":
+        # The real device stops every stream. Keep track state: Protect re-issues
+        # UiStreamControl right after, and open events should carry on.
+        log.info("ResetAIPortStreams: stopping %d stream(s)", len(_stream_points))
+        _stop_all_streams(preserve_tracks=True)
+        if msg.get("responseExpected"):
+            send_msg(ws, fn, {}, in_response_to=msg_id)
         return
     if fn == "ChangeVideoSettings":
         # A query, not a push: the controller builds its channel list from `.video`/`.audio`,
@@ -2193,6 +2354,9 @@ def handle_function(ws, msg, device_info):
         # Parses zones/excludeZones/lines (normalized 0-1000, arbitrary vertices);
         # per-zone sensitivity isn't applied.
         device_id = payload.get("deviceID")
+        start_ms = payload.get("eventStartMSec")
+        if device_id and isinstance(start_ms, (int, float)) and start_ms >= 0:
+            _event_start_ms[device_id] = int(start_ms)
         if device_id:
             _exclude_zones[device_id] = _parse_zones(payload.get("excludeZones"))
             _detect_zones[device_id] = _parse_zones(payload.get("zones"))
@@ -2209,9 +2373,7 @@ def handle_function(ws, msg, device_info):
         # Un-adopt signal: the controller doesn't close the WS afterward, so tear down here.
         log.info("ResetToDefaults received -- treating as un-adopt: clearing "
                   "adopt state and tearing down streams")
-        for device_id in list(_active_streams):
-            _stop_stream(device_id)
-            _stop_motion_detector(device_id)
+        _stop_all_streams()
         _exclude_zones.clear()
         _detect_zones.clear()
         _lines.clear()

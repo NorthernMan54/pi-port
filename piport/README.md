@@ -223,13 +223,23 @@ and `known/uiface.db`, a binary store), so the embedding layout can
 be compared with SFace's; matching against it (`matchedId`) is not implemented yet. Whether
 Protect's face service accepts SFace embeddings is also unconfirmed.
 
-**Tick rate.** Each camera is classified every `AIPORT_TICK_S` seconds: 0.33 s on macOS
-(Core ML runs a frame in ~8 ms), matching a G5 Bullet, which sends a `moving` update every
-~330 ms (median; 249-600 ms) with `displayTimeoutMSec` ~326; 1.5 s elsewhere. Boxes are
-displayed for one tick + 100 ms. Time-based thresholds keep their durations at any rate: a
-track closes after `AIPORT_MISS_S` (default 3 s; the G5 sends `leave` ~2 s after the object
-was last seen), a parked track after 30 s, 30 s still counts as parked, 6 s to resume. The
+**Detection and report rates.** Detecting and reporting run at separate rates. Each camera's
+detector analyses up to `AIPORT_DETECT_FPS` frames per second (10 on macOS, where Core ML runs
+a frame in ~8 ms; elsewhere one frame per tick), each frame once, and tracking runs on every
+analysed frame. `moving` updates go to Protect once per `AIPORT_TICK_S` (0.33 s on macOS,
+matching a G5 Bullet's `moving` every ~330 ms, median 249-600 ms, with `displayTimeoutMSec`
+~326; 1.5 s elsewhere), batching every track seen since the last update; `enter` and
+`leave` go out as they happen. Boxes are displayed for one tick + 100 ms. Time-based
+thresholds keep their durations at any rate: a track closes after `AIPORT_MISS_S` (default
+3 s; the G5 sends `leave` ~2 s after the object was last seen), a parked track after 30 s,
+30 s still counts as parked, 6 s to resume. The motion gate compares against a reference
+frame held for one tick, so slow movement still registers at higher detection rates. The
 RTSP pull uses `-flags low_delay`.
+
+**Confirmation.** A new track joins the camera event only after it has been seen for
+Protect's `eventStartMSec` (from `ChangeSmartDetectSettings`; 0 until Protect sends it), so
+a detection lasting a frame or two never opens a dashboard event. A track lost before then
+is dropped without any event. `AIPORT_CONFIRM_MS` overrides Protect's value.
 
 **Resuming tracks.** A track that closed within `AIPORT_RESUME_S` (default 60 s) is picked
 up again by a same-type detection overlapping its last or first box (IoU >= 0.4): it rejoins
@@ -244,12 +254,14 @@ so small, fast objects no longer split into a new track every tick. Parked track
 detection that doesn't overlap them (a passing car can't wake one). Reported boxes are
 smoothed (0.6 weight on the newest detection); matching and crops use the raw box.
 
-**Box timing.** Frames reach a check a few seconds after capture (Protect's relay, decode,
-the tick wait), and Protect places boxes in playback by `clockWall`, so boxes lagged the video
-by ~3 s. `AIPORT_BOX_DELAY_MS` back-dates every frame-describing time (`clockWall`, the stream
-clocks, first-shown/idle times, `clockBestWall`) by a delay: `"3000"` for all cameras, or with
-per-camera overrides, e.g. `"2000,AABBCC3344CC=3000"` (a proxied camera has an extra hop).
-Default 0. Tune it by comparing a box's time with the video in playback.
+**Box timing.** Protect places boxes in playback by `clockWall`. Each frame is stamped
+(wall and monotonic time) as it is read from ffmpeg, and every frame-describing time
+(`clockWall`, the stream clocks, first-shown/idle times, `clockBestWall`) comes from the
+analysed frame's stamp, so the tick wait and inference time don't delay boxes. What's left is
+Protect's relay and our decode. `AIPORT_BOX_DELAY_MS` back-dates every such time by that
+residual: `"500"` for all cameras, or with per-camera overrides, e.g.
+`"300,AABBCC3344CC=800"` (a proxied camera has an extra hop). Default 0. Tune it by comparing a
+box's time with the video in playback.
 
 **Events.** Protect keeps one smart-detect event per camera, not per track: the first
 `leave` closes it, and a scheduled check force-ends one left open past ~5.5 minutes without
@@ -321,7 +333,8 @@ in `models/` next to `detector.py`.
 detection frame (an `image2pipe` on a second pipe; best frames come from it, and every 1-2 s it
 becomes the snapshot file) and the same frames as 640x640 raw RGB on stdout for classification
 (no image-decode library needed). The JPEGs cost ~8% of a core per 2560x1440 camera at 5 fps
-on an M2. Files live in a RAM/temp stream dir unique to each `--state-dir`
+on an M2; they're made at the detection rate (`AIPORT_DETECT_FPS`), so expect about twice
+that at macOS's default 10. Files live in a RAM/temp stream dir unique to each `--state-dir`
 (`<tmp>/aiport-streams/<hash>/`), so several AI Ports can share a host; its `tmp/` folder
 holds the in-flight files (snapshot rewrites, crop inputs) and is emptied at startup, so a
 crash leaves nothing behind. A background loop classifies the latest frame every 1.5s (`MOTION_POLL_INTERVAL_S`): a

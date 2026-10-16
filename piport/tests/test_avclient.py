@@ -925,6 +925,110 @@ class TestMotionLoopLifecycle(Base):
         self.assertNotIn("D", av._motion_state)
 
 
+class TestStreamPoints(Base):
+    """Capacity points match the real AI Port's ubnt_onvifd (GetUiStreamPoints, 5.1.12)."""
+
+    def setUp(self):
+        super().setUp()
+        av._stream_points.clear()
+        self.addCleanup(av._stream_points.clear)
+        self.stopped = []
+        stubs = {
+            "_start_stream": lambda *a, **kw: None,
+            "_start_motion_detector": lambda *a, **kw: None,
+            "_stop_stream": lambda dev: self.stopped.append(("stream", dev)),
+            "_stop_motion_detector": lambda dev, preserve_tracks=False:
+                self.stopped.append(("detector", dev, preserve_tracks)),
+            "_send_status_event": lambda *a, **kw: None,
+            "_send_feature_flags_event": lambda *a, **kw: None,
+        }
+        for name, stub in stubs.items():
+            orig = getattr(av, name)
+            setattr(av, name, stub)
+            self.addCleanup(setattr, av, name, orig)
+
+    def call(self, fn, payload, msg_id=1, response_expected=True):
+        self.sent.clear()
+        av.handle_function(None, {"functionName": fn, "messageId": msg_id,
+                                  "responseExpected": response_expected,
+                                  "payload": payload}, {})
+        return self.sent
+
+    def stream(self, dev, streaming=True, w=1920, h=1080, fps=30):
+        sent = self.call("UiStreamControl", {"deviceID": dev, "streaming": streaming,
+                                             "ip": "10.0.0.1", "port": "7447", "uri": "abc",
+                                             "width": w, "height": h, "fps": fps})
+        return sent[0][1]
+
+    def test_measured_tiers(self):
+        # Values read from the real device for the same inputs.
+        measured = [
+            ((640, 360, 30), 2), ((1920, 1080, 30), 2), ((1080, 1920, 30), 2),
+            ((2304, 1296, 20), 2), ((2304, 1296, 25), 2.5), ((2560, 1440, 30), 2.5),
+            ((2592, 1944, 15), 2.5), ((2592, 1944, 25), 5), ((3840, 2160, 10), 2.5),
+            ((3840, 2160, 30), 5), ((2160, 3840, 30), 5), ((4096, 2160, 25), 5),
+            ((4096, 2160, 30), 10), ((4000, 3000, 25), 10),
+        ]
+        for (w, h, fps), points in measured:
+            with self.subTest(w=w, h=h, fps=fps):
+                self.assertEqual(av._stream_points_for(w, h, fps), points)
+
+    def test_invalid_dimensions(self):
+        for args in [(0, 1080, 30), (1920, None, 30), (1920, 1080, "x"), (1920, 1080, -1)]:
+            with self.subTest(args=args):
+                self.assertIsNone(av._stream_points_for(*args))
+
+    def test_used_points_follow_streams(self):
+        self.assertEqual(self.stream("CAM4K", w=3840, h=2160), {"status": "started", "usedPoints": 5})
+        self.assertEqual(self.stream("CAMHD")["usedPoints"], 7)
+        self.assertEqual(self.stream("CAM4K", streaming=False),
+                         {"status": "stopped", "usedPoints": 2})
+        self.assertEqual(self.stream("CAMHD", streaming=False)["usedPoints"], 0)
+
+    def test_half_points_kept_as_decimal(self):
+        self.assertEqual(self.stream("CAM2K", w=2560, h=1440)["usedPoints"], 2.5)
+        self.assertEqual(self.stream("CAM2K-B", w=2560, h=1440)["usedPoints"], 5)
+
+    def test_failed_start_not_counted(self):
+        def boom(*a, **kw):
+            raise RuntimeError("no rtsp")
+        orig = av._start_stream
+        av._start_stream = boom
+        self.addCleanup(setattr, av, "_start_stream", orig)
+        self.assertEqual(self.stream("CAM"), {"status": "stopped", "usedPoints": 0})
+        self.assertEqual(av._stream_points, {})
+
+    def test_get_stream_list(self):
+        self.assertEqual(self.call("GetStreamList", {}), [("GetStreamList", {"list": []})])
+        self.stream("CAM4K", w=3840, h=2160)
+        self.stream("CAM2K", w=2560, h=1440)
+        self.assertEqual(self.call("GetStreamList", {})[0][1], {"list": [
+            {"deviceID": "CAM4K", "points": 5}, {"deviceID": "CAM2K", "points": 2.5}]})
+
+    def test_get_ui_stream_points(self):
+        sent = self.call("GetUiStreamPoints", {"list": [
+            {"deviceID": "A", "width": 3840, "height": 2160, "fps": 30},
+            {"deviceID": "B", "width": 1920, "height": 1080, "fps": 30},
+            {"deviceID": "C", "width": 0, "height": 1080, "fps": 30},
+            "junk",
+        ]})
+        self.assertEqual(sent, [("GetUiStreamPoints", {"list": [
+            {"deviceID": "A", "points": 5}, {"deviceID": "B", "points": 2}]})])
+        self.assertEqual(av._stream_points, {})  # a query, not a reservation
+
+    def test_reset_stops_all_and_keeps_tracks(self):
+        self.stream("A")
+        self.stream("B", w=3840, h=2160)
+        self.stopped.clear()
+        sent = self.call("ResetAIPortStreams", {})
+        self.assertEqual(sent, [("ResetAIPortStreams", {})])
+        self.assertEqual(av._stream_points, {})
+        self.assertEqual(sorted(self.stopped),
+                         [("detector", "A", True), ("detector", "B", True),
+                          ("stream", "A"), ("stream", "B")])
+        self.assertEqual(self.call("GetStreamList", {})[0][1], {"list": []})
+
+
 class TestFirmwareUpdate(unittest.TestCase):
     """UpdateFirmwareRequest is acked and its target version pinned, never flashed."""
 

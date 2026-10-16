@@ -176,6 +176,9 @@ SMART_DETECT_ZONE_ID = "1"
 _latest_frame = {}   # deviceID -> HxWx3 uint8 numpy array (640x640, RGB)
 _frame_lock = threading.Lock()
 _stream_dims = {}    # deviceID -> (width, height) of the real camera stream
+# deviceID -> capacity points of each stream UiStreamControl started. Kept apart from
+# _active_streams, which briefly drops a device while its ffmpeg restarts.
+_stream_points = {}
 # deviceID -> exclusion polygons in the normalized 0-1000 space.
 _exclude_zones = {}
 # Prototype app exposes `zones` (not excludeZones): when non-default, a detection must be inside one.
@@ -1820,6 +1823,45 @@ def _smart_detect_features():
             *enrich.smart_detect_features()]
 
 
+# Capacity points per stream, measured from the real AI Port's ubnt_onvifd
+# (GetUiStreamPoints, firmware 5.1.12): tiered on width x height x fps, the same
+# thresholds Protect uses for its own estimate (it divides usedPoints by 10 and
+# allows 1.0 in total). Orientation doesn't matter.
+STREAM_POINT_TIERS = ((62208000, 2), (121927680, 2.5), (248832000, 5))
+STREAM_POINTS_MAX = 10
+
+
+def _points_value(points):
+    """2.0 -> 2, 2.5 stays: the real device sends whole points as integers."""
+    points = round(points, 1)
+    return int(points) if points == int(points) else points
+
+
+def _stream_points_for(width, height, fps):
+    """Capacity points for one stream, or None if width/height/fps aren't positive numbers."""
+    try:
+        rate = int(width) * int(height) * int(fps)
+    except (TypeError, ValueError):
+        return None
+    if rate <= 0:
+        return None
+    for limit, points in STREAM_POINT_TIERS:
+        if rate <= limit:
+            return points
+    return STREAM_POINTS_MAX
+
+
+def _used_points():
+    return _points_value(sum(_stream_points.values()))
+
+
+def _stop_all_streams(preserve_tracks=False):
+    for device_id in list(set(_active_streams) | set(_stream_points)):
+        _stop_stream(device_id)
+        _stop_motion_detector(device_id, preserve_tracks=preserve_tracks)
+    _stream_points.clear()
+
+
 def _version_from_update_uri(uri):
     """Target version out of the controller's update URL, or None.
 
@@ -1860,19 +1902,24 @@ def handle_function(ws, msg, device_info):
                 # event is abandoned and prev_center resets (line crossing breaks).
                 _start_motion_detector(ws, device_id, payload["ip"], payload["port"],
                                        payload["uri"], preserve_tracks=True)
+                points = _stream_points_for(payload.get("width"), payload.get("height"),
+                                            payload.get("fps"))
+                # Protect always sends width/height/fps; without them, assume the lowest tier.
+                _stream_points[device_id] = points if points is not None else STREAM_POINT_TIERS[0][1]
                 reply_status = "started"
             except Exception:
                 log.exception("failed to start RTSP pull for deviceID=%s", device_id)
+                _stream_points.pop(device_id, None)
                 reply_status = "stopped"
         else:
             if device_id:
                 _stop_stream(device_id)
                 _stop_motion_detector(device_id)
+                _stream_points.pop(device_id, None)
             reply_status = "stopped"
-        # usedPoints MUST be on every reply (start and stop); omitting it breaks re-pairing
-        # with estimated_capacity_exceeded.
-        active_count = len(_active_streams)
-        reply = {"status": reply_status, "usedPoints": active_count * 2}
+        # usedPoints MUST be on every reply (start and stop): without it Protect sets
+        # utilization to the maximum and re-pairing fails with estimated_capacity_exceeded.
+        reply = {"status": reply_status, "usedPoints": _used_points()}
         send_msg(ws, "UiStreamControl", reply, in_response_to=msg_id)
         if device_id:
             # smart_ready is the likely gate for AI-task dispatch.
@@ -1887,8 +1934,30 @@ def handle_function(ws, msg, device_info):
         send_msg(ws, "OnvifStreamControl", {"status": reply_status}, in_response_to=msg_id)
         return
     if fn == "GetStreamList":
-        # aiportUpdateHandler requires this before re-issuing UiStreamControl; reply needs `list`.
-        send_msg(ws, "GetStreamList", {"list": []}, in_response_to=msg_id)
+        # Protect asks on every connect; a non-empty list makes it send ResetAIPortStreams
+        # before re-issuing UiStreamControl for each paired camera.
+        send_msg(ws, "GetStreamList", {"list": [
+            {"deviceID": d, "points": _points_value(p)} for d, p in _stream_points.items()
+        ]}, in_response_to=msg_id)
+        return
+    if fn == "GetUiStreamPoints":
+        # Cost of each proposed stream; entries without a positive width/height/fps are skipped.
+        result = []
+        for item in payload.get("list") or []:
+            if not isinstance(item, dict):
+                continue
+            points = _stream_points_for(item.get("width"), item.get("height"), item.get("fps"))
+            if points is not None:
+                result.append({"deviceID": item.get("deviceID"), "points": points})
+        send_msg(ws, fn, {"list": result}, in_response_to=msg_id)
+        return
+    if fn == "ResetAIPortStreams":
+        # The real device stops every stream. Keep track state: Protect re-issues
+        # UiStreamControl right after, and open events should carry on.
+        log.info("ResetAIPortStreams: stopping %d stream(s)", len(_stream_points))
+        _stop_all_streams(preserve_tracks=True)
+        if msg.get("responseExpected"):
+            send_msg(ws, fn, {}, in_response_to=msg_id)
         return
     if fn == "ChangeVideoSettings":
         # A query, not a push: the controller builds its channel list from `.video`/`.audio`,
@@ -1965,9 +2034,7 @@ def handle_function(ws, msg, device_info):
         # Un-adopt signal: the controller doesn't close the WS afterward, so tear down here.
         log.info("ResetToDefaults received -- treating as un-adopt: clearing "
                   "adopt state and tearing down streams")
-        for device_id in list(_active_streams):
-            _stop_stream(device_id)
-            _stop_motion_detector(device_id)
+        _stop_all_streams()
         _exclude_zones.clear()
         _detect_zones.clear()
         _lines.clear()

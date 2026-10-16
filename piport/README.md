@@ -163,10 +163,33 @@ alongside ffmpeg on a Pi 4) and caps threads with `AIPORT_ORT_INTRA_THREADS` (e.
 on a Pi 4; unset = onnxruntime's default). `AIPORT_OBJ_THRESH` overrides the detection
 confidence gate.
 
-On macOS (Apple silicon, bare metal) the onnx backend uses onnxruntime's **Core ML** provider
-(`MLProgram` on the Neural Engine): ~6.5 ms vs ~37 ms per frame on CPU (M1 Pro, `yolov5n`),
-with the same detections. `AIPORT_ORT_PROVIDER=cpu` forces CPU; `auto` (default) picks Core ML
+On macOS (Apple silicon, bare metal) the onnx backend uses onnxruntime's **Core ML** provider:
+~6.5 ms vs ~37 ms per frame on CPU (M1 Pro, `yolov5n`), with the same detections. The Core ML
+format follows the model's input dtype: `MLProgram` for the fp16 Ultralytics YOLOv5 (the default
+NeuralNetwork format runs it at ~95 ms), NeuralNetwork for float32 graphs such as YOLOv9
+(3 ms vs 22 ms under MLProgram, M2). `AIPORT_ORT_PROVIDER=cpu` forces CPU; `auto` (default) picks Core ML
 when onnxruntime offers it (never on Linux) and falls back to CPU if the model won't compile.
+
+**YOLOv8/v9 models.** The onnx backend also reads anchor-free exports (one `[1,4+classes,N]`
+output: xywh and class scores, no objectness), e.g. Frigate's `yolov9-s-320.onnx`. The input
+size comes from the graph: frames (640x640) are resized to it and boxes scaled back, so nothing
+else changes. Select one with `AIPORT_MODEL_PATH`; the startup log shows `layout=anchor_free,
+input=320x320`. The score is the class confidence (no objectness to multiply), gated by the same
+`AIPORT_OBJ_THRESH`. On the M2's doorbell frame YOLOv9-s at 320 left out two flower pots YOLOv5s
+called birds (0.55/0.54) and named an RV a truck where YOLOv5s said train; it is 3.4 ms per
+frame vs ~8 ms. Small, distant objects at 320 are not yet compared.
+
+`scripts/fetch_models.py` does not install it: there is no published YOLOv9 ONNX. Frigate
+exports it locally from the YOLOv9 authors' weights (<https://github.com/WongKinYiu/yolov9>,
+GPL-3.0; `yolov9-s-converted.pt`, release `v0.1`) with the Docker recipe in its object-detector
+docs (`MODEL_SIZE=s`, `IMG_SIZE=320`). Copy that export into `piport/models/` (gitignored like
+the other models); the one in use is sha256
+`ae31147e082ac2026b67f930f92dcbe99328deda19a51e493ecaf26b495e081f`:
+
+```bash
+cp <frigate config>/model_cache/yolov9-s-320.onnx piport/models/
+AIPORT_MODEL_PATH=$PWD/piport/models/yolov9-s-320.onnx ...   # on the run_all.py command
+```
 
 ### Enrichment: vehicle attributes, license plates, faces (`enrich.py`, best-guess wire format)
 

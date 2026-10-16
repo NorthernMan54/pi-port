@@ -66,6 +66,12 @@ class TestOnnxProviders(unittest.TestCase):
         self.assertEqual(p[0][0], "CoreMLExecutionProvider")
         self.assertEqual(p[-1], "CPUExecutionProvider")
 
+    def test_coreml_format_follows_input_dtype(self):
+        fp16 = detector._onnx_providers(self.MAC, fp16_input=True)[0][1]
+        fp32 = detector._onnx_providers(self.MAC, fp16_input=False)[0][1]
+        self.assertEqual(fp16.get("ModelFormat"), "MLProgram")
+        self.assertNotIn("ModelFormat", fp32)  # NeuralNetwork, Core ML's default
+
     def test_auto_without_coreml(self):
         self.assertEqual(detector._onnx_providers(["CPUExecutionProvider"]),
                          ["CPUExecutionProvider"])
@@ -217,6 +223,107 @@ class TestUltralytics(unittest.TestCase):
         import numpy as np
         boxes, classes, scores = detector._post_process_ultralytics(np.zeros((1, 2, 85), np.float32))
         self.assertIsNone(boxes)
+
+
+
+@unittest.skipIf(detector is None, f"detector unavailable ({_IMPORT_ERR})")
+class TestAnchorFree(unittest.TestCase):
+    """YOLOv8/v9 [1,4+nc,N] output: xywh + class scores, no objectness."""
+
+    def test_layout_detection(self):
+        self.assertEqual(detector._layout([[1, 84, 2100]], 80), "anchor_free")
+        self.assertEqual(detector._layout([[1, 25200, 85]], 80), "ultralytics")
+        self.assertEqual(detector._layout([[1, 255, 80, 80]] * 3, 80), "raw_heads")
+
+    def test_duplicate_suppressed_and_score_is_class_conf(self):
+        import numpy as np
+        out = np.zeros((1, 84, 4), dtype=np.float32)
+        for col in (0, 1):  # two identical class-2 (car) boxes
+            out[0, :4, col] = [160, 160, 40, 20]
+            out[0, 4 + 2, col] = 0.8
+        out[0, 4 + 2, 2] = 0.3  # below OBJ_THRESH
+        boxes, classes, scores = detector._post_process_anchor_free(out)
+        self.assertEqual(len(boxes), 1)
+        self.assertEqual(int(classes[0]), 2)
+        self.assertAlmostEqual(float(scores[0]), 0.8, places=5)
+        self.assertEqual([round(float(v), 3) for v in boxes[0]], [140.0, 150.0, 180.0, 170.0])
+
+    def test_empty(self):
+        import numpy as np
+        boxes, _, _ = detector._post_process_anchor_free(np.zeros((1, 84, 5), np.float32))
+        self.assertIsNone(boxes)
+
+
+@unittest.skipIf(detector is None, f"detector unavailable ({_IMPORT_ERR})")
+class TestModelInputSize(unittest.TestCase):
+    """A 320x320 model gets 640x640 frames resized down and its boxes scaled back up."""
+
+    def _backend(self):
+        import types
+        from unittest import mock
+        import numpy as np
+        seen = {}
+
+        class _In:
+            name, type, shape = "images", "tensor(float)", [1, 3, 320, 320]
+
+        class _Out:
+            shape = [1, 84, 1]
+
+        class _Session:
+            def __init__(self, path, so, providers):
+                self.providers = providers
+
+            def get_providers(self):
+                return self.providers
+
+            def get_inputs(self):
+                return [_In()]
+
+            def get_outputs(self):
+                return [_Out()]
+
+            def run(self, _names, feed):
+                seen["shape"] = feed["images"].shape
+                out = np.zeros((1, 84, 1), np.float32)
+                out[0, :4, 0] = [100, 50, 20, 10]  # model-space xywh
+                out[0, 4 + 0, 0] = 0.9  # person
+                return [out]
+
+        class _Opts:
+            def add_session_config_entry(self, k, v):
+                pass
+
+        fake = types.SimpleNamespace(InferenceSession=_Session, SessionOptions=_Opts,
+                                     get_available_providers=lambda: ["CPUExecutionProvider"])
+        with mock.patch.dict(sys.modules, {"onnxruntime": fake}):
+            backend = detector._OnnxBackend()
+        return backend, seen
+
+    def test_input_size_from_graph(self):
+        backend, _ = self._backend()
+        self.assertEqual(backend.input_size, (320, 320))
+        self.assertEqual(backend._mode, "anchor_free")
+
+    def test_frame_resized_and_boxes_scaled_to_frame(self):
+        import numpy as np
+        backend, seen = self._backend()
+        det = detector.Detector.__new__(detector.Detector)
+        det._labels, det._backend = detector._load_labels(), backend
+        res = det.detect(np.zeros((640, 640, 3), np.uint8))
+        self.assertEqual(seen["shape"], (1, 3, 320, 320))
+        self.assertEqual(res[0]["objectType"], "person")
+        # model xyxy (90,45,110,55) at 320 -> (180,90,220,110) at 640
+        self.assertEqual([round(v, 3) for v in res[0]["box"]], [180.0, 90.0, 220.0, 110.0])
+
+    def test_resize_without_opencv(self):
+        import numpy as np
+        from unittest import mock
+        frame = np.arange(4 * 4 * 3, dtype=np.uint8).reshape(4, 4, 3)
+        with mock.patch.dict(sys.modules, {"cv2": None}):
+            out = detector._resize(frame, (2, 2))
+        self.assertEqual(out.shape, (2, 2, 3))
+        self.assertTrue((out[1, 1] == frame[2, 2]).all())
 
 
 if __name__ == "__main__":

@@ -24,7 +24,7 @@ once Flynn is running.
 | Setting | Value | Why |
 | --- | --- | --- |
 | Console | `AIPORT_CONSOLE_HOST=192.168.1.1` | the Protect console (Cottage GW) |
-| Detector model | `AIPORT_MODEL_PATH=…/piport/models/yolov5s.onnx` | YOLOv5s on Core ML (~8 ms/frame on M1 Pro): better on small/distant objects than YOLOv5n |
+| Detector model | `AIPORT_MODEL_PATH=…/piport/models/yolov5s.onnx` | YOLOv5s on Core ML (~8 ms/frame on M1 Pro): better on small/distant objects than YOLOv5n. To try YOLOv9: `AIPORT_MODEL_PATH=…/piport/models/yolov9-s-320.onnx` (copied from Frigate's `model_cache`, 3.4 ms/frame on M2; see `piport/README.md`) |
 | Box delay | `AIPORT_BOX_DELAY_MS=3000` | back-dates boxes to their frame time; measured 2.2-3.1 s on the Driveway camera |
 | Tick rate | default 0.33 s on macOS (`AIPORT_TICK_S`) | matches a G5 Bullet's ~330 ms update rate |
 | Event end | default 3 s with no detection (`AIPORT_MISS_S`) | a G5 Bullet sends `leave` ~2 s after the object leaves |
@@ -80,7 +80,7 @@ In Flynn's terminal output, within about 15 s:
 
 - `WSS CONNECTED` and `CLASSIC AVCLIENT WSS CONNECTED`, with **no** repeating
   `connection ended ... reconnecting` (that loop means the identity didn't match: check `--mac`).
-- `Detector initialized (backend=onnx, provider=CoreMLExecutionProvider, model=.../yolov5s.onnx)`.
+- `Detector initialized (backend=onnx, provider=CoreMLExecutionProvider, model=.../yolov5s.onnx, layout=ultralytics, input=640x640)`.
 - `starting merged RTSP pull` for the paired cameras: doorbell `8CEDE172C456`, Driveway
   `AABBCC3344CC`, Backyard `F4E2C60D4B4C`.
 - `vehicle already present at start, parked` for the parked cars (no events opened for them).

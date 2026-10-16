@@ -293,7 +293,9 @@ reproducible, they are not committed; `scripts/fetch_models.py` downloads them:
 | anchors, COCO labels, bus.jpg, calibration subset | RKNN conversion | <https://github.com/airockchip/rknn_model_zoo> (tag `v2.3.2`) |
 
 The CPU backend uses Ultralytics `yolov5n.onnx` and still accepts the Rockchip
-`yolov5s_relu.onnx` via `AIPORT_MODEL_PATH` (both layouts are auto-detected). The
+`yolov5s_relu.onnx` via `AIPORT_MODEL_PATH`, and anchor-free YOLOv8/v9 exports such as
+Frigate's `yolov9-s-320.onnx` (all three layouts are auto-detected; the input size is read
+from the model). The
 Dockerfile downloads and sha256-verifies the CPU model at build time.
 
 `yolov5s_relu.rknn` is produced on an x86_64 machine with `rknn-toolkit2`

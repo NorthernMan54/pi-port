@@ -248,6 +248,19 @@ class TestAnchorFree(unittest.TestCase):
         self.assertAlmostEqual(float(scores[0]), 0.8, places=5)
         self.assertEqual([round(float(v), 3) for v in boxes[0]], [140.0, 150.0, 180.0, 170.0])
 
+    def test_lower_threshold_keeps_weak_boxes(self):
+        import numpy as np
+        out = np.zeros((1, 84, 1), dtype=np.float32)
+        out[0, :4, 0] = [160, 160, 40, 20]
+        out[0, 4 + 2, 0] = 0.35
+        self.assertIsNone(detector._post_process_anchor_free(out)[0])
+        boxes, _, scores = detector._post_process_anchor_free(out, 0.3)
+        self.assertEqual(len(boxes), 1)
+        self.assertAlmostEqual(float(scores[0]), 0.35, places=5)
+
+    def test_keep_thresh_never_above_obj_thresh(self):
+        self.assertLessEqual(detector.KEEP_THRESH, detector.OBJ_THRESH)
+
     def test_empty(self):
         import numpy as np
         boxes, _, _ = detector._post_process_anchor_free(np.zeros((1, 84, 5), np.float32))

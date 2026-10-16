@@ -160,8 +160,12 @@ for the measured numbers and the known Pi 4 decoder limits.
 
 The CPU detector disables onnxruntime's thread **spin-wait** (it burned ~3 extra cores
 alongside ffmpeg on a Pi 4) and caps threads with `AIPORT_ORT_INTRA_THREADS` (e.g. `2`
-on a Pi 4; unset = onnxruntime's default). `AIPORT_OBJ_THRESH` overrides the detection
-confidence gate.
+on a Pi 4; unset = onnxruntime's default). `AIPORT_OBJ_THRESH` (default 0.5) is the score a
+detection needs to open a track; a box overlapping an existing track keeps it alive down to
+`AIPORT_KEEP_THRESH` (default 0.3), so a car half hidden by people or cut off at the frame
+edge doesn't drop out. Weak boxes never open a track or take one by distance. The first
+weak tick of a track and its return above 0.5 are logged at INFO; every weak box with
+`--debug`.
 
 On macOS (Apple silicon, bare metal) the onnx backend uses onnxruntime's **Core ML** provider:
 ~6.5 ms vs ~37 ms per frame on CPU (M1 Pro, `yolov5n`), with the same detections. The Core ML
@@ -227,6 +231,13 @@ track closes after `AIPORT_MISS_S` (default 3 s; the G5 sends `leave` ~2 s after
 was last seen), a parked track after 30 s, 30 s still counts as parked, 6 s to resume. The
 RTSP pull uses `-flags low_delay`.
 
+**Resuming tracks.** A track that closed within `AIPORT_RESUME_S` (default 60 s) is picked
+up again by a same-type detection overlapping its last or first box (IoU >= 0.4): it rejoins
+its event if that is still open, and a vehicle that never moved (centre within a quarter of
+its size) or was parked comes back quietly as parked. Seen live: a car backed in with its
+hatch open and two people unloading it was re-detected as a "new" vehicle in three
+successive events. A person or a car that moved and left is still new next time.
+
 **Tracking.** Detections match tracks by box overlap; a moving track no box overlaps takes
 the nearest same-type detection near where its last movement predicts it (within 3x its size),
 so small, fast objects no longer split into a new track every tick. Parked tracks never take a
@@ -266,7 +277,10 @@ in it (a 1920x2560 doorbell fills the middle 42%). Boxes are converted to that c
 sent, and zone/line checks run in it; crops and plate/face reads stay in image space.
 Each track keeps its best-scoring frame (full-res JPEG, box, time); on `leave` the
 object crop, the Full-FoV image and `clockBestWall` come from it, not from the frame
-seconds after the object was last seen. Seen live: Protect shows vehicle attributes
+seconds after the object was last seen. The JPEG is the very frame the detector scored:
+ffmpeg encodes every detection frame at full resolution, numbered like the raw frames
+(a once-a-second snapshot was up to a second off, enough for a passing bus to leave
+the crop). Seen live: Protect shows vehicle attributes
 (`Truck (70%), White (70%)`, `Red (42%)`). Attributes become labels verbatim, so only
 Protect's values show: `vehicleType` car/suv/truck/van/bus/motorcycle/bike (COCO "car" is
 sent as `car`; `sedan` displayed nothing) and `color`
@@ -303,9 +317,14 @@ in `models/` next to `detector.py`.
   `detector.py`.
 
 `avclient.py` runs one ffmpeg process per paired camera that pulls the RTSP stream and uses
-`filter_complex split=2` for both outputs from a single decode: a 1/2-fps JPEG still (snapshots)
-and 2-fps 640x640 raw RGB frames piped to Python for classification (no image-decode library
-needed). A background loop classifies the latest frame every 1.5s (`MOTION_POLL_INTERVAL_S`): a
+`filter_complex fps,split=2` for both outputs from a single decode: a full-res JPEG of every
+detection frame (an `image2pipe` on a second pipe; best frames come from it, and every 1-2 s it
+becomes the snapshot file) and the same frames as 640x640 raw RGB on stdout for classification
+(no image-decode library needed). The JPEGs cost ~8% of a core per 2560x1440 camera at 5 fps
+on an M2. Files live in a RAM/temp stream dir unique to each `--state-dir`
+(`<tmp>/aiport-streams/<hash>/`), so several AI Ports can share a host; its `tmp/` folder
+holds the in-flight files (snapshot rewrites, crop inputs) and is emptied at startup, so a
+crash leaves nothing behind. A background loop classifies the latest frame every 1.5s (`MOTION_POLL_INTERVAL_S`): a
 detection opens (`"enter"`) or refreshes (`"moving"`) a track, and a track closes (`"leave"`)
 only after `AIPORT_MISS_S` (default 3 s) of **consecutive** empty ticks. Simultaneous
 objects are tracked independently and matched frame-to-frame by bounding-box IOU within each

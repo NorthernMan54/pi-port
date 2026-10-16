@@ -44,6 +44,9 @@ IMG_SIZE = (640, 640)  # (width, height) of the frames callers pass; models may 
 # Objectness x class gate; raised from 0.35 to suppress night false "person" hits
 # (0.36-0.48). Override with AIPORT_OBJ_THRESH.
 OBJ_THRESH = float(os.environ.get("AIPORT_OBJ_THRESH", "0.5"))
+# An object already being tracked only needs this much to stay tracked (AIPORT_KEEP_THRESH):
+# a car with its hatch open behind people scored 0.50-0.59 and kept dropping out.
+KEEP_THRESH = min(OBJ_THRESH, float(os.environ.get("AIPORT_KEEP_THRESH", "0.3")))
 NMS_THRESH = 0.45
 
 # AI Port's objectType vocabulary is just person/vehicle/animal; map YOLO's
@@ -107,11 +110,11 @@ def _box_process(position, anchors):
     return xyxy
 
 
-def _filter_boxes(boxes, box_confidences, box_class_probs):
+def _filter_boxes(boxes, box_confidences, box_class_probs, thresh=OBJ_THRESH):
     box_confidences = box_confidences.reshape(-1)
     class_max_score = np.max(box_class_probs, axis=-1)
     classes = np.argmax(box_class_probs, axis=-1)
-    pos = np.where(class_max_score * box_confidences >= OBJ_THRESH)
+    pos = np.where(class_max_score * box_confidences >= thresh)
     scores = (class_max_score * box_confidences)[pos]
     return boxes[pos], classes[pos], scores
 
@@ -155,7 +158,7 @@ def _nms_per_class(boxes, classes, scores):
     return np.concatenate(nboxes), np.concatenate(nclasses), np.concatenate(nscores)
 
 
-def _post_process(outputs, anchors):
+def _post_process(outputs, anchors, thresh=OBJ_THRESH):
     boxes, scores, classes_conf = [], [], []
     reshaped = [o.reshape([len(anchors[0]), -1] + list(o.shape[-2:])) for o in outputs]
     for i, data in enumerate(reshaped):
@@ -171,7 +174,7 @@ def _post_process(outputs, anchors):
     classes_conf = np.concatenate([flatten(c) for c in classes_conf])
     scores = np.concatenate([flatten(s) for s in scores])
 
-    boxes, classes, scores = _filter_boxes(boxes, scores, classes_conf)
+    boxes, classes, scores = _filter_boxes(boxes, scores, classes_conf, thresh)
     if boxes.shape[0] == 0:
         return None, None, None
     return _nms_per_class(boxes, classes, scores)
@@ -188,13 +191,13 @@ def _xywh2xyxy(xywh):
     return xyxy
 
 
-def _post_process_ultralytics(output):
+def _post_process_ultralytics(output, thresh=OBJ_THRESH):
     pred = output[0]  # (N, 5+num_classes): xywh(px), obj, class scores
     obj = pred[:, 4]
     class_conf = pred[:, 5:]
     classes = np.argmax(class_conf, axis=1)
     scores = obj * class_conf[np.arange(class_conf.shape[0]), classes]
-    keep = scores >= OBJ_THRESH
+    keep = scores >= thresh
     if not np.any(keep):
         return None, None, None
     boxes = _xywh2xyxy(pred[keep, :4])
@@ -203,12 +206,12 @@ def _post_process_ultralytics(output):
 
 # --- Anchor-free layout ([1,4+num_classes,N]: YOLOv8/v9/v11, no objectness) ---
 
-def _post_process_anchor_free(output):
+def _post_process_anchor_free(output, thresh=OBJ_THRESH):
     pred = output[0].T  # (N, 4+num_classes): xywh(px), class scores
     class_conf = pred[:, 4:]
     classes = np.argmax(class_conf, axis=1)
     scores = class_conf[np.arange(class_conf.shape[0]), classes]
-    keep = scores >= OBJ_THRESH
+    keep = scores >= thresh
     if not np.any(keep):
         return None, None, None
     boxes = _xywh2xyxy(pred[keep, :4])
@@ -302,8 +305,8 @@ class _RknnBackend:
         with self._lock:
             return self._rknn.inference(inputs=[batched])
 
-    def boxes(self, raw_outputs):
-        return _post_process(raw_outputs, self._anchors)
+    def boxes(self, raw_outputs, thresh=OBJ_THRESH):
+        return _post_process(raw_outputs, self._anchors, thresh)
 
 
 def _onnx_providers(available, fp16_input=True):
@@ -393,12 +396,12 @@ class _OnnxBackend:
             outputs = self._session.run(None, {self._input_name: batched})
         return [np.asarray(o, dtype=np.float32) for o in outputs]
 
-    def boxes(self, raw_outputs):
+    def boxes(self, raw_outputs, thresh=OBJ_THRESH):
         if self._mode == "ultralytics":
-            return _post_process_ultralytics(raw_outputs[0])
+            return _post_process_ultralytics(raw_outputs[0], thresh)
         if self._mode == "anchor_free":
-            return _post_process_anchor_free(raw_outputs[0])
-        return _post_process(raw_outputs, self._anchors)
+            return _post_process_anchor_free(raw_outputs[0], thresh)
+        return _post_process(raw_outputs, self._anchors, thresh)
 
 
 class Detector:
@@ -414,13 +417,13 @@ class Detector:
                  self._backend.model_path, getattr(self._backend, "_mode", "rknn"),
                  *getattr(self._backend, "input_size", IMG_SIZE))
 
-    def detect(self, frame_rgb):
+    def detect(self, frame_rgb, min_score=OBJ_THRESH):
         """frame_rgb: HxWx3 uint8 RGB, already resized to IMG_SIZE (plain
         stretch, no letterboxing). Returns {"objectType", "score", "box":
         (x1,y1,x2,y2)} in IMG_SIZE pixel space, score-descending, mapped to
-        AI Port's person/vehicle/animal vocabulary."""
+        AI Port's person/vehicle/animal vocabulary; boxes down to min_score."""
         raw = self._backend.raw(frame_rgb)
-        boxes, classes, scores = self._backend.boxes(raw)
+        boxes, classes, scores = self._backend.boxes(raw, min_score)
         if boxes is None:
             return []
         # Boxes come back in the model's input space; report them in the frame's.

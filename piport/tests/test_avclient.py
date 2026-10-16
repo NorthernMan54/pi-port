@@ -44,6 +44,10 @@ class Base(unittest.TestCase):
         av._stream_dims.clear()
         av._active_streams.clear()
         av._pending_leaves.clear()
+        av._latest_frame.clear()
+        av._latest_frame_time.clear()
+        av._analysed_frame_time.clear()
+        av._stream_started_monotonic_ms.clear()
         self.sent = []
         self._orig_send = av.send_msg
         av.send_msg = lambda ws, fn, payload, **kw: self.sent.append((fn, payload))
@@ -828,8 +832,72 @@ class TestStreamClocks(Base):
     def test_stop_stream_clears_clock_origin(self):
         av._active_streams["D"] = None
         av._stream_started_monotonic_ms["D"] = int(time.monotonic() * 1000)
+        av._latest_frame_time["D"] = (1, 1)
+        av._analysed_frame_time["D"] = (1, 1)
         av._stop_stream("D")
         self.assertNotIn("D", av._stream_started_monotonic_ms)
+        self.assertNotIn("D", av._latest_frame_time)
+        self.assertNotIn("D", av._analysed_frame_time)
+
+
+class TestFrameTiming(Base):
+    """Event times describe the analysed frame (when it left ffmpeg), not the send time."""
+
+    WALL, MONO, STARTED = 1_760_000_000_000, 50_000, 40_000
+
+    def setUp(self):
+        super().setUp()
+        av._stream_started_monotonic_ms["D"] = self.STARTED
+        av._analysed_frame_time["D"] = (self.WALL, self.MONO)
+
+    def delay(self, ms):
+        orig = av._BOX_DELAY_MS
+        av._BOX_DELAY_MS = {"D": ms}
+        self.addCleanup(setattr, av, "_BOX_DELAY_MS", orig)
+
+    def test_clocks_use_frame_time(self):
+        self.assertEqual(av._frame_wall_ms("D"), self.WALL)
+        self.assertEqual(av._stream_clocks("D"), (self.MONO - self.STARTED,) * 2)
+
+    def test_residual_delay_backdates_frame_time(self):
+        self.delay(500)
+        self.assertEqual(av._frame_wall_ms("D"), self.WALL - 500)
+        self.assertEqual(av._stream_clocks("D"), (self.MONO - self.STARTED - 500,) * 2)
+
+    def test_newer_frame_does_not_move_reported_time(self):
+        # The reader keeps going while a tick works on its frame.
+        av._latest_frame_time["D"] = (self.WALL + 900, self.MONO + 900)
+        self.assertEqual(av._frame_wall_ms("D"), self.WALL)
+
+    def test_falls_back_to_now_before_any_frame(self):
+        before = int(time.time() * 1000)
+        self.assertGreaterEqual(av._frame_wall_ms("OTHER"), before)
+
+    def test_classify_records_the_frame_stamp(self):
+        import numpy as np
+
+        class NoDetections:
+            def detect(self, frame):
+                return []
+
+        orig = av._get_detector
+        av._get_detector = lambda: NoDetections()
+        self.addCleanup(setattr, av, "_get_detector", orig)
+        av._latest_frame["D"] = np.zeros((av.DETECT_IMG_SIZE, av.DETECT_IMG_SIZE, 3), np.uint8)
+        av._latest_frame_time["D"] = (self.WALL + 2000, self.MONO + 2000)
+        self.assertEqual(av._classify_frame_detections("D"), [])
+        self.assertEqual(av._analysed_frame_time["D"], (self.WALL + 2000, self.MONO + 2000))
+
+    def test_classify_without_frame_keeps_previous_stamp(self):
+        self.assertEqual(av._classify_frame_detections("D"), [])
+        self.assertEqual(av._analysed_frame_time["D"], (self.WALL, self.MONO))
+
+    def test_best_frame_time_is_frame_time(self):
+        self.delay(300)
+        tr = {}
+        av._capture_best("D", tr, {"score": 0.9, "coord": [1, 2, 3, 4],
+                                   "frame": (0, b"\xff\xd8jpeg\xff\xd9")})
+        self.assertEqual(tr["best"]["wall"], self.WALL - 300)
 
 
 class TestDetectionDedupe(Base):

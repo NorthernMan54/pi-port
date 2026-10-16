@@ -25,7 +25,7 @@ once Flynn is running.
 | --- | --- | --- |
 | Console | `AIPORT_CONSOLE_HOST=192.168.1.1` | the Protect console (Cottage GW) |
 | Detector model | `AIPORT_MODEL_PATH=…/piport/models/yolov5s.onnx` | YOLOv5s on Core ML (~8 ms/frame on M1 Pro): better on small/distant objects than YOLOv5n |
-| Box delay | `AIPORT_BOX_DELAY_MS=3000` | back-dates boxes to their frame time; measured 2.2-3.1 s on the Driveway camera |
+| Box delay | `AIPORT_BOX_DELAY_MS=3000` | back-dates boxes to their frame time; measured 2.2-3.1 s on the Driveway camera **before** frames were stamped on read. Event times now come from each frame's stamp, so re-measure: the residual should be much smaller |
 | Tick rate | default 0.33 s on macOS (`AIPORT_TICK_S`) | matches a G5 Bullet's ~330 ms update rate |
 | Event end | default 3 s with no detection (`AIPORT_MISS_S`) | a G5 Bullet sends `leave` ~2 s after the object leaves |
 | Sleep | `caffeinate -is` | a sleeping Mac drops off the console |

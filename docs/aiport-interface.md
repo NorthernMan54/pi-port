@@ -278,8 +278,9 @@ Key rules:
 - `coord` is `[x, y, w, h]` on a 0–1000 grid of Protect's **16:9 canvas** the height of
   the video. A non-16:9 camera sits centred in it, so boxes are converted before
   sending (`_to_protect`).
-- `clockWall` (and the other clocks) can be back-dated by `AIPORT_BOX_DELAY_MS` so
-  boxes line up with playback.
+- `clockWall` and the other clocks are the analysed frame's time: each frame is stamped
+  when it's read from ffmpeg. `AIPORT_BOX_DELAY_MS` back-dates them further by the
+  remaining relay and decode delay so boxes line up with playback.
 - Protect keeps **one event per camera**, so all tracks share an `eventId`: `enter` on
   the first track, one batched `moving` per tick, one `leave` when the last track ends
   or `eventMaxDurationMSec` expires.

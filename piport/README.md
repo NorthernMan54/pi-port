@@ -208,12 +208,14 @@ so small, fast objects no longer split into a new track every tick. Parked track
 detection that doesn't overlap them (a passing car can't wake one). Reported boxes are
 smoothed (0.6 weight on the newest detection); matching and crops use the raw box.
 
-**Box timing.** Frames reach a check a few seconds after capture (Protect's relay, decode,
-the tick wait), and Protect places boxes in playback by `clockWall`, so boxes lagged the video
-by ~3 s. `AIPORT_BOX_DELAY_MS` back-dates every frame-describing time (`clockWall`, the stream
-clocks, first-shown/idle times, `clockBestWall`) by a delay: `"3000"` for all cameras, or with
-per-camera overrides, e.g. `"2000,AABBCC3344CC=3000"` (a proxied camera has an extra hop).
-Default 0. Tune it by comparing a box's time with the video in playback.
+**Box timing.** Protect places boxes in playback by `clockWall`. Each frame is stamped
+(wall and monotonic time) as it is read from ffmpeg, and every frame-describing time
+(`clockWall`, the stream clocks, first-shown/idle times, `clockBestWall`) comes from the
+analysed frame's stamp, so the tick wait and inference time don't delay boxes. What's left is
+Protect's relay and our decode. `AIPORT_BOX_DELAY_MS` back-dates every such time by that
+residual: `"500"` for all cameras, or with per-camera overrides, e.g.
+`"300,AABBCC3344CC=800"` (a proxied camera has an extra hop). Default 0. Tune it by comparing a
+box's time with the video in playback.
 
 **Events.** Protect keeps one smart-detect event per camera, not per track: the first
 `leave` closes it, and a scheduled check force-ends one left open past ~5.5 minutes without

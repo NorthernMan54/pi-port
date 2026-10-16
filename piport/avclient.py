@@ -174,6 +174,11 @@ SMART_DETECT_ZONE_ID = "1"
 
 # RK3588 NPU YOLOv5s (detector.py); ffmpeg decodes to 640x640 raw RGB, latest frame only.
 _latest_frame = {}   # deviceID -> HxWx3 uint8 numpy array (640x640, RGB)
+# deviceID -> (wall ms, monotonic ms) when _latest_frame was read from ffmpeg.
+_latest_frame_time = {}
+# deviceID -> (wall ms, monotonic ms) of the frame the detector last analysed; every
+# event time describes that frame, not the moment the event is sent.
+_analysed_frame_time = {}
 _frame_lock = threading.Lock()
 _stream_dims = {}    # deviceID -> (width, height) of the real camera stream
 # deviceID -> capacity points of each stream UiStreamControl started. Kept apart from
@@ -261,6 +266,8 @@ def _stop_stream(device_id):
     _stream_started_monotonic_ms.pop(device_id, None)
     with _frame_lock:
         _latest_frame.pop(device_id, None)
+        _latest_frame_time.pop(device_id, None)
+        _analysed_frame_time.pop(device_id, None)
 
 
 # One ffmpeg pulls RTSP and splits post-decode into a JPEG snapshot and 640x640
@@ -303,9 +310,13 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
                 buf = proc.stdout.read(frame_bytes)
                 if len(buf) < frame_bytes:
                     break
+                # Stamp the frame as it leaves ffmpeg: events describe this moment, not
+                # the later tick that analyses it.
+                stamp = _now_ms()
                 frame = np.frombuffer(buf, dtype=np.uint8).reshape((size, size, 3))
                 with _frame_lock:
                     _latest_frame[device_id] = frame
+                    _latest_frame_time[device_id] = stamp
         except Exception:
             log.exception("frame reader crashed for deviceID=%s", device_id)
         rc = proc.wait()
@@ -404,6 +415,8 @@ def _classify_frame_detections(device_id):
     [] if none."""
     with _frame_lock:
         frame = _latest_frame.get(device_id)
+        if frame is not None:
+            _analysed_frame_time[device_id] = _latest_frame_time.get(device_id) or _now_ms()
     if frame is None:
         return []
     try:
@@ -1532,9 +1545,10 @@ def _parse_box_delay(spec):
     return default, per
 
 
-# Frames reach a check seconds after capture (Protect's relay, decode, the tick wait), and
-# Protect places boxes in playback by clockWall, so boxes lagged the video by ~3 s. Every
-# frame-describing time is back-dated by this per-camera delay (default 0 = unchanged).
+# Protect places boxes in playback by clockWall. Event times come from when the analysed
+# frame left ffmpeg, so the tick wait and inference no longer delay them; what's left is
+# Protect's relay and our decode. This per-camera delay back-dates every frame-describing
+# time by that remainder (default 0 = unchanged).
 _BOX_DELAY_DEFAULT_MS, _BOX_DELAY_MS = _parse_box_delay(os.environ.get("AIPORT_BOX_DELAY_MS"))
 
 
@@ -1542,9 +1556,22 @@ def _box_delay_ms(device_id):
     return _BOX_DELAY_MS.get(str(device_id).upper(), _BOX_DELAY_DEFAULT_MS)
 
 
+def _now_ms():
+    """(wall ms, monotonic ms) right now."""
+    return int(time.time() * 1000), int(time.monotonic() * 1000)
+
+
+def _frame_time(device_id):
+    """(wall ms, monotonic ms) when the analysed frame was read from ffmpeg; now if no
+    frame has been analysed yet."""
+    with _frame_lock:
+        stamp = _analysed_frame_time.get(device_id)
+    return stamp or _now_ms()
+
+
 def _frame_wall_ms(device_id):
-    """Wall-clock ms of the frame being processed now (now minus the camera's delay)."""
-    return int(time.time() * 1000) - _box_delay_ms(device_id)
+    """Wall-clock ms of the analysed frame, minus the camera's residual delay."""
+    return _frame_time(device_id)[0] - _box_delay_ms(device_id)
 
 
 def _stream_clocks(device_id):
@@ -1559,7 +1586,7 @@ def _stream_clocks(device_id):
     started = _stream_started_monotonic_ms.get(device_id)
     if started is None:
         return 0, 0
-    mono = max(0, int(time.monotonic() * 1000) - started - _box_delay_ms(device_id))
+    mono = max(0, _frame_time(device_id)[1] - started - _box_delay_ms(device_id))
     return mono, mono
 
 

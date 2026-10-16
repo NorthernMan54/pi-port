@@ -60,13 +60,17 @@ _stream_restart_count = {}
 # clockMonotonic/clockStream on that device's EventSmartDetect payloads.
 _stream_started_monotonic_ms = {}
 
-# Hardware video decode (AIPORT_HWDEC=auto|rkmpp|v4l2m2m|none): rkmpp on the RK3588,
-# v4l2m2m on a Pi 4 (/dev/video10 + /dev/vchiq); else software.
+# Hardware video decode (AIPORT_HWDEC=auto|rkmpp|v4l2m2m|videotoolbox|none): rkmpp on the
+# RK3588, v4l2m2m on a Pi 4 (/dev/video10 + /dev/vchiq), videotoolbox on macOS; else software.
 FFMPEG_BIN = ("/usr/local/ffmpeg-rkmpp/bin/ffmpeg"
               if os.path.exists("/usr/local/ffmpeg-rkmpp/bin/ffmpeg") else "ffmpeg")
+# Backend -> codec -> ffmpeg input args. VideoToolbox is a hwaccel on ffmpeg's own decoder
+# (frames come back to system memory for the filters): ~4x less CPU than software HEVC.
+# HEVC only: on a Protect-relayed H.264 stream it failed ~14 pictures in 20 s (software: 0).
 _HWDEC_BACKENDS = {
-    "rkmpp": {"h264": "h264_rkmpp", "hevc": "hevc_rkmpp"},
-    "v4l2m2m": {"h264": "h264_v4l2m2m", "hevc": "hevc_v4l2m2m"},
+    "rkmpp": {"h264": ["-c:v", "h264_rkmpp"], "hevc": ["-c:v", "hevc_rkmpp"]},
+    "v4l2m2m": {"h264": ["-c:v", "h264_v4l2m2m"], "hevc": ["-c:v", "hevc_v4l2m2m"]},
+    "videotoolbox": {"hevc": ["-hwaccel", "videotoolbox"]},
 }
 _FFPROBE_BIN = os.path.join(os.path.dirname(FFMPEG_BIN), "ffprobe") \
     if FFMPEG_BIN != "ffmpeg" and os.path.exists(os.path.join(os.path.dirname(FFMPEG_BIN), "ffprobe")) \
@@ -95,6 +99,8 @@ def _detect_hwdec():
     # Pi 4 only (flaky under load); the Pi 5 has no H.264 hardware decoder.
     if _is_pi4() and os.path.exists("/dev/video10") and os.path.exists("/dev/vchiq"):
         return "v4l2m2m"
+    if sys.platform == "darwin":
+        return "videotoolbox"
     return None
 
 
@@ -117,8 +123,7 @@ def _hwdec_args(codec):
     backend = _detect_hwdec()
     if not backend:
         return []
-    dec = _HWDEC_BACKENDS[backend].get(codec or "h264")
-    return ["-c:v", dec] if dec else []
+    return list(_HWDEC_BACKENDS[backend].get(codec or "h264", []))
 
 # Real detection: per-tick YOLOv5s/RKNN classify the latest frame; objects are
 # IOU-tracked per objectType with their own trackerID/eventId and enter/move/leave.

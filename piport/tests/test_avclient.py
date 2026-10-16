@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -1041,6 +1042,26 @@ class HwDecoderSelection(unittest.TestCase):
         self.assertEqual(av._hwdec_args("h264"), ["-c:v", "h264_v4l2m2m"])
         self.assertEqual(av._hwdec_args("hevc"), ["-c:v", "hevc_v4l2m2m"])
         self.assertEqual(av._hwdec_args("mjpeg"), [])
+
+    def test_videotoolbox(self):
+        os.environ["AIPORT_HWDEC"] = "videotoolbox"
+        self.assertEqual(av._hwdec_args("hevc"), ["-hwaccel", "videotoolbox"])
+        # H.264 stays software: VideoToolbox dropped pictures on a relayed stream.
+        self.assertEqual(av._hwdec_args("h264"), [])
+        self.assertEqual(av._hwdec_args(None), [])
+        self.assertEqual(av._hwdec_args("mjpeg"), [])
+
+    def test_auto_on_macos_is_videotoolbox(self):
+        os.environ.pop("AIPORT_HWDEC", None)
+        with mock.patch.object(av.sys, "platform", "darwin"), \
+                mock.patch.object(av, "_is_pi4", return_value=False):
+            self.assertEqual(av._hwdec_args("hevc"), ["-hwaccel", "videotoolbox"])
+
+    def test_auto_on_plain_linux_is_software(self):
+        os.environ.pop("AIPORT_HWDEC", None)
+        with mock.patch.object(av.sys, "platform", "linux"), \
+                mock.patch.object(av, "_is_pi4", return_value=False):
+            self.assertEqual(av._hwdec_args("h264"), [])
 
     def test_none_is_software(self):
         os.environ["AIPORT_HWDEC"] = "none"

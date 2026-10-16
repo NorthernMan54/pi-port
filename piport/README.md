@@ -149,9 +149,11 @@ python3 scripts/fetch_models.py --convert  # build .rknn (x86 host)
 For a containerized CPU install (x86 servers / Raspberry Pi 4/5) see `docker/README.md`.
 
 **Video decode** picks a hardware backend automatically, or by `AIPORT_HWDEC`
-(`auto`|`rkmpp`|`v4l2m2m`|`none`): `rkmpp` on the RK3588 (ffmpeg-rockchip), `v4l2m2m`
+(`auto`|`rkmpp`|`v4l2m2m`|`videotoolbox`|`none`): `rkmpp` on the RK3588 (ffmpeg-rockchip), `v4l2m2m`
 on a **Raspberry Pi 4 only** (BCM2711; the bcm2835-codec decoder at `/dev/video10`,
-which also needs `/dev/vchiq`), else software. The **Pi 5 has no H.264 hardware
+which also needs `/dev/vchiq`), `videotoolbox` on **macOS** for HEVC (`-hwaccel videotoolbox`; on an
+M2 a 2688x1512 HEVC camera took ~5% of a core instead of ~21%; H.264 stays software, as
+VideoToolbox dropped pictures on a Protect-relayed H.264 stream), else software. The **Pi 5 has no H.264 hardware
 decoder** (HEVC only), so it always software-decodes H.264 -- and its CPU does that
 faster than the Pi 4's hardware block. See `docker/README.md` and `implementation.md`
 for the measured numbers and the known Pi 4 decoder limits.

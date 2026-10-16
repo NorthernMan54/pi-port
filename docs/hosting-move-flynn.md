@@ -28,6 +28,7 @@ once Flynn is running.
 | Box delay | `AIPORT_BOX_DELAY_MS=3000` | back-dates boxes to their frame time; measured 2.2-3.1 s on the Driveway camera |
 | Tick rate | default 0.33 s on macOS (`AIPORT_TICK_S`) | matches a G5 Bullet's ~330 ms update rate |
 | Event end | default 3 s with no detection (`AIPORT_MISS_S`) | a G5 Bullet sends `leave` ~2 s after the object leaves |
+| Video decode | VideoToolbox for HEVC cameras, the default on macOS (`AIPORT_HWDEC`) | ~4x less CPU per camera; H.264 (Driveway) stays software |
 | Sleep | `caffeinate -is` | a sleeping Mac drops off the console |
 
 ## Steps

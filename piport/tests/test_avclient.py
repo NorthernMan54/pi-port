@@ -367,8 +367,9 @@ class TestCameraEvent(Base):
         self.addCleanup(av._motion_state.pop, "D", None)
         self.addCleanup(av._event_max_ms.pop, "D", None)
         # MIN_HITS has its own tests; the rest open on their first frame, as before.
+        # TestCameraEventNorfair runs these again with Norfair.
         for name, value in (("LEAVE_FALLBACK_S", 3600), ("STARTUP_WINDOW_MS", -1),
-                            ("MIN_HITS", 1)):
+                            ("MIN_HITS", 1), ("TRACKER", "builtin")):
             patcher = mock.patch.object(av, name, value)  # start outside the startup window
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -1695,6 +1696,36 @@ class TestMotionGateDefault(unittest.TestCase):
     @unittest.skipIf("AIPORT_MOTION_GATE" in os.environ, "set in the environment")
     def test_on_everywhere(self):
         self.assertTrue(av.MOTION_GATE)
+
+
+
+try:
+    import norfair  # noqa: F401
+except ImportError:
+    norfair = None
+
+
+@unittest.skipIf(norfair is None, "norfair not installed")
+class TestCameraEventNorfair(TestCameraEvent):
+    """Every camera-event test again, with Norfair deciding which detection is which track."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(av, "TRACKER", "norfair")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_two_people_crossing_keep_their_ids(self):
+        # The built-in matcher swaps them where their boxes overlap at 20+ units a frame;
+        # Norfair's motion prediction carries each one through.
+        steps = 24
+        for i in range(steps):
+            a = dict(self.PERSON, coord=[200 + i * 20, 300, 40, 120])
+            b = dict(self.PERSON, coord=[200 + (steps - 1 - i) * 20, 305, 40, 120])
+            self.tick(a, b)
+            tracks = av._motion_state["D"]["tracks"]
+            self.assertEqual(tracks[1]["coord"][0], a["coord"][0])
+            self.assertEqual(tracks[2]["coord"][0], b["coord"][0])
 
 
 class TestFrameJpegs(unittest.TestCase):

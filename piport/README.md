@@ -270,6 +270,19 @@ changed on two checks in a row, or drifted, does it rejoin as moving. Otherwise 
 back to where it parked. On the doorbell, boxes on a parked car shrinking onto its lower half
 had counted as the car moving.
 
+**Matching with Norfair** (`norfair_match.py`, after Frigate's `norfair_tracker.py`, MIT;
+`AIPORT_TRACKER`, default `norfair` when the package is installed, else `builtin`). One
+Norfair tracker (BSD-3-Clause, Kalman-filtered) per object type, with Frigate's distance
+(bottom-centre offset relative to size, plus width and height change) and limits, decides
+which detection belongs to which track; pi-port's own track state (confirmation, parking,
+events, miss tolerance) is unchanged. On top: a parked object's repeated box is its own; a
+parked track only takes a box overlapping its spot; and what Norfair leaves, parked tracks
+take by overlap and moving tracks by the nearest detection where their motion predicts them
+(the built-in rules below). Two people crossing kept their IDs where the built-in matcher
+swapped them. Install it without its dependency pins, which would downgrade numpy below 2
+(OpenCV 5 and onnxruntime need 2): `venv/bin/pip install scipy` then
+`venv/bin/pip install --no-deps norfair==2.3.0 "filterpy>=1.4.5,<2"`.
+
 **Tracking.** Detections match tracks by box overlap; a moving track no box overlaps takes
 the nearest same-type detection near where its last movement predicts it (within 3x its size),
 so small, fast objects no longer split into a new track every tick. Parked tracks never take a

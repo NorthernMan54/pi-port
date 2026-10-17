@@ -182,6 +182,22 @@ NN_DIST_FACTOR = 3.0
 NN_DIST_MARGIN = 30
 # Min IOU (same objectType) to match a detection to an existing track.
 IOU_MATCH_THRESHOLD = 0.3
+# Which detection belongs to which track (AIPORT_TRACKER): "norfair", Frigate's Kalman-filtered
+# Norfair tracker (norfair_match.py) with pi-port's parked and fast-mover rules for what it
+# leaves, or "builtin", IoU then the nearest detection where a track's motion predicts it.
+# Default: norfair when the package is installed (two people crossing kept their IDs where
+# the built-in matcher swapped them), else builtin.
+TRACKER = (os.environ.get("AIPORT_TRACKER") or "").strip().lower()
+if TRACKER in ("", "norfair"):
+    try:
+        import norfair  # noqa: F401
+        TRACKER = "norfair"
+    except ImportError:
+        if TRACKER == "norfair":
+            log.warning("AIPORT_TRACKER=norfair but the norfair package isn't installed; "
+                        "using the built-in matcher")
+        TRACKER = "builtin"
+
 # A track is a true positive once the median of its last SCORE_HISTORY scores (0.0 for each
 # analysed frame it was missed in) reaches AIPORT_TRUE_THRESH -- Frigate's false-positive
 # filter (frigate/track/tracked_object.py, MIT). Every detection already needs
@@ -679,19 +695,19 @@ def _detect_regions(device_id, detector, frame):
     shape = frame.shape
     now = time.monotonic()
     with _motion_lock:
-        tracks = list(((_motion_state.get(device_id) or {}).get("tracks") or {}).values())
+        tracks = list(((_motion_state.get(device_id) or {}).get("tracks") or {}).items())
     det = _motion_detectors.get(device_id)
     motion = [] if det is None or det.is_calibrating() else list(_motion_boxes.get(device_id, []))
     recheck = now - _last_parked_check.get(device_id, 0.0) >= PARKED_RECHECK_S
     if recheck:
         _last_parked_check[device_id] = now
     object_boxes, seeded = [], []
-    for tr in tracks:
+    for tid, tr in tracks:
         box = _coord_px(tr["coord"], shape)
         if tr.get("stationary_coord") and not recheck and not regions.intersects_any(box, motion):
             # Its parked spot, not its last box: repeating a recheck's slightly different box
             # for seconds counted as the object moving.
-            seeded.append((tr, _coord_px(tr["stationary_coord"], shape)))
+            seeded.append((tid, tr, _coord_px(tr["stationary_coord"], shape)))
         else:
             object_boxes.append(box)
     found = regions.regions_for(shape, object_boxes)
@@ -708,9 +724,9 @@ def _detect_regions(device_id, detector, frame):
                              box=(bx1 + x1, by1 + y1, bx2 + x1, by2 + y1)))
     out = regions.reduce_detections(shape, dets)
     out.sort(key=lambda r: -r["score"])
-    for tr, box in seeded:
+    for tid, tr, box in seeded:
         out.append({"objectType": tr["objectType"], "label": None, "score": tr["score"],
-                    "box": box, "seeded": True})
+                    "box": box, "seeded": tid})
     return out
 
 
@@ -742,7 +758,7 @@ def _classify_frame_detections(device_id):
         if r.get("seeded"):
             # A parked object not re-detected this frame keeps its last box (Frigate).
             out.append({"objectType": r["objectType"], "score": r["score"], "coord": coord,
-                        "seeded": True})
+                        "seeded": r["seeded"]})
             continue
         if _is_excluded(device_id, coord):
             log.info("real motion tick: %s detection excluded by configured excludeZones for "
@@ -1434,6 +1450,106 @@ def _moved_since(tr):
     return tr["moved_ticks"] >= STATIONARY_RESUME_TICKS
 
 
+def _builtin_match(tracks, detections):
+    """(matches {tracker_id: detection index}, unclaimed indices): each track takes its
+    best remaining same-type detection by IoU, then still-unmatched moving tracks take the
+    nearest detection where their motion predicts them (parked tracks don't, so a passing
+    car can't wake one)."""
+    unclaimed = list(range(len(detections)))
+    # IOU only disambiguates multiple same-type candidates; with one track and one
+    # detection, match unconditionally.
+    type_track_count = collections.Counter(tr["objectType"] for tr in tracks.values())
+    type_detect_count = collections.Counter(d["objectType"] for d in detections)
+    matches = {}
+    for tracker_id, tr in tracks.items():
+        # One track + one detection of a type match unconditionally -- except a parked
+        # track, which a different object passing by mustn't take over.
+        unambiguous = (type_track_count[tr["objectType"]] == 1
+                        and type_detect_count[tr["objectType"]] == 1
+                        and not tr.get("stationary_coord"))
+        best_idx, best_iou = None, (-1.0 if unambiguous else IOU_MATCH_THRESHOLD)
+        for idx in unclaimed:
+            d = detections[idx]
+            if d["objectType"] != tr["objectType"]:
+                continue
+            iou = _iou(tr["coord"], d["coord"])
+            if iou > best_iou:
+                best_idx, best_iou = idx, iou
+        if best_idx is not None:
+            matches[tracker_id] = best_idx
+            unclaimed.remove(best_idx)
+    for tracker_id, tr in sorted(tracks.items(), key=lambda m: m[1]["miss_count"]):
+        if tracker_id in matches or tr.get("stationary_coord"):
+            continue
+        idx = _nearest_detection(tr, detections, unclaimed)
+        if idx is not None:
+            matches[tracker_id] = idx
+            unclaimed.remove(idx)
+
+    return matches, unclaimed
+
+
+def _norfair_match(dev, tracks, detections):
+    """(matches, unclaimed, pending) with Norfair first: a detection associated with an
+    object that maps to a live track matches it, except that a parked track only takes a
+    box overlapping its parked spot (a passing car mustn't take over a parked one). Then
+    pi-port's own rules for what Norfair left: parked tracks by IoU, moving tracks by the
+    nearest detection where their motion predicts them (a small person moving 3x their width
+    between frames is past Norfair's distance limit). pending {index: Norfair id} binds each
+    Norfair object to the track its detection ends up in."""
+    import norfair_match
+    nf = dev.get("norfair")
+    if nf is None:
+        nf = dev["norfair"] = norfair_match.Matcher(PARKED_MISS_TOLERANCE_TICKS)
+    ids = dev.setdefault("norfair_ids", {})
+    for gid in [g for g, tid in ids.items() if tid not in tracks]:
+        del ids[gid]
+    associated = nf.match(detections)
+    matches = {}
+    # A parked object's repeated box is its own (two overlapping parked boxes on one camper
+    # mustn't trade places through Norfair).
+    for idx, d in enumerate(detections):
+        tid = d.get("seeded")
+        if tid in tracks and tid not in matches:
+            matches[tid] = idx
+            if idx in associated:
+                ids[associated[idx]] = tid
+    for idx, gid in associated.items():
+        if idx in matches.values():
+            continue
+        tid = ids.get(gid)
+        tr = tracks.get(tid)
+        if tr is None or tid in matches:
+            continue
+        if (tr.get("stationary_coord")
+                and _iou(tr["stationary_coord"], detections[idx]["coord"]) < IOU_MATCH_THRESHOLD):
+            del ids[gid]  # Norfair moved this object onto another one: the parked track lets go
+            continue
+        matches[tid] = idx
+    unclaimed = [i for i in range(len(detections)) if i not in set(matches.values())]
+    for tid, tr in tracks.items():
+        if tid in matches:
+            continue
+        idx = None
+        if tr.get("stationary_coord"):
+            best = IOU_MATCH_THRESHOLD
+            for i in unclaimed:
+                d = detections[i]
+                if d["objectType"] == tr["objectType"]:
+                    iou = _iou(tr["stationary_coord"], d["coord"])
+                    if iou >= best:
+                        idx, best = i, iou
+        else:
+            idx = _nearest_detection(tr, detections, unclaimed)
+        if idx is not None:
+            matches[tid] = idx
+            unclaimed.remove(idx)
+            if idx in associated:
+                ids[associated[idx]] = tid
+    pending = {i: associated[i] for i in unclaimed if i in associated}
+    return matches, unclaimed, pending
+
+
 def _frame_gray(device_id):
     """This frame in grayscale (detector-frame pixels), or None without one or OpenCV."""
     with _frame_lock:
@@ -1517,39 +1633,13 @@ def _motion_tick(ws, device_id):
         unclaimed = list(range(len(detections)))
         joining = []  # tracks that start (or resume) taking part in the event this tick
 
-        # IOU only disambiguates multiple same-type candidates; with one track and one
-        # detection, match unconditionally.
-        type_track_count = collections.Counter(tr["objectType"] for tr in tracks.values())
-        type_detect_count = collections.Counter(d["objectType"] for d in detections)
-
-        # 1. Match each track to its best remaining same-type detection by IOU, then let
-        #    still-unmatched moving tracks take the nearest detection where their motion
-        #    predicts them (parked tracks don't, so a passing car can't wake one).
-        matches = {}
-        for tracker_id, tr in tracks.items():
-            # One track + one detection of a type match unconditionally -- except a parked
-            # track, which a different object passing by mustn't take over.
-            unambiguous = (type_track_count[tr["objectType"]] == 1
-                            and type_detect_count[tr["objectType"]] == 1
-                            and not tr.get("stationary_coord"))
-            best_idx, best_iou = None, (-1.0 if unambiguous else IOU_MATCH_THRESHOLD)
-            for idx in unclaimed:
-                d = detections[idx]
-                if d["objectType"] != tr["objectType"]:
-                    continue
-                iou = _iou(tr["coord"], d["coord"])
-                if iou > best_iou:
-                    best_idx, best_iou = idx, iou
-            if best_idx is not None:
-                matches[tracker_id] = best_idx
-                unclaimed.remove(best_idx)
-        for tracker_id, tr in sorted(tracks.items(), key=lambda m: m[1]["miss_count"]):
-            if tracker_id in matches or tr.get("stationary_coord"):
-                continue
-            idx = _nearest_detection(tr, detections, unclaimed)
-            if idx is not None:
-                matches[tracker_id] = idx
-                unclaimed.remove(idx)
+        # 1. Which detection belongs to which track: Norfair (AIPORT_TRACKER=norfair) or
+        #    the built-in IoU + nearest-neighbour matcher.
+        if TRACKER == "norfair":
+            matches, unclaimed, pending_ids = _norfair_match(dev, tracks, detections)
+        else:
+            matches, unclaimed = _builtin_match(tracks, detections)
+            pending_ids = {}
 
         for tracker_id, tr in list(tracks.items()):
             if tracker_id in matches:
@@ -1641,6 +1731,8 @@ def _motion_tick(ws, device_id):
             if resumed:
                 tracker_id, tr, how = resumed
                 tracks[tracker_id] = tr
+                if idx in pending_ids:
+                    dev["norfair_ids"][pending_ids[idx]] = tracker_id
                 _follow(tr, d["coord"])
                 tr["score"] = d["score"]
                 tr["miss_count"] = 0
@@ -1661,6 +1753,8 @@ def _motion_tick(ws, device_id):
                 continue
             tracker_id = dev["next_tracker_id"]
             dev["next_tracker_id"] += 1
+            if idx in pending_ids:
+                dev["norfair_ids"][pending_ids[idx]] = tracker_id
             tracks[tracker_id] = {"objectType": d["objectType"],
                                   "coord": d["coord"], "score": d["score"],
                                   "first_shown_ms": now_ms, "seen_ms": now_ms, "miss_count": 0,

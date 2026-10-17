@@ -54,22 +54,25 @@ def probe_size(path):
         return None
 
 
-def clip_frames(av, path):
-    """Detector frames of the clip, exactly as a live camera produces them."""
-    size = av.DETECT_IMG_SIZE
+def clip_frames(av, path, width=None, height=None):
+    """Detector frames of the clip, exactly as a live camera produces them (width/height:
+    the stream's size, which sets the detector frame's shape when regions are on)."""
+    if not (width and height):
+        width, height = probe_size(path) or (None, None)
+    det_w, det_h = av._detect_dims(width, height)
     cmd = [av.FFMPEG_BIN, "-loglevel", "error", "-i", path,
-           "-filter_complex", av._detect_filter_graph(size),
+           "-filter_complex", av._detect_filter_graph(det_w, det_h),
            "-map", "[jpg]", "-f", "null", os.devnull,
            "-map", "[det]", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
     import numpy as np
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-    frame_bytes = size * size * 3
+    frame_bytes = det_w * det_h * 3
     try:
         while True:
             buf = proc.stdout.read(frame_bytes)
             if len(buf) < frame_bytes:
                 break
-            yield np.frombuffer(buf, dtype=np.uint8).reshape((size, size, 3))
+            yield np.frombuffer(buf, dtype=np.uint8).reshape((det_h, det_w, 3))
     finally:
         proc.stdout.close()
         proc.wait()
@@ -117,8 +120,10 @@ def replay(av, frames, settings=None, start_ms=0, settle_s=5.0, startup=False):
                       av._latest_frame_seq, av._latest_frame_time, av._analysed_frame_time,
                       av._detect_zones, av._exclude_zones, av._lines, av._event_start_ms,
                       av._event_max_ms, av._stream_started_monotonic_ms, av._scene_ref,
-                      av._motion_detectors, av._motion_settings, av._motion_boxes):
+                      av._motion_detectors, av._motion_settings, av._motion_boxes,
+                      av._last_parked_check):
             table.pop(DEVICE, None)
+        av._startup_scanned.discard(DEVICE)
     return sent
 
 
@@ -141,6 +146,8 @@ def _run(av, frames, settings, start_ms, settle_s, now):
         av._event_max_ms[DEVICE] = int(motion["eventMaxDurationMSec"])
     av._motion_detectors.pop(DEVICE, None)
     av._motion_settings.pop(DEVICE, None)
+    av._startup_scanned.discard(DEVICE)
+    av._last_parked_check.pop(DEVICE, None)
     av._apply_motion_settings(dict(motion, deviceID=DEVICE))
     av._stream_started_monotonic_ms[DEVICE] = 0
 
@@ -239,7 +246,8 @@ def main(argv=None):
     start_ms = 0
     if settings.get("start"):
         start_ms = int(datetime.fromisoformat(settings["start"]).timestamp() * 1000)
-    sent = replay(av, clip_frames(av, args.clip), settings, start_ms=start_ms,
+    sent = replay(av, clip_frames(av, args.clip, settings.get("width"), settings.get("height")),
+                  settings, start_ms=start_ms,
                   settle_s=args.settle, startup=args.startup)
     if args.json:
         json.dump({"events": summarize(sent), "messages": len(sent)}, sys.stdout, indent=1)

@@ -129,6 +129,13 @@ blends its thresholds for that, and they're copied as they are.
 
 ### Step 5. Region crops at native aspect (item 5): the pipeline change
 
+Done, with RGB frames rather than YUV (simpler; the pipe carries 2.8 MB a frame at 1280x720).
+Found on the recorded Driveway clip and fixed: a single high-scoring crop became an event
+(now 2 hits needed, as Frigate's tracker requires); a parked object repeated a recheck's box
+until it counted as moved (it now repeats its parked box); and a parked camper's pixel anchor
+went stale in moving sun (refreshed at each recheck that finds it in place). Parked-car scores
+on startup crops: doorbell 0.77 and 0.65, Driveway red car 0.63, so `vehicle=0.6` stays for now.
+
 **Frames.** ffmpeg's detection output changes from 640x640 stretched RGB to **YUV420 at a
 detect resolution that keeps the camera's aspect ratio**: the long side is 1280 by default
 (`AIPORT_DETECT_SIZE`), so 1280x720 for Driveway/Backyard and 960x1280 for the portrait

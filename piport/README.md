@@ -324,6 +324,21 @@ Protect's values show: `vehicleType` car/suv/truck/van/bus/motorcycle/bike (COCO
 sent as `car`; `sedan` displayed nothing) and `color`
 red/orange/yellow/green/blue/purple/pink/brown/black/white/gray (silver is sent as `gray`).
 
+**Region detection** (`regions.py`, adapted from Frigate's region code, MIT; on by default on
+macOS, `AIPORT_REGIONS=0` turns it off and is the default on Linux, where the RK3588 NPU model
+is fixed at 640x640). The detector frame keeps the camera's aspect ratio, its long side
+`AIPORT_DETECT_SIZE` (default 1280: 1280x720 for a 16:9 camera, 954x1280 for the portrait
+doorbell), instead of being squeezed into 640x640. The model then runs on square crops, each at
+least its input size (320) and at most the frame's short side: around every tracked object and
+around motion boxes not already covered, clustered as Frigate does. Detections from
+overlapping crops are merged (per-label NMS, a box cut by its crop's edge competes at 0.6, and
+a box mostly inside a bigger same-label box is dropped). The first frame of a stream gets one
+full look (a few crops the frame's height) so parked cars are found without motion. A parked
+object is re-detected every 10 s, or when motion touches it; in between it keeps its parked
+box, and each re-detection that finds it in place refreshes its pixel anchor. A track needs 2
+detections before it can be a true positive, as Frigate's tracker needs 2 hits. A small or
+distant object now reaches the model at close to its native size.
+
 Classification is also **gated by motion** (`motion.py`, adapted from Frigate's
 `improved_motion.py`, MIT): each frame is shrunk to 100 rows of grayscale, contrast-stretched,
 blurred and compared with a running-average background; pixels differing by more than the

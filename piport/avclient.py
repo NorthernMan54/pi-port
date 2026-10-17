@@ -190,6 +190,10 @@ IOU_MATCH_THRESHOLD = 0.3
 # 0.85 and 0.78 on its only two frames.
 SCORE_HISTORY = 10
 DEFAULT_TRUE_THRESH = 0.7
+# ...and only once it has been detected on at least MIN_HITS frames (Frigate's tracker
+# initialises an object after 2+ hits): a car scoring 0.9 on a single region crop became an
+# event on its own, confirmed a second later with nothing else seen.
+MIN_HITS = 2
 
 
 def _parse_true_thresh(spec):
@@ -223,7 +227,9 @@ def _record_score(tr, score):
     history = tr.setdefault("score_history", [])
     history.append(score)
     del history[:-SCORE_HISTORY]
-    if not tr.get("true_positive"):
+    if score > 0:
+        tr["hits"] = tr.get("hits", 0) + 1
+    if not tr.get("true_positive") and tr.get("hits", 0) >= MIN_HITS:
         tr["true_positive"] = statistics.median(history) >= _true_thresh(tr["objectType"])
 
 
@@ -359,6 +365,8 @@ def _stop_stream(device_id):
         _latest_frame_time.pop(device_id, None)
         _analysed_frame_time.pop(device_id, None)
     _motion_detectors.pop(device_id, None)  # a new stream starts a new background
+    _startup_scanned.discard(device_id)
+    _last_parked_check.pop(device_id, None)
 
 
 def _jpeg_end(buf):
@@ -454,10 +462,29 @@ def _frame_jpeg(device_id, seq, timeout=FRAME_JPEG_WAIT_S):
             _frame_cond.wait(left)
 
 
-def _detect_filter_graph(size=DETECT_IMG_SIZE):
+# Region detection (Frigate's): the detector frame keeps the camera's aspect ratio, its long
+# side AIPORT_DETECT_SIZE, and the model runs on square crops around motion and tracks
+# (regions.py). Otherwise the whole frame is squeezed into DETECT_IMG_SIZE x DETECT_IMG_SIZE
+# and detected at once (the Pi/RK3588 NPU path). On by default on macOS.
+REGIONS = os.environ.get("AIPORT_REGIONS", "1" if sys.platform == "darwin" else "0"
+                         ).strip().lower() not in ("0", "false", "no", "off")
+DETECT_SIZE = int(os.environ.get("AIPORT_DETECT_SIZE") or 1280)
+PARKED_RECHECK_S = 10.0  # a parked object is re-detected this often (Frigate: 10 s of frames)
+
+
+def _detect_dims(width=None, height=None):
+    """(width, height) of the detector frame for a stream of this size."""
+    if not REGIONS or not width or not height:
+        return DETECT_IMG_SIZE, DETECT_IMG_SIZE
+    scale = min(1.0, DETECT_SIZE / float(max(width, height)))
+    return (max(2, int(round(width * scale / 2)) * 2), max(2, int(round(height * scale / 2)) * 2))
+
+
+def _detect_filter_graph(width=DETECT_IMG_SIZE, height=None):
     """ffmpeg filter graph for the detection pipeline: [jpg] full-res frames, [det] the same
     frames scaled for the detector. replay.py runs clips through this same graph."""
-    return f"[0:v]fps={DETECT_FPS},split=2[jpg][detin];[detin]scale={size}:{size}[det]"
+    height = height or width
+    return f"[0:v]fps={DETECT_FPS},split=2[jpg][detin];[detin]scale={width}:{height}[det]"
 
 
 # One ffmpeg pulls RTSP and splits post-decode into a full-res JPEG and a 640x640 RGB
@@ -473,7 +500,7 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
     codec = _probe_codec(url)
     hwdec_args = _hwdec_args(codec)
     encode_args = ["-c:v", "mjpeg_rkmpp"] if FFMPEG_BIN != "ffmpeg" else ["-c:v", "mjpeg"]
-    size = DETECT_IMG_SIZE
+    det_w, det_h = _detect_dims(width, height)
     # Plate/face reads use the snapshot file, so refresh it every second when they're on.
     snap_interval = 1.0 if enrich.smart_detect_features() else 2.0
     jpeg_r, jpeg_w = os.pipe()
@@ -483,7 +510,7 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
         # split/fps pipeline it left the rawvideo detection output empty (ffmpeg 8).
         "-flags", "low_delay",
         *hwdec_args, "-i", url,
-        "-filter_complex", _detect_filter_graph(size),
+        "-filter_complex", _detect_filter_graph(det_w, det_h),
         "-map", "[jpg]", *encode_args, "-f", "image2pipe", f"pipe:{jpeg_w}",
         "-map", "[det]", "-pix_fmt", "rgb24", "-f", "rawvideo", "-",
     ]
@@ -497,7 +524,7 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
     _active_streams[device_id] = proc
     # Origin for this device's clockMonotonic/clockStream (ms since the pull began).
     _stream_started_monotonic_ms[device_id] = int(time.monotonic() * 1000)
-    frame_bytes = size * size * 3
+    frame_bytes = det_w * det_h * 3
     jpegs = collections.deque(maxlen=max(2, int(DETECT_FPS * FRAME_JPEG_KEEP_S)))
     with _frame_lock:
         _frame_jpegs[device_id] = jpegs
@@ -531,7 +558,7 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
                 # Stamp the frame as it leaves ffmpeg: events describe this moment, not
                 # the later tick that analyses it.
                 stamp = _now_ms()
-                frame = np.frombuffer(buf, dtype=np.uint8).reshape((size, size, 3))
+                frame = np.frombuffer(buf, dtype=np.uint8).reshape((det_h, det_w, 3))
                 seq += 1
                 with _frame_lock:
                     _latest_frame[device_id] = frame
@@ -639,6 +666,54 @@ def _is_outside_detect_zones(device_id, coord):
     return not any(_point_in_polygon(cx, cy, poly) for poly in polygons)
 
 
+_startup_scanned = set()   # deviceIDs whose detector frame has had its full startup look
+_last_parked_check = {}    # deviceID -> monotonic s when parked objects were last re-detected
+
+
+def _detect_regions(device_id, detector, frame):
+    """Detections for this frame from square regions around motion and tracked objects
+    (Frigate's process_frames), in detector-frame pixels. Parked objects are re-detected
+    every PARKED_RECHECK_S or when motion touches them; otherwise they are passed on as
+    their last box ("seeded"). The first frame of a stream gets a full startup look."""
+    import regions
+    shape = frame.shape
+    now = time.monotonic()
+    with _motion_lock:
+        tracks = list(((_motion_state.get(device_id) or {}).get("tracks") or {}).values())
+    det = _motion_detectors.get(device_id)
+    motion = [] if det is None or det.is_calibrating() else list(_motion_boxes.get(device_id, []))
+    recheck = now - _last_parked_check.get(device_id, 0.0) >= PARKED_RECHECK_S
+    if recheck:
+        _last_parked_check[device_id] = now
+    object_boxes, seeded = [], []
+    for tr in tracks:
+        box = _coord_px(tr["coord"], shape)
+        if tr.get("stationary_coord") and not recheck and not regions.intersects_any(box, motion):
+            # Its parked spot, not its last box: repeating a recheck's slightly different box
+            # for seconds counted as the object moving.
+            seeded.append((tr, _coord_px(tr["stationary_coord"], shape)))
+        else:
+            object_boxes.append(box)
+    found = regions.regions_for(shape, object_boxes)
+    found += regions.regions_for(shape, [b for b in motion if not regions.inside_any(b, found)])
+    if device_id not in _startup_scanned:
+        _startup_scanned.add(device_id)
+        found += regions.startup_regions(shape)
+    dets = []
+    for region in found:
+        x1, y1, x2, y2 = (int(v) for v in region)
+        for r in detector.detect(frame[y1:y2, x1:x2]):
+            bx1, by1, bx2, by2 = r["box"]
+            dets.append(dict(r, label=r.get("label") or r["objectType"], region=region,
+                             box=(bx1 + x1, by1 + y1, bx2 + x1, by2 + y1)))
+    out = regions.reduce_detections(shape, dets)
+    out.sort(key=lambda r: -r["score"])
+    for tr, box in seeded:
+        out.append({"objectType": tr["objectType"], "label": None, "score": tr["score"],
+                    "box": box, "seeded": True})
+    return out
+
+
 def _classify_frame_detections(device_id):
     """Return all qualifying detections for the latest frame as
     {objectType, score, coord} in normalized 0-1000 space, sorted by score;
@@ -652,16 +727,23 @@ def _classify_frame_detections(device_id):
         return []
     try:
         detector = _get_detector()
-        results = detector.detect(frame)
+        results = (_detect_regions(device_id, detector, frame) if REGIONS
+                   else detector.detect(frame))
     except Exception:
         log.exception("classification failed for deviceID=%s", device_id)
         return []
-    # Detector's 640 buffer is a resolution-independent stretch, so scale straight to 0-1000.
-    s = CAMERA_COORD_END / DETECT_IMG_SIZE
+    # Boxes are in detector-frame pixels; coords are 0-1000 on each axis of the image.
+    sx = CAMERA_COORD_END / frame.shape[1]
+    sy = CAMERA_COORD_END / frame.shape[0]
     out = []
     for r in results:
         x1, y1, x2, y2 = r["box"]
-        coord = [max(0, x1 * s), max(0, y1 * s), max(1, (x2 - x1) * s), max(1, (y2 - y1) * s)]
+        coord = [max(0, x1 * sx), max(0, y1 * sy), max(1, (x2 - x1) * sx), max(1, (y2 - y1) * sy)]
+        if r.get("seeded"):
+            # A parked object not re-detected this frame keeps its last box (Frigate).
+            out.append({"objectType": r["objectType"], "score": r["score"], "coord": coord,
+                        "seeded": True})
+            continue
         if _is_excluded(device_id, coord):
             log.info("real motion tick: %s detection excluded by configured excludeZones for "
                       "deviceID=%s (score=%.2f)", r["objectType"], device_id, r["score"])
@@ -744,7 +826,7 @@ def _capture_best(device_id, tr, d):
     time. On leave the thumbnails come from it, not from the frame several seconds after
     the object was last seen (which, for a face, no longer contains it)."""
     best = tr.get("best")
-    if best and d["score"] < best["score"]:
+    if d.get("seeded") or (best and d["score"] < best["score"]):
         return
     mtime, data = d.get("frame") or _read_snapshot(device_id)
     if data is None:
@@ -1373,7 +1455,7 @@ def _coord_px(coord, shape):
     return (x * w / s, y * h / s, (x + bw) * w / s, (y + bh) * h / s)
 
 
-def _anchor_parked(device_id, tracks):
+def _anchor_parked(device_id, tracks, now_ms=0):
     """Give each parked track an anchor crop of its spot, for _parked_spot_unchanged."""
     todo = [tr for tr in tracks.values() if tr.get("stationary_coord") and "pixel_anchor" not in tr]
     if not todo:
@@ -1384,6 +1466,7 @@ def _anchor_parked(device_id, tracks):
     import stationary
     for tr in todo:
         tr["pixel_anchor"] = stationary.anchor(gray, _coord_px(tr["stationary_coord"], gray.shape))
+        tr["anchor_ms"] = now_ms
 
 
 def _parked_spot_unchanged(device_id, tracker_id, tr):
@@ -1478,6 +1561,13 @@ def _motion_tick(ws, device_id):
                     tr["moved"] = True
                 _record_score(tr, d["score"])
                 _update_still(tr, now_ms)
+                if (tr.get("stationary_coord") and not d.get("seeded")
+                        and _iou(d["coord"], tr["stationary_coord"]) >= STILL_IOU
+                        and now_ms - tr.get("anchor_ms", now_ms) >= PARKED_RECHECK_S * 1000):
+                    # Re-detected right where it parked: take a fresh anchor, so slow light
+                    # and shadow changes don't add up to "its spot changed" (a parked camper's
+                    # spot fell to NCC 0.82 over 4 minutes of moving sun, with no shift).
+                    tr.pop("pixel_anchor", None)
                 if tr.get("stationary_coord") and _moved_since(tr):
                     if _parked_spot_unchanged(device_id, tracker_id, tr):
                         # Its boxes moved but its pixels didn't (jitter, a partial box,
@@ -1579,7 +1669,7 @@ def _motion_tick(ws, device_id):
                                   "crossed_lines": {}}
             _record_score(tracks[tracker_id], d["score"])
             tracks[tracker_id]["confirmed"] = starting or (
-                confirm_ms <= 0 and tracks[tracker_id]["true_positive"]
+                confirm_ms <= 0 and tracks[tracker_id].get("true_positive")
                 and d["objectType"] not in CONFIRM_WITH)
             _update_still(tracks[tracker_id], now_ms)
             _merge_extra(tracks[tracker_id], d)
@@ -1693,7 +1783,7 @@ def _motion_tick(ws, device_id):
                     dev["last_report_ms"] = now_ms
 
         # 5. A parked track without a pixel anchor gets one from this frame.
-        _anchor_parked(device_id, tracks)
+        _anchor_parked(device_id, tracks, now_ms)
 
         # Logged only when the frame really changed: with the gate off every frame is
         # classified, and an empty one isn't news.

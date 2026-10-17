@@ -366,7 +366,9 @@ class TestCameraEvent(Base):
         av._motion_state.pop("D", None)
         self.addCleanup(av._motion_state.pop, "D", None)
         self.addCleanup(av._event_max_ms.pop, "D", None)
-        for name, value in (("LEAVE_FALLBACK_S", 3600), ("STARTUP_WINDOW_MS", -1)):
+        # MIN_HITS has its own tests; the rest open on their first frame, as before.
+        for name, value in (("LEAVE_FALLBACK_S", 3600), ("STARTUP_WINDOW_MS", -1),
+                            ("MIN_HITS", 1)):
             patcher = mock.patch.object(av, name, value)  # start outside the startup window
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -529,6 +531,21 @@ class TestCameraEvent(Base):
         self.tick(dict(self.PERSON, score=0.85))
         self.assertEqual(self.events(), [("enter", ["person"], [])])
 
+    def test_one_frame_detection_never_opens_an_event(self):
+        # Live (Driveway replay): a car scoring 0.9 on a single region crop became an event.
+        with mock.patch.object(av, "MIN_HITS", 2):
+            self.tick(dict(self.CAR, score=0.9))
+            for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
+                self.tick(after_ms=int(av.DETECT_INTERVAL_S * 1000))
+        self.assertEqual(self.events(), [])
+
+    def test_second_hit_confirms(self):
+        with mock.patch.object(av, "MIN_HITS", 2):
+            self.tick(dict(self.CAR, score=0.9))
+            self.assertEqual(self.events(), [])
+            self.tick(dict(self.CAR, score=0.85))
+        self.assertEqual(self.events(), [("enter", ["vehicle"], [])])
+
     def test_median_reaching_threshold_confirms(self):
         self.tick(dict(self.PERSON, score=0.6))
         self.tick(dict(self.PERSON, score=0.75))
@@ -551,6 +568,9 @@ class TestCameraEvent(Base):
     def test_sedan_seen_twice_still_makes_its_event(self):
         # Live 14:51 (Driveway): a sedan crossing the far road was detected on 2 frames
         # (0.85, 0.78), less than Protect's 1 s eventStartMSec apart.
+        patcher = mock.patch.object(av, "MIN_HITS", 2)   # the live rule
+        patcher.start()
+        self.addCleanup(patcher.stop)
         clock = self._clock()
         av._event_start_ms["D"] = 1000
         sedan = dict(self.CAR, coord=[160, 49, 103, 76])

@@ -19,6 +19,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import ssl
 import subprocess
 import tempfile
@@ -60,13 +61,17 @@ _stream_restart_count = {}
 # clockMonotonic/clockStream on that device's EventSmartDetect payloads.
 _stream_started_monotonic_ms = {}
 
-# Hardware video decode (AIPORT_HWDEC=auto|rkmpp|v4l2m2m|none): rkmpp on the RK3588,
-# v4l2m2m on a Pi 4 (/dev/video10 + /dev/vchiq); else software.
+# Hardware video decode (AIPORT_HWDEC=auto|rkmpp|v4l2m2m|videotoolbox|none): rkmpp on the
+# RK3588, v4l2m2m on a Pi 4 (/dev/video10 + /dev/vchiq), videotoolbox on macOS; else software.
 FFMPEG_BIN = ("/usr/local/ffmpeg-rkmpp/bin/ffmpeg"
               if os.path.exists("/usr/local/ffmpeg-rkmpp/bin/ffmpeg") else "ffmpeg")
+# Backend -> codec -> ffmpeg input args. VideoToolbox is a hwaccel on ffmpeg's own decoder
+# (frames come back to system memory for the filters): ~4x less CPU than software HEVC.
+# HEVC only: on a Protect-relayed H.264 stream it failed ~14 pictures in 20 s (software: 0).
 _HWDEC_BACKENDS = {
-    "rkmpp": {"h264": "h264_rkmpp", "hevc": "hevc_rkmpp"},
-    "v4l2m2m": {"h264": "h264_v4l2m2m", "hevc": "hevc_v4l2m2m"},
+    "rkmpp": {"h264": ["-c:v", "h264_rkmpp"], "hevc": ["-c:v", "hevc_rkmpp"]},
+    "v4l2m2m": {"h264": ["-c:v", "h264_v4l2m2m"], "hevc": ["-c:v", "hevc_v4l2m2m"]},
+    "videotoolbox": {"hevc": ["-hwaccel", "videotoolbox"]},
 }
 _FFPROBE_BIN = os.path.join(os.path.dirname(FFMPEG_BIN), "ffprobe") \
     if FFMPEG_BIN != "ffmpeg" and os.path.exists(os.path.join(os.path.dirname(FFMPEG_BIN), "ffprobe")) \
@@ -95,6 +100,8 @@ def _detect_hwdec():
     # Pi 4 only (flaky under load); the Pi 5 has no H.264 hardware decoder.
     if _is_pi4() and os.path.exists("/dev/video10") and os.path.exists("/dev/vchiq"):
         return "v4l2m2m"
+    if sys.platform == "darwin":
+        return "videotoolbox"
     return None
 
 
@@ -117,8 +124,7 @@ def _hwdec_args(codec):
     backend = _detect_hwdec()
     if not backend:
         return []
-    dec = _HWDEC_BACKENDS[backend].get(codec or "h264")
-    return ["-c:v", dec] if dec else []
+    return list(_HWDEC_BACKENDS[backend].get(codec or "h264", []))
 
 # Real detection: per-tick YOLOv5s/RKNN classify the latest frame; objects are
 # IOU-tracked per objectType with their own trackerID/eventId and enter/move/leave.
@@ -175,9 +181,35 @@ NN_DIST_FACTOR = 3.0
 NN_DIST_MARGIN = 30
 # Min IOU (same objectType) to match a detection to an existing track.
 IOU_MATCH_THRESHOLD = 0.3
+# A detection opens a track at OPEN_THRESH (AIPORT_OBJ_THRESH, as in detector.py) but an
+# existing track it overlaps (IOU_MATCH_THRESHOLD) stays alive down to KEEP_THRESH
+# (AIPORT_KEEP_THRESH): a car with its hatch open behind people unloading it scored
+# 0.50-0.59 and kept dropping out. Weak boxes never open tracks or take one by distance.
+OPEN_THRESH = float(os.environ.get("AIPORT_OBJ_THRESH", "0.5"))
+KEEP_THRESH = min(OPEN_THRESH, float(os.environ.get("AIPORT_KEEP_THRESH", "0.3")))
+# A same-type detection where a track closed within RESUME_S (AIPORT_RESUME_S) resumes it
+# (IoU >= RESUME_IOU with its last or first box): back into its event while that is still
+# open, or quietly as parked for a vehicle that never moved -- the unloading car came back
+# as a "new" vehicle three times. Moved = centre shifted > RESUME_MOVE_FRACTION of its size.
+RESUME_S = float(os.environ.get("AIPORT_RESUME_S") or 60)
+RESUME_IOU = 0.4
+RESUME_MOVE_FRACTION = 0.25
+RESUME_MAX = 32
+# A person or animal joins an event only once its box has moved (centre shifted by more than
+# RESUME_MOVE_FRACTION of its size): a tree stump on Backyard scored "animal" ~0.5 for a
+# minute at a time without moving. A still one stays a silent unconfirmed track.
+MUST_MOVE = ("person", "animal")
+# A face or plate is only looked for inside a person or vehicle box, so it confirms with
+# that parent (it's seen once per snapshot, too rarely to confirm on its own).
+CONFIRM_WITH = {"face": "person", "licensePlate": "vehicle"}
+INSIDE_PARKED_FRACTION = 0.7
 # Motion/scene gate: skip the classifier on a near-static frame with no open track.
-# AIPORT_MOTION_GATE=0 disables; AIPORT_MOTION_GATE_THRESH tunes (default 0.02).
-MOTION_GATE = os.environ.get("AIPORT_MOTION_GATE", "1").strip().lower() not in ("0", "false", "no", "off")
+# AIPORT_MOTION_GATE=0 disables; AIPORT_MOTION_GATE_THRESH tunes (default 0.02). Off by default
+# on macOS, where a frame costs ~3-8 ms: the gate averages change over the whole frame, so a
+# person walking through Backyard's background (~0.5% of the frame) never reached the detector.
+MOTION_GATE = os.environ.get(
+    "AIPORT_MOTION_GATE", "0" if sys.platform == "darwin" else "1"
+).strip().lower() not in ("0", "false", "no", "off")
 MOTION_GATE_THRESH = float(os.environ.get("AIPORT_MOTION_GATE_THRESH", "0.02"))
 _GATE_STRIDE = 8  # sample every Nth pixel -> 80x80 grayscale for the diff
 # Paired camera's smartDetectZones row id -- zonesStatus's key must match it (not always "1").
@@ -185,12 +217,19 @@ SMART_DETECT_ZONE_ID = "1"
 
 # RK3588 NPU YOLOv5s (detector.py); ffmpeg decodes to 640x640 raw RGB, latest frame only.
 _latest_frame = {}   # deviceID -> HxWx3 uint8 numpy array (640x640, RGB)
+_latest_frame_seq = {}  # deviceID -> number of the frame in _latest_frame (1 = first of the pull)
+# deviceID -> recent (seq, full-res JPEG) of the same frames, numbered alike: a track's best
+# frame is the one it was detected in, not the next snapshot (a passing bus had moved on).
+_frame_jpegs = {}
 # deviceID -> (wall ms, monotonic ms) when _latest_frame was read from ffmpeg.
 _latest_frame_time = {}
 # deviceID -> (wall ms, monotonic ms) of the frame the detector last analysed; every
 # event time describes that frame, not the moment the event is sent.
 _analysed_frame_time = {}
 _frame_lock = threading.Lock()
+_frame_cond = threading.Condition(_frame_lock)  # notified when a frame JPEG arrives
+FRAME_JPEG_KEEP_S = 2.0
+FRAME_JPEG_WAIT_S = 0.5  # how long a detection waits for its frame's JPEG
 _stream_dims = {}    # deviceID -> (width, height) of the real camera stream
 # deviceID -> capacity points of each stream UiStreamControl started. Kept apart from
 # _active_streams, which briefly drops a device while its ffmpeg restarts.
@@ -277,12 +316,109 @@ def _stop_stream(device_id):
     _stream_started_monotonic_ms.pop(device_id, None)
     with _frame_lock:
         _latest_frame.pop(device_id, None)
+        _latest_frame_seq.pop(device_id, None)
+        _frame_jpegs.pop(device_id, None)
         _latest_frame_time.pop(device_id, None)
         _analysed_frame_time.pop(device_id, None)
 
 
-# One ffmpeg pulls RTSP and splits post-decode into a JPEG snapshot and 640x640
-# RGB; decoding twice was wasteful (CPU-side NAL parsing dominates, not the NPU).
+def _jpeg_end(buf):
+    """End offset of the JPEG starting at buf[0], or -1 while it is incomplete. Header
+    segments are skipped by length (a table can hold FF D9); in the scan data 0xFF is
+    byte-stuffed, so there FF D9 is the end marker."""
+    pos = 2
+    while pos + 4 <= len(buf):
+        if buf[pos] != 0xFF:
+            raise ValueError("bad JPEG marker at offset %d" % pos)
+        marker = buf[pos + 1]
+        if marker == 0xFF:  # fill byte
+            pos += 1
+            continue
+        seg = (buf[pos + 2] << 8) | buf[pos + 3]
+        if marker == 0xDA:  # start of scan
+            end = buf.find(b"\xff\xd9", pos + 2 + seg)
+            return -1 if end < 0 else end + 2
+        pos += 2 + seg
+    return -1
+
+
+def _jpeg_frames(stream):
+    """Split ffmpeg's image2pipe MJPEG output into one JPEG per frame."""
+    buf = bytearray()
+    while True:
+        chunk = stream.read1(1 << 16)
+        if not chunk:
+            return
+        buf += chunk
+        while True:
+            start = buf.find(b"\xff\xd8")
+            if start < 0:
+                del buf[:-1]  # the last byte may be the first half of the SOI
+                break
+            if start:
+                del buf[:start]
+            try:
+                end = _jpeg_end(buf)
+            except ValueError:
+                del buf[:2]  # resync on the next SOI
+                continue
+            if end < 0:
+                break
+            yield bytes(buf[:end])
+            del buf[:end]
+
+
+def _tmp_dir():
+    """This instance's scratch folder, inside its own stream dir (one per --state-dir, so
+    AI Ports sharing a host never touch each other's files); emptied at startup. Made on
+    use: macOS's periodic /tmp cleanup can remove it while pi-port runs."""
+    path = os.path.join(_STREAM_DIR, "tmp")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _write_snapshot(path, data):
+    """Replace the camera's snapshot file in one step, so a reader never sees half of it."""
+    fd, tmp = tempfile.mkstemp(suffix=".jpg", dir=_tmp_dir())
+    try:
+        os.fchmod(fd, 0o644)  # mkstemp's 0600; ffmpeg wrote the snapshot world-readable
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        os.remove(tmp)
+        raise
+
+
+def _reset_tmp_dir():
+    """Empty this instance's scratch folder: whatever a crash left there (a half-written
+    snapshot, a crop input) is never needed again."""
+    shutil.rmtree(_tmp_dir(), ignore_errors=True)
+    _tmp_dir()
+
+
+def _frame_jpeg(device_id, seq, timeout=FRAME_JPEG_WAIT_S):
+    """Full-res JPEG of detection frame `seq` (the same decoded frame the detector saw),
+    waiting briefly for the encoder to catch up; None once it is gone or never comes."""
+    deadline = time.monotonic() + timeout
+    with _frame_cond:
+        while True:
+            jpegs = _frame_jpegs.get(device_id) or ()
+            for s, data in jpegs:
+                if s == seq:
+                    return data
+            if jpegs and jpegs[-1][0] >= seq:
+                return None
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return None
+            _frame_cond.wait(left)
+
+
+# One ffmpeg pulls RTSP and splits post-decode into a full-res JPEG and a 640x640 RGB
+# copy of each detection frame; decoding twice was wasteful (CPU-side NAL parsing
+# dominates, not the NPU). Both outputs come after one fps filter, so frame n of
+# each is the same picture.
 def _start_stream(device_id, ip, port, uri, width=None, height=None):
     _stop_stream(device_id)
     os.makedirs(_STREAM_DIR, exist_ok=True)
@@ -291,10 +427,11 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
     out_path = os.path.join(_STREAM_DIR, f"{device_id}.jpg")
     codec = _probe_codec(url)
     hwdec_args = _hwdec_args(codec)
-    encode_args = ["-c:v", "mjpeg_rkmpp"] if FFMPEG_BIN != "ffmpeg" else []
+    encode_args = ["-c:v", "mjpeg_rkmpp"] if FFMPEG_BIN != "ffmpeg" else ["-c:v", "mjpeg"]
     size = DETECT_IMG_SIZE
-    # Plate/face reads use this full-res snapshot, so refresh it every second when they're on.
-    snap_fps = "1" if enrich.smart_detect_features() else "1/2"
+    # Plate/face reads use the snapshot file, so refresh it every second when they're on.
+    snap_interval = 1.0 if enrich.smart_detect_features() else 2.0
+    jpeg_r, jpeg_w = os.pipe()
     cmd = [
         FFMPEG_BIN, "-loglevel", "warning", "-rtsp_transport", "tcp",
         # Low-latency decode (no B-frame reorder delay). Not "-fflags nobuffer": with this
@@ -302,20 +439,46 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
         "-flags", "low_delay",
         *hwdec_args, "-i", url,
         "-filter_complex",
-        f"[0:v]split=2[snapin][detin];"
-        f"[snapin]fps={snap_fps}[snap];[detin]fps={DETECT_FPS},scale={size}:{size}[det]",
-        "-map", "[snap]", *encode_args, "-update", "1", "-y", out_path,
+        f"[0:v]fps={DETECT_FPS},split=2[jpg][detin];[detin]scale={size}:{size}[det]",
+        "-map", "[jpg]", *encode_args, "-f", "image2pipe", f"pipe:{jpeg_w}",
         "-map", "[det]", "-pix_fmt", "rgb24", "-f", "rawvideo", "-",
     ]
     log.info("starting merged RTSP pull for deviceID=%s: %s (codec=%s)", device_id, url, codec)
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                pass_fds=(jpeg_w,))
+    finally:
+        os.close(jpeg_w)
+    jpeg_pipe = os.fdopen(jpeg_r, "rb")
     _active_streams[device_id] = proc
     # Origin for this device's clockMonotonic/clockStream (ms since the pull began).
     _stream_started_monotonic_ms[device_id] = int(time.monotonic() * 1000)
     frame_bytes = size * size * 3
+    jpegs = collections.deque(maxlen=max(2, int(DETECT_FPS * FRAME_JPEG_KEEP_S)))
+    with _frame_lock:
+        _frame_jpegs[device_id] = jpegs
+        _latest_frame_seq.pop(device_id, None)
+
+    def _jpeg_reader():
+        seq, last_write = 0, None
+        try:
+            for data in _jpeg_frames(jpeg_pipe):
+                seq += 1
+                with _frame_cond:
+                    jpegs.append((seq, data))
+                    _frame_cond.notify_all()
+                now = time.monotonic()
+                if last_write is None or now - last_write >= snap_interval:
+                    _write_snapshot(out_path, data)
+                    last_write = now
+        except Exception:
+            log.exception("JPEG reader crashed for deviceID=%s", device_id)
+        finally:
+            jpeg_pipe.close()
 
     def _reader():
         import numpy as np
+        seq = 0
         try:
             while True:
                 buf = proc.stdout.read(frame_bytes)
@@ -325,8 +488,10 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
                 # the later tick that analyses it.
                 stamp = _now_ms()
                 frame = np.frombuffer(buf, dtype=np.uint8).reshape((size, size, 3))
+                seq += 1
                 with _frame_lock:
                     _latest_frame[device_id] = frame
+                    _latest_frame_seq[device_id] = seq
                     _latest_frame_time[device_id] = stamp
         except Exception:
             log.exception("frame reader crashed for deviceID=%s", device_id)
@@ -349,6 +514,7 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
             if device_id not in _active_streams:
                 _start_stream(device_id, ip, port, uri, width, height)
 
+    threading.Thread(target=_jpeg_reader, daemon=True).start()
     threading.Thread(target=_reader, daemon=True).start()
 
 
@@ -426,13 +592,14 @@ def _classify_frame_detections(device_id):
     [] if none."""
     with _frame_lock:
         frame = _latest_frame.get(device_id)
+        seq = _latest_frame_seq.get(device_id)
         if frame is not None:
             _analysed_frame_time[device_id] = _latest_frame_time.get(device_id) or _now_ms()
     if frame is None:
         return []
     try:
         detector = _get_detector()
-        results = detector.detect(frame)
+        results = detector.detect(frame, min_score=KEEP_THRESH)
     except Exception:
         log.exception("classification failed for deviceID=%s", device_id)
         return []
@@ -442,16 +609,18 @@ def _classify_frame_detections(device_id):
     for r in results:
         x1, y1, x2, y2 = r["box"]
         coord = [max(0, x1 * s), max(0, y1 * s), max(1, (x2 - x1) * s), max(1, (y2 - y1) * s)]
+        report = log.info if r["score"] >= OPEN_THRESH else log.debug
         if _is_excluded(device_id, coord):
-            log.info("real motion tick: %s detection excluded by configured excludeZones for "
+            report("real motion tick: %s detection excluded by configured excludeZones for "
                       "deviceID=%s (score=%.2f)", r["objectType"], device_id, r["score"])
             continue
         if _is_outside_detect_zones(device_id, coord):
-            log.info("real motion tick: %s detection outside all configured detection zones for "
+            report("real motion tick: %s detection outside all configured detection zones for "
                       "deviceID=%s (score=%.2f)", r["objectType"], device_id, r["score"])
             continue
         d = {"objectType": r["objectType"], "score": r["score"], "coord": coord}
-        if r["objectType"] == "vehicle" and enrich.vehicle_attrs_enabled():
+        if (r["objectType"] == "vehicle" and r["score"] >= OPEN_THRESH
+                and enrich.vehicle_attrs_enabled()):
             try:
                 attrs = enrich.vehicle_attributes(r.get("label"), frame, coord)
             except Exception:
@@ -460,6 +629,12 @@ def _classify_frame_detections(device_id):
             if attrs:
                 d["extra"] = {"attributes": attrs}
         out.append(d)
+    # The full-res JPEG of this same frame: a track's best frame (and its thumbnail) comes
+    # from it. Without one, _capture_best falls back to the latest snapshot.
+    jpeg = _frame_jpeg(device_id, seq) if out and seq is not None else None
+    if jpeg is not None:
+        for d in out:
+            d["frame"] = (seq, jpeg)
     return out
 
 
@@ -825,6 +1000,58 @@ STARTUP_WINDOW_MS = 15000
 PARK_WHEN_STILL = ("vehicle",)
 
 
+def _center_moved(a, b, frac=RESUME_MOVE_FRACTION):
+    """True if box b's centre is more than `frac` of box a's size from a's centre."""
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    return (abs((bx + bw / 2) - (ax + aw / 2)) > frac * aw
+            or abs((by + bh / 2) - (ay + ah / 2)) > frac * ah)
+
+
+def _inside_parked(tracks, d, frac=INSIDE_PARKED_FRACTION):
+    """tracker_id of a parked same-type track whose box holds >= frac of d's box, or None:
+    a second box on part of a parked car (the doorbell saw one on its lower half) is the
+    same car, not a new vehicle."""
+    x, y, w, h = d["coord"]
+    area = max(1.0, w * h)
+    for tid, tr in tracks.items():
+        if tr["objectType"] != d["objectType"] or not tr.get("stationary_coord"):
+            continue
+        px, py, pw, ph = tr["stationary_coord"]
+        iw = min(x + w, px + pw) - max(x, px)
+        ih = min(y + h, py + ph) - max(y, py)
+        if iw > 0 and ih > 0 and iw * ih / area >= frac:
+            return tid
+    return None
+
+
+def _resume_recent(dev, d, event):
+    """(tracker_id, track, how) of a recently closed track detection d continues, taken out
+    of dev["recent"]; how is "event" (its event is still open) or "parked" (a vehicle that
+    never moved, or was parked). None if d is a new object."""
+    found, best_iou = None, RESUME_IOU
+    for i, (tid, tr, _closed_ms) in enumerate(dev.get("recent", ())):
+        if tr["objectType"] != d["objectType"]:
+            continue
+        iou = max(_iou(tr["coord"], d["coord"]), _iou(tr.get("first_coord") or tr["coord"], d["coord"]))
+        if iou < best_iou:
+            continue
+        if tr.get("stationary_coord"):
+            how = "parked"  # stays in its event's finished list, if it is in one
+        elif event is not None and tr.get("event_id") == event["id"]:
+            how = "event"
+        elif tr["objectType"] in PARK_WHEN_STILL and not tr.get("moved"):
+            how = "parked"
+        else:
+            continue
+        found, best_iou = (i, tid, tr, how), iou
+    if found is None:
+        return None
+    i, tid, tr, how = found
+    del dev["recent"][i]
+    return tid, tr, how
+
+
 def _update_still(tr, now_ms):
     """Advance a track's stillness against its anchor box (detector jitter tolerated)."""
     anchor = tr.get("anchor")
@@ -1044,7 +1271,8 @@ def _motion_tick(ws, device_id):
         detections = []
     else:
         detections = _dedupe_detections(_classify_frame_detections(device_id))
-        detections += _enrich_detections(device_id, detections)
+        detections += _enrich_detections(
+            device_id, [d for d in detections if d["score"] >= OPEN_THRESH])
     with _motion_lock:
         now_ms = _frame_wall_ms(device_id)
         confirm_ms = _confirm_ms(device_id)
@@ -1052,6 +1280,8 @@ def _motion_tick(ws, device_id):
                                                    "started_ms": now_ms})
         tracks = dev["tracks"]
         event = dev.get("event")
+        dev["recent"] = [r for r in dev.get("recent", ())
+                         if now_ms - r[2] <= RESUME_S * 1000][-RESUME_MAX:]
         starting = now_ms - dev.get("started_ms", 0) <= STARTUP_WINDOW_MS  # {"id", "started_ms", "finished": [(tid, tr)]} or None
         unclaimed = list(range(len(detections)))
         joining = []  # tracks that start (or resume) taking part in the event this tick
@@ -1077,6 +1307,11 @@ def _motion_tick(ws, device_id):
                 if d["objectType"] != tr["objectType"]:
                     continue
                 iou = _iou(tr["coord"], d["coord"])
+                if d["score"] < OPEN_THRESH and (iou < IOU_MATCH_THRESHOLD
+                                                 or not tr.get("confirmed", True)):
+                    # A weak box only keeps a confirmed track it overlaps: one kept a
+                    # car hovering at 0.49 unconfirmed for 88 s (2026-10-17 07:08).
+                    continue
                 if iou > best_iou:
                     best_idx, best_iou = idx, iou
             if best_idx is not None:
@@ -1085,7 +1320,8 @@ def _motion_tick(ws, device_id):
         for tracker_id, tr in sorted(tracks.items(), key=lambda m: m[1]["miss_count"]):
             if tracker_id in matches or tr.get("stationary_coord"):
                 continue
-            idx = _nearest_detection(tr, detections, unclaimed)
+            idx = _nearest_detection(tr, detections,
+                                     [i for i in unclaimed if detections[i]["score"] >= OPEN_THRESH])
             if idx is not None:
                 matches[tracker_id] = idx
                 unclaimed.remove(idx)
@@ -1093,9 +1329,28 @@ def _motion_tick(ws, device_id):
         for tracker_id, tr in list(tracks.items()):
             if tracker_id in matches:
                 d = detections[matches[tracker_id]]
+                if tr.get("stationary_coord") and d["score"] < OPEN_THRESH:
+                    # A weak box only keeps a parked track: it neither moves nor wakes it.
+                    # Live 2026-10-17 12:25 (doorbell): weak boxes (0.30-0.43) on one parked
+                    # car walked a track's box onto a part of the car, which counted as
+                    # moving and opened an event three times.
+                    tr["miss_count"] = 0
+                    tr["seen_ms"] = now_ms
+                    continue
                 _follow(tr, d["coord"])
                 tr["score"] = d["score"]
                 tr["miss_count"] = 0
+                if _center_moved(tr.get("first_coord") or d["coord"], d["coord"]):
+                    tr["moved"] = True
+                if d["score"] < OPEN_THRESH:
+                    tr["weak_ticks"] = tr.get("weak_ticks", 0) + 1
+                    (log.info if tr["weak_ticks"] == 1 else log.debug)(
+                        "real motion tick: %s tracker_id=%s kept on sub-threshold score %.2f "
+                        "for deviceID=%s", tr["objectType"], tracker_id, d["score"], device_id)
+                elif tr.get("weak_ticks"):
+                    log.info("real motion tick: %s tracker_id=%s back above %.2f (score %.2f) "
+                             "after %d sub-threshold tick(s) for deviceID=%s", tr["objectType"],
+                             tracker_id, OPEN_THRESH, d["score"], tr.pop("weak_ticks"), device_id)
                 _update_still(tr, now_ms)
                 if tr.get("stationary_coord") and _moved_since(tr):
                     # A stationary object moved again: it rejoins as a fresh participant.
@@ -1113,7 +1368,11 @@ def _motion_tick(ws, device_id):
                 _merge_extra(tr, d)
                 _capture_best(device_id, tr, d)
                 tr["seen_ms"] = now_ms
-                if not tr.get("confirmed", True) and now_ms - tr["first_shown_ms"] >= confirm_ms:
+                # Only a full-strength box confirms: weak ones keep a track, never promote it.
+                if (not tr.get("confirmed", True) and d["score"] >= OPEN_THRESH
+                        and now_ms - tr["first_shown_ms"] >= confirm_ms
+                        and tr["objectType"] not in CONFIRM_WITH
+                        and (tr["objectType"] not in MUST_MOVE or tr.get("moved"))):
                     tr["confirmed"] = True
                     log.info("real motion tick: %s tracker_id=%s confirmed after %d ms, joining "
                              "for deviceID=%s", tr["objectType"], tracker_id,
@@ -1131,7 +1390,7 @@ def _motion_tick(ws, device_id):
                          else MOTION_MISS_TOLERANCE_TICKS)
             if not tr.get("confirmed", True) and tr["miss_count"] >= tolerance:
                 # Gone before it was confirmed: a passing false detection, no event.
-                log.info("real motion tick: unconfirmed %s tracker_id=%s lost, dropped for "
+                (log.info if tr.get("moved") else log.debug)("real motion tick: unconfirmed %s tracker_id=%s lost, dropped for "
                          "deviceID=%s", tr["objectType"], tracker_id, device_id)
                 del tracks[tracker_id]
                 continue
@@ -1150,18 +1409,56 @@ def _motion_tick(ws, device_id):
                 event["finished"].append((tracker_id, tr))  # its snapshot goes in the leave
             _close_line_events(ws, device_id, tracker_id, tr)
             del tracks[tracker_id]
+            tr.pop("weak_ticks", None)
+            dev["recent"].append((tracker_id, tr, now_ms))
 
-        # 2. Any unclaimed detection opens a new track and joins the camera event.
+        # 2. Any unclaimed detection resumes a track that just closed, or opens a new track
+        #    and joins the camera event. Weak ones can do neither.
         for idx in unclaimed:
             d = detections[idx]
+            if d["score"] < OPEN_THRESH:
+                log.debug("real motion tick: sub-threshold %s (score %.2f) matched no track for "
+                          "deviceID=%s -- ignored", d["objectType"], d["score"], device_id)
+                continue
+            part_of = _inside_parked(tracks, d)
+            if part_of is not None:
+                log.debug("real motion tick: %s (score %.2f) lies inside parked tracker_id=%s for "
+                          "deviceID=%s -- part of it, ignored", d["objectType"], d["score"],
+                          part_of, device_id)
+                continue
+            resumed = _resume_recent(dev, d, event)
+            if resumed:
+                tracker_id, tr, how = resumed
+                tracks[tracker_id] = tr
+                _follow(tr, d["coord"])
+                tr["score"] = d["score"]
+                tr["miss_count"] = 0
+                tr["seen_ms"] = now_ms
+                tr["prev_center"] = _protect_center(device_id, d["coord"])
+                _update_still(tr, now_ms)
+                _merge_extra(tr, d)
+                _capture_best(device_id, tr, d)
+                if how == "event":
+                    event["finished"] = [m for m in event["finished"] if m[0] != tracker_id]
+                    joining.append((tracker_id, tr))
+                else:
+                    _park(tr)
+                log.info("real motion tick: %s resumed tracker_id=%s (%s) for deviceID=%s "
+                         "(score=%.2f)", d["objectType"], tracker_id,
+                         "back in its event" if how == "event" else "never moved, parked",
+                         device_id, d["score"])
+                continue
             tracker_id = dev["next_tracker_id"]
             dev["next_tracker_id"] += 1
             tracks[tracker_id] = {"objectType": d["objectType"],
                                   "coord": d["coord"], "score": d["score"],
                                   "first_shown_ms": now_ms, "seen_ms": now_ms, "miss_count": 0,
+                                  "first_coord": list(d["coord"]),
                                   "prev_center": _protect_center(device_id, d["coord"]),
                                   "crossed_lines": {},
-                                  "confirmed": starting or confirm_ms <= 0}
+                                  "confirmed": starting or (
+                                      confirm_ms <= 0 and d["objectType"] not in MUST_MOVE
+                                      and d["objectType"] not in CONFIRM_WITH)}
             _update_still(tracks[tracker_id], now_ms)
             _merge_extra(tracks[tracker_id], d)
             _capture_best(device_id, tracks[tracker_id], d)
@@ -1172,7 +1469,8 @@ def _motion_tick(ws, device_id):
                          "tracker_id=%s", d["objectType"], device_id, tracker_id)
                 continue
             if not tracks[tracker_id]["confirmed"]:
-                log.info("real motion tick: %s detected (score=%.2f), tracker_id=%s waiting %d ms "
+                (log.debug if d["objectType"] in MUST_MOVE or d["objectType"] in CONFIRM_WITH
+                 else log.info)("real motion tick: %s detected (score=%.2f), tracker_id=%s waiting %d ms "
                          "to confirm for deviceID=%s", d["objectType"], d["score"], tracker_id,
                          confirm_ms, device_id)
                 continue
@@ -1191,10 +1489,24 @@ def _motion_tick(ws, device_id):
                 if event is not None and tr.get("event_id") == event["id"]:
                     event["finished"].append((tid, tr))
 
+        # 3b. A face or plate confirms as soon as a confirmed, active track of its parent
+        #     type is there (it was found inside that track's box).
+        for tid, tr in tracks.items():
+            parent = CONFIRM_WITH.get(tr["objectType"])
+            if parent and not tr.get("confirmed", True) and tr["miss_count"] == 0 and any(
+                    p["objectType"] == parent and p.get("confirmed", True)
+                    and not p.get("stationary_coord") for p in tracks.values()):
+                tr["confirmed"] = True
+                log.info("real motion tick: %s tracker_id=%s confirmed with its %s, joining for "
+                         "deviceID=%s", tr["objectType"], tid, parent, device_id)
+                joining.append((tid, tr))
+
         # 4. Camera event lifecycle. Unconfirmed tracks aren't part of it yet.
         active = [(tid, tr) for tid, tr in tracks.items()
                   if not tr.get("stationary_coord") and tr.get("confirmed", True)]
-        if event is None and joining:
+        # A track can join and park in one tick (still since before it was confirmed):
+        # that's a parked car, not an event.
+        if event is None and joining and active:
             event = dev["event"] = {"id": next(_event_id_counter), "started_ms": now_ms,
                                     "finished": []}
             for _, tr in active:
@@ -1209,6 +1521,13 @@ def _motion_tick(ws, device_id):
             timed_out = now_ms - event["started_ms"] >= max_ms
             if not active or timed_out:
                 members = event["finished"] + active
+            if (not active or timed_out) and not members:
+                # Nothing to report (shouldn't happen): close it quietly rather than
+                # failing every frame with the event stuck open.
+                log.warning("smartDetectZone event %s for deviceID=%s has no tracks left; "
+                            "closing it without a leave", event["id"], device_id)
+                dev["event"] = None
+            elif not active or timed_out:
                 lead = _leave_track(members)
                 log.info("smartDetectZone event %s closed for deviceID=%s (%s; %d track(s), "
                          "snapshot from %s tracker_id=%s)", event["id"], device_id,
@@ -1238,7 +1557,10 @@ def _motion_tick(ws, device_id):
                     _send_event_message(ws, device_id, "moving", event["id"], seen)
                     dev["last_report_ms"] = now_ms
 
-        if not detections and not tracks and not gated:
+        # Logged only when the frame really changed: with the gate off every frame is
+        # classified, and an empty one isn't news.
+        if (not any(d["score"] >= OPEN_THRESH for d in detections)
+                and not tracks and not gated and changed):
             # Classified and found nothing = non-smart motion (lighting/noise); ignore.
             log.info("real motion tick: scene changed but no person/vehicle/animal found "
                       "for deviceID=%s -- ignoring (not smart-detect-worthy)", device_id)
@@ -1469,7 +1791,7 @@ def _upload_snapshot(upload_uri, device_info, requested_filename, what=None,
         # The track's best-scoring frame, kept at detection time.
         data = record["jpeg"]
         if record["kind"] == "object" and record["coord"]:
-            fd, best_path = tempfile.mkstemp(suffix=".jpg", dir=_STREAM_DIR)
+            fd, best_path = tempfile.mkstemp(suffix=".jpg", dir=_tmp_dir())
             with os.fdopen(fd, "wb") as f:
                 f.write(data)
     else:
@@ -2338,6 +2660,7 @@ def main():
         # RAM-only handoff; http_api.py derives the same dir from --state-dir.
         _STREAM_DIR = config.stream_dir(args.state_dir)
         STATE_DIR = args.state_dir
+    _reset_tmp_dir()
 
     mac_nosep = config.resolve_mac(args.iface, args.mac, cfg).lower()
     ip = config.resolve_ip(args.iface, cfg, args.bind_ip)

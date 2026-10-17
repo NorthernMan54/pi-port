@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -355,7 +356,9 @@ class TestCameraEvent(Base):
         av._motion_state.pop("D", None)
         self.addCleanup(av._motion_state.pop, "D", None)
         self.addCleanup(av._event_max_ms.pop, "D", None)
-        for name, value in (("LEAVE_FALLBACK_S", 3600), ("STARTUP_WINDOW_MS", -1)):
+        # Most tests use still boxes: the must-move rule has its own tests.
+        for name, value in (("LEAVE_FALLBACK_S", 3600), ("STARTUP_WINDOW_MS", -1),
+                            ("MUST_MOVE", ())):
             patcher = mock.patch.object(av, name, value)  # start outside the startup window
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -416,6 +419,219 @@ class TestCameraEvent(Base):
         for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
             self.tick(self.CAR)
         self.assertEqual(self.events()[-1], ("leave", [], ["face", "person"]))
+
+    def test_weak_score_keeps_an_open_track(self):
+        self.tick(self.CAR)
+        weak = dict(self.CAR, score=av.KEEP_THRESH + 0.05)
+        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS + 2):
+            self.tick(weak)
+        self.assertEqual([e[0] for e in self.events()][-1], "moving")
+        self.assertEqual(len(av._motion_state["D"]["tracks"]), 1)
+
+    def test_weak_score_opens_nothing(self):
+        self.tick(dict(self.CAR, score=av.OPEN_THRESH - 0.05))
+        self.assertEqual(self.events(), [])
+        self.assertEqual(av._motion_state["D"]["tracks"], {})
+
+    def test_weak_box_elsewhere_does_not_take_the_track(self):
+        self.tick(self.CAR)
+        far = dict(self.CAR, score=av.OPEN_THRESH - 0.05, coord=[700, 100, 200, 100])
+        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
+            self.tick(far)
+        self.assertEqual(self.events()[-1][0], "leave")
+
+    def test_weak_box_never_confirms_a_track(self):
+        clock = [0]
+        for target, value in (("_frame_wall_ms", lambda dev: clock[0]),):
+            patcher = mock.patch.object(av, target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        av._event_start_ms["D"] = 1000
+        self.addCleanup(av._event_start_ms.pop, "D", None)
+        self.tick(self.CAR)                                   # waits to confirm
+        clock[0] = 1500
+        self.tick(dict(self.CAR, score=av.KEEP_THRESH + 0.05))  # old enough, but weak
+        self.assertEqual(self.events(), [])
+        clock[0] = 1700
+        self.tick(self.CAR)                                   # full-strength: confirmed
+        self.assertEqual(self.events(), [("enter", ["vehicle"], [])])
+
+    def _clock(self, start=0):
+        clock = [start]
+        patcher = mock.patch.object(av, "_frame_wall_ms", lambda dev: clock[0])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(av._event_start_ms.pop, "D", None)
+        return clock
+
+    def test_weak_boxes_dont_keep_an_unconfirmed_track(self):
+        # Live 2026-10-17 07:08: a car hovering at 0.49 stayed unconfirmed for 88 s.
+        clock = self._clock()
+        av._event_start_ms["D"] = 1000
+        self.tick(self.CAR)
+        weak = dict(self.CAR, score=av.KEEP_THRESH + 0.05)
+        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
+            clock[0] += 100
+            self.tick(weak)
+        self.assertEqual(av._motion_state["D"]["tracks"], {})
+        self.assertEqual(self.events(), [])
+
+    def test_confirmed_and_parked_in_one_tick_opens_nothing(self):
+        # ...then it confirmed and parked in the same tick: an event opened with no
+        # active track, and every later tick crashed closing it.
+        clock = self._clock()
+        av._event_start_ms["D"] = (av.STILL_TICKS + 5) * 100
+        for _ in range(av.STILL_TICKS + 10):
+            self.tick(self.CAR)
+            clock[0] += 100
+        self.tick()
+        self.assertEqual(self.events(), [])
+        self.assertIsNone(av._motion_state["D"].get("event"))
+        self.assertTrue(av._motion_state["D"]["tracks"][1].get("stationary_coord"))
+
+    def test_event_with_no_tracks_closes_quietly(self):
+        self.tick()
+        av._motion_state["D"]["event"] = {"id": 1, "started_ms": 0, "finished": []}
+        self.tick()
+        self.assertIsNone(av._motion_state["D"].get("event"))
+        self.assertEqual(self.events(), [])
+
+    def _park_car(self, car):
+        av._event_max_ms["D"] = 0
+        self.tick(car)
+        self.tick(car)                   # time limit: leave, car parks
+        av._event_max_ms["D"] = 10 ** 9
+        self.sent.clear()
+
+    def test_weak_boxes_dont_walk_a_parked_car_awake(self):
+        # Live 2026-10-17 12:25 (doorbell): weak boxes shrank a parked car's box onto its
+        # lower half, which counted as the car moving.
+        car = dict(self.CAR, coord=[388, 437, 144, 171])
+        self._park_car(car)
+        for box in ([385, 437, 99, 171], [385, 468, 87, 139], [384, 510, 71, 97],
+                    [384, 515, 69, 92]):
+            for _ in range(av.STATIONARY_RESUME_TICKS + 1):
+                self.tick(dict(car, score=av.KEEP_THRESH + 0.05, coord=box))
+        self.assertEqual(self.events(), [])
+        self.assertTrue(av._motion_state["D"]["tracks"][1].get("stationary_coord"))
+
+    def test_box_inside_a_parked_car_is_the_same_car(self):
+        car = dict(self.CAR, coord=[388, 437, 144, 171])
+        self._park_car(car)
+        self.tick(car, dict(car, score=0.6, coord=[390, 515, 69, 92]))
+        self.assertEqual(self.events(), [])
+        self.assertEqual(list(av._motion_state["D"]["tracks"]), [1])
+
+    def test_strong_move_still_wakes_a_parked_car(self):
+        car = dict(self.CAR, coord=[388, 437, 144, 171])
+        self._park_car(car)
+        self.tick(dict(car, coord=[700, 437, 144, 171]))
+        self.assertEqual(self.events(), [("enter", ["vehicle"], [])])
+
+    def _must_move(self):
+        patcher = mock.patch.object(av, "MUST_MOVE", ("person", "animal"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_still_animal_never_opens_an_event(self):
+        # Live 2026-10-17 13:33, 13:54, 14:31 (Backyard): a tree stump scored "animal" ~0.5.
+        self._must_move()
+        stump = {"objectType": "animal", "score": 0.6, "coord": [788, 571, 98, 203]}
+        for _ in range(av.STILL_TICKS + 5):
+            self.tick(dict(stump, coord=[789, 569, 95, 204]))
+        self.assertEqual(self.events(), [])
+
+    def test_moving_animal_opens_an_event(self):
+        self._must_move()
+        cat = {"objectType": "animal", "score": 0.7, "coord": [300, 600, 80, 60]}
+        self.tick(cat)
+        self.assertEqual(self.events(), [])
+        self.tick(dict(cat, coord=[340, 600, 80, 60]))      # moved half its width
+        self.assertEqual(self.events(), [("enter", ["animal"], [])])
+
+    def test_walking_person_still_waits_for_confirm_ms(self):
+        self._must_move()
+        clock = self._clock()
+        av._event_start_ms["D"] = 1000
+        for x in (400, 450, 500):
+            self.tick(dict(self.PERSON, coord=[x, 200, 200, 600]))
+            clock[0] += 400
+        self.assertEqual(self.events(), [])
+        self.tick(dict(self.PERSON, coord=[550, 200, 200, 600]))
+        self.assertEqual(self.events(), [("enter", ["person"], [])])
+
+    def test_face_confirms_with_its_person(self):
+        # Live 13:54:51: a face found once was dropped before it could confirm on its own.
+        clock = self._clock()
+        av._event_start_ms["D"] = 1000
+        self.tick(self.PERSON, self.FACE)
+        for _ in range(5):
+            clock[0] += 300
+            self.tick(self.PERSON)                    # the face isn't re-found every frame
+        self.assertEqual([e[1] for e in self.events()], [["person"]])
+        self.tick(self.PERSON, self.FACE)
+        tracks = av._motion_state["D"]["tracks"]
+        self.assertTrue(all(tr.get("confirmed") for tr in tracks.values()))
+
+    def test_face_alone_never_confirms(self):
+        clock = self._clock()
+        av._event_start_ms["D"] = 1000
+        for _ in range(5):
+            self.tick(self.FACE)
+            clock[0] += 500
+        self.assertEqual(self.events(), [])
+
+    def test_empty_static_frame_is_not_logged(self):
+        with mock.patch.object(av, "MOTION_GATE", False), \
+                mock.patch.object(av, "_scene_changed", lambda dev: False), \
+                self.assertNoLogs(av.log, level="INFO"):
+            self.tick()
+
+    def test_parked_car_flickering_comes_back_quietly(self):
+        # Live 14:57: a car with its hatch open behind people unloading it kept dropping
+        # out; each re-detection joined the next event as another vehicle.
+        hatch = dict(self.CAR, coord=[180, 3, 470, 680])
+        self.tick(self.PERSON, hatch)
+        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
+            self.tick()                                      # all gone: event closes
+        self.assertEqual(self.events()[-1][0], "leave")
+        self.sent.clear()
+        self.tick(self.PERSON, dict(hatch, coord=[177, 1, 472, 743]))
+        self.assertEqual(self.events(), [("enter", ["person"], [])])
+        self.tick(self.PERSON, dict(hatch, coord=[177, 171, 359, 511]))
+        self.assertEqual(self.events()[-1], ("moving", ["person"], []))
+
+    def test_track_dropping_out_rejoins_its_event(self):
+        other = dict(self.PERSON, coord=[700, 200, 150, 500])
+        self.tick(self.PERSON, other)
+        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
+            self.tick(other)                                 # first person's track closes
+        ids = set(av._motion_state["D"]["tracks"])
+        self.tick(self.PERSON, other)                        # ...and comes back
+        self.assertEqual(len(av._motion_state["D"]["tracks"]), 2)
+        self.assertEqual(set(av._motion_state["D"]["tracks"]) - ids, {1})
+        self.assertNotIn(1, [m[0] for m in av._motion_state["D"]["event"]["finished"]])
+
+    def test_moving_car_that_left_is_new_next_time(self):
+        self.tick(self.CAR)
+        self.tick(dict(self.CAR, coord=[200, 500, 200, 100]))   # drove along
+        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
+            self.tick()
+        self.sent.clear()
+        self.tick(dict(self.CAR, coord=[200, 500, 200, 100]))
+        self.assertEqual(self.events(), [("enter", ["vehicle"], [])])
+
+    def test_resume_forgets_after_resume_s(self):
+        hatch = dict(self.CAR, coord=[180, 3, 470, 680])
+        self.tick(self.PERSON, hatch)
+        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
+            self.tick()
+        dev = av._motion_state["D"]
+        dev["recent"] = [(tid, tr, closed - av.RESUME_S * 1000 - 1)
+                         for tid, tr, closed in dev["recent"]]
+        self.sent.clear()
+        self.tick(hatch)
+        self.assertEqual(self.events(), [("enter", ["vehicle"], [])])
 
     def test_occlusion_does_not_wake_parked_car(self):
         # Live 10:27:24: someone walked in front of a parked car; its box narrowed
@@ -799,7 +1015,7 @@ class TestSnapshotUpload(Base):
         self.assertEqual(len(self.posted), 1)
         self.assertTrue(self.posted[0].startswith(b"\xff\xd8"))
         self.assertNotEqual(self.posted[0], best)  # cropped, not the whole frame
-        self.assertFalse([f for f in os.listdir(self._dir) if f.startswith("tmp")])  # temp removed
+        self.assertEqual(os.listdir(os.path.join(self._dir, "tmp")), [])  # temp removed
 
     def test_unknown_ambiguous_refuses(self):
         self._with_stream("AAA", "BBB")
@@ -960,7 +1176,7 @@ class TestFrameTiming(Base):
         import numpy as np
 
         class NoDetections:
-            def detect(self, frame):
+            def detect(self, frame, min_score=None):
                 return []
 
         orig = av._get_detector
@@ -1309,6 +1525,26 @@ class HwDecoderSelection(unittest.TestCase):
         self.assertEqual(av._hwdec_args("hevc"), ["-c:v", "hevc_v4l2m2m"])
         self.assertEqual(av._hwdec_args("mjpeg"), [])
 
+    def test_videotoolbox(self):
+        os.environ["AIPORT_HWDEC"] = "videotoolbox"
+        self.assertEqual(av._hwdec_args("hevc"), ["-hwaccel", "videotoolbox"])
+        # H.264 stays software: VideoToolbox dropped pictures on a relayed stream.
+        self.assertEqual(av._hwdec_args("h264"), [])
+        self.assertEqual(av._hwdec_args(None), [])
+        self.assertEqual(av._hwdec_args("mjpeg"), [])
+
+    def test_auto_on_macos_is_videotoolbox(self):
+        os.environ.pop("AIPORT_HWDEC", None)
+        with mock.patch.object(av.sys, "platform", "darwin"), \
+                mock.patch.object(av, "_is_pi4", return_value=False):
+            self.assertEqual(av._hwdec_args("hevc"), ["-hwaccel", "videotoolbox"])
+
+    def test_auto_on_plain_linux_is_software(self):
+        os.environ.pop("AIPORT_HWDEC", None)
+        with mock.patch.object(av.sys, "platform", "linux"), \
+                mock.patch.object(av, "_is_pi4", return_value=False):
+            self.assertEqual(av._hwdec_args("h264"), [])
+
     def test_none_is_software(self):
         os.environ["AIPORT_HWDEC"] = "none"
         self.assertEqual(av._hwdec_args("hevc"), [])
@@ -1387,6 +1623,159 @@ class MotionGate(unittest.TestCase):
 
     def test_no_frame_is_no_change(self):
         self.assertFalse(av._scene_changed("absent"))
+
+
+def _fake_jpeg(body):
+    """SOI, a table segment holding FF D9, a start-of-scan header, `body`, EOI."""
+    dqt = b"\xff\xdb\x00\x06\x00\xff\xd9\x01"
+    sos = b"\xff\xda\x00\x04\x01\x02"
+    return b"\xff\xd8" + dqt + sos + body + b"\xff\xd9"
+
+
+class _Chunks:
+    """A pipe that hands out its bytes `size` at a time."""
+
+    def __init__(self, data, size):
+        self.data, self.size = data, size
+
+    def read1(self, _n):
+        chunk, self.data = self.data[:self.size], self.data[self.size:]
+        return chunk
+
+
+class TestMotionGateDefault(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin" and "AIPORT_MOTION_GATE" not in os.environ,
+                         "macOS default only")
+    def test_off_on_macos(self):
+        self.assertFalse(av.MOTION_GATE)
+
+
+class TestFrameJpegs(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(av._frame_jpegs.clear)
+        self.addCleanup(av._latest_frame.clear)
+        self.addCleanup(av._latest_frame_seq.clear)
+
+    def test_split_survives_tables_and_chunking(self):
+        a, b = _fake_jpeg(b"\x10\xff\x00\x20"), _fake_jpeg(b"\x30" * 50)
+        for size in (1, 3, 7, 1 << 16):
+            self.assertEqual(list(av._jpeg_frames(_Chunks(b"junk" + a + b, size))), [a, b])
+
+    def test_split_drops_an_unfinished_tail(self):
+        a = _fake_jpeg(b"\x10")
+        self.assertEqual(list(av._jpeg_frames(_Chunks(a + a[:-2], 5))), [a])
+
+    def test_frame_jpeg_finds_its_frame(self):
+        av._frame_jpegs["D"] = [(4, b"four"), (5, b"five")]
+        self.assertEqual(av._frame_jpeg("D", 5, timeout=0), b"five")
+        self.assertIsNone(av._frame_jpeg("D", 3, timeout=0))  # already dropped
+        self.assertIsNone(av._frame_jpeg("absent", 1, timeout=0))
+
+    def test_frame_jpeg_waits_for_a_late_encode(self):
+        jpegs = [(1, b"one")]
+        av._frame_jpegs["D"] = jpegs
+
+        def arrive():
+            time.sleep(0.05)
+            with av._frame_cond:
+                jpegs.append((2, b"two"))
+                av._frame_cond.notify_all()
+
+        threading.Thread(target=arrive).start()
+        self.assertEqual(av._frame_jpeg("D", 2, timeout=2), b"two")
+
+    def test_detections_carry_their_frame(self):
+        import numpy as _np
+        av._latest_frame["D"] = _np.zeros((640, 640, 3), _np.uint8)
+        av._latest_frame_seq["D"] = 7
+        av._frame_jpegs["D"] = [(6, b"six"), (7, b"seven")]
+        det = mock.Mock()
+        det.detect.return_value = [{"objectType": "person", "score": 0.9, "label": "person",
+                                    "box": [10, 10, 100, 200]}]
+        with mock.patch.object(av, "_get_detector", return_value=det):
+            out = av._classify_frame_detections("D")
+        self.assertEqual(out[0]["frame"], (7, b"seven"))
+        tr = {}
+        av._capture_best("D", tr, out[0])
+        self.assertEqual(tr["best"]["jpeg"], b"seven")
+
+
+class TestTmpDir(unittest.TestCase):
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root)
+        patcher = mock.patch.object(av, "_STREAM_DIR", self.root)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_reset_empties_only_the_tmp_folder(self):
+        for path in (os.path.join(self.root, "D.jpg"), os.path.join(av._tmp_dir(), "tmpab.jpg")):
+            open(path, "wb").close()
+        av._reset_tmp_dir()
+        self.assertEqual(os.listdir(av._tmp_dir()), [])
+        self.assertEqual(sorted(os.listdir(self.root)), ["D.jpg", "tmp"])
+
+    def test_reset_creates_the_folder(self):
+        av._reset_tmp_dir()
+        self.assertTrue(os.path.isdir(av._tmp_dir()))
+
+    def test_write_snapshot_leaves_no_temp(self):
+        av._reset_tmp_dir()
+        path = os.path.join(self.root, "D.jpg")
+        av._write_snapshot(path, b"one")
+        av._write_snapshot(path, b"two")
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), b"two")
+        self.assertEqual(os.listdir(av._tmp_dir()), [])
+
+    def test_tmp_dir_follows_the_state_dir(self):
+        a = config.stream_dir("/srv/aiport-a")
+        b = config.stream_dir("/srv/aiport-b")
+        self.assertNotEqual(a, b)
+        with mock.patch.object(av, "_STREAM_DIR", a):
+            self.assertEqual(av._tmp_dir(), os.path.join(a, "tmp"))
+
+
+@unittest.skipUnless(_FFMPEG, "ffmpeg not installed")
+class TestFramePairing(unittest.TestCase):
+    def test_jpeg_n_is_raw_frame_n(self):
+        """The pipeline's two outputs number frames alike: JPEG n, scaled down, is raw frame n."""
+        import numpy as _np
+        try:
+            import cv2
+        except ImportError:
+            self.skipTest("OpenCV not installed")
+        size, fps = 64, 5
+        r, w = os.pipe()
+        cmd = [_FFMPEG, "-loglevel", "error", "-f", "lavfi", "-i",
+               "testsrc2=size=320x240:rate=25:duration=3",
+               "-filter_complex", f"[0:v]fps={fps},split=2[jpg][detin];"
+               f"[detin]scale={size}:{size}[det]",
+               "-map", "[jpg]", "-c:v", "mjpeg", "-f", "image2pipe", f"pipe:{w}",
+               "-map", "[det]", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, pass_fds=(w,))
+        os.close(w)
+        jpegs = []
+        def read_jpegs():
+            with os.fdopen(r, "rb") as pipe:
+                jpegs.extend(av._jpeg_frames(pipe))
+
+        reader = threading.Thread(target=read_jpegs)
+        reader.start()
+        raw = proc.stdout.read()
+        proc.stdout.close()
+        proc.wait()
+        reader.join()
+        frames = [_np.frombuffer(raw[i:i + size * size * 3], _np.uint8).reshape(size, size, 3)
+                  for i in range(0, len(raw), size * size * 3)]
+        self.assertEqual(len(jpegs), len(frames))
+        self.assertGreater(len(frames), 10)
+        for n, jpeg in enumerate(jpegs):
+            img = cv2.cvtColor(cv2.imdecode(_np.frombuffer(jpeg, _np.uint8), cv2.IMREAD_COLOR),
+                               cv2.COLOR_BGR2RGB)
+            small = cv2.resize(img, (size, size), interpolation=cv2.INTER_AREA).astype(int)
+            diffs = [_np.abs(small - f.astype(int)).mean() for f in frames]
+            self.assertEqual(int(_np.argmin(diffs)), n)
 
 
 if __name__ == "__main__":

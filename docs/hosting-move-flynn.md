@@ -24,11 +24,14 @@ once Flynn is running.
 | Setting | Value | Why |
 | --- | --- | --- |
 | Console | `AIPORT_CONSOLE_HOST=192.168.1.1` | the Protect console (Cottage GW) |
-| Detector model | `AIPORT_MODEL_PATH=…/piport/models/yolov5s.onnx` | YOLOv5s on Core ML (~8 ms/frame on M1 Pro): better on small/distant objects than YOLOv5n |
-| Box delay | `AIPORT_BOX_DELAY_MS=3000` | back-dates boxes to their frame time; measured 2.2-3.1 s on the Driveway camera **before** frames were stamped on read. Event times now come from each frame's stamp, so re-measure: the residual should be much smaller |
+| Detector model | `AIPORT_MODEL_PATH=…/piport/models/yolov5s.onnx` | YOLOv5s on Core ML (~8 ms/frame on M1 Pro): better on small/distant objects than YOLOv5n. To try YOLOv9: `AIPORT_MODEL_PATH=…/piport/models/yolov9-s-320.onnx` (copied from Frigate's `model_cache`, 3.4 ms/frame on M2; see `piport/README.md`) |
+| Box delay | `AIPORT_BOX_DELAY_MS=1500,AABBCC3344CC=1800` | back-dates boxes to their frame time. 2.2-3.1 s was measured on Driveway **before** frames were stamped on read; 1800 ms was estimated from a passing sedan on 2026-10-16, also before. Event times now come from each frame's stamp, so re-measure: the residual should be smaller. 1500 ms for the other cameras is a starting point after Backyard boxes came ~2 s early |
 | Tick rate | default 0.33 s on macOS (`AIPORT_TICK_S`) | how often `moving` updates go out; matches a G5 Bullet's ~330 ms update rate |
 | Detection rate | default 10 frames/s per camera on macOS (`AIPORT_DETECT_FPS`) | frames analysed per second; lower it if the Mac struggles with many cameras |
 | Event end | default 3 s with no detection (`AIPORT_MISS_S`) | a G5 Bullet sends `leave` ~2 s after the object leaves |
+| Tracks | keep at score 0.3 (`AIPORT_KEEP_THRESH`), resume within 60 s (`AIPORT_RESUME_S`) | a parked car behind people unloading it kept coming back as a new vehicle |
+| Log | `2>&1 \| tee -a ~/piport.log` | the terminal keeps only a few minutes |
+| Video decode | VideoToolbox for HEVC cameras, the default on macOS (`AIPORT_HWDEC`) | ~4x less CPU per camera; H.264 (Driveway) stays software |
 | Sleep | `caffeinate -is` | a sleeping Mac drops off the console |
 
 ## Steps
@@ -66,10 +69,11 @@ once Flynn is running.
 6. Check the interface (`route -n get default`, usually `en0`), then start:
 
    ```bash
-   cd ~/Code/pi-port && sudo AIPORT_CONSOLE_HOST=192.168.1.1 AIPORT_BOX_DELAY_MS=3000 \
-     AIPORT_MODEL_PATH=$HOME/Code/pi-port/piport/models/yolov5s.onnx \
+   cd ~/Code/pi-port && sudo AIPORT_CONSOLE_HOST=192.168.1.1 \
+     AIPORT_BOX_DELAY_MS=1500,AABBCC3344CC=1800 AIPORT_TICK_S=0.2 \
+     AIPORT_MODEL_PATH=$HOME/Code/pi-port/piport/models/yolov9-s-320.onnx \
      caffeinate -is venv/bin/python piport/run_all.py --iface en0 --state-dir ~/.piport-state \
-     --mac FCECDAD4C3CD --device-id fe6488e7-7042-5bcb-ab86-6f0ad1a5baed
+     --mac FCECDAD4C3CD --device-id fe6488e7-7042-5bcb-ab86-6f0ad1a5baed 2>&1 | tee -a ~/piport.log
    ```
 
 7. Delete `~/piport-move.tgz` on both Macs.
@@ -80,7 +84,7 @@ In Flynn's terminal output, within about 15 s:
 
 - `WSS CONNECTED` and `CLASSIC AVCLIENT WSS CONNECTED`, with **no** repeating
   `connection ended ... reconnecting` (that loop means the identity didn't match: check `--mac`).
-- `Detector initialized (backend=onnx, provider=CoreMLExecutionProvider, model=.../yolov5s.onnx)`.
+- `Detector initialized (backend=onnx, provider=CoreMLExecutionProvider, model=.../yolov5s.onnx, layout=ultralytics, input=640x640)`.
 - `starting merged RTSP pull` for the paired cameras: doorbell `8CEDE172C456`, Driveway
   `AABBCC3344CC`, Backyard `F4E2C60D4B4C`.
 - `vehicle already present at start, parked` for the parked cars (no events opened for them).

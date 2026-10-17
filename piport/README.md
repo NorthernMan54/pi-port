@@ -149,22 +149,51 @@ python3 scripts/fetch_models.py --convert  # build .rknn (x86 host)
 For a containerized CPU install (x86 servers / Raspberry Pi 4/5) see `docker/README.md`.
 
 **Video decode** picks a hardware backend automatically, or by `AIPORT_HWDEC`
-(`auto`|`rkmpp`|`v4l2m2m`|`none`): `rkmpp` on the RK3588 (ffmpeg-rockchip), `v4l2m2m`
+(`auto`|`rkmpp`|`v4l2m2m`|`videotoolbox`|`none`): `rkmpp` on the RK3588 (ffmpeg-rockchip), `v4l2m2m`
 on a **Raspberry Pi 4 only** (BCM2711; the bcm2835-codec decoder at `/dev/video10`,
-which also needs `/dev/vchiq`), else software. The **Pi 5 has no H.264 hardware
+which also needs `/dev/vchiq`), `videotoolbox` on **macOS** for HEVC (`-hwaccel videotoolbox`; on an
+M2 a 2688x1512 HEVC camera took ~5% of a core instead of ~21%; H.264 stays software, as
+VideoToolbox dropped pictures on a Protect-relayed H.264 stream), else software. The **Pi 5 has no H.264 hardware
 decoder** (HEVC only), so it always software-decodes H.264 -- and its CPU does that
 faster than the Pi 4's hardware block. See `docker/README.md` and `implementation.md`
 for the measured numbers and the known Pi 4 decoder limits.
 
 The CPU detector disables onnxruntime's thread **spin-wait** (it burned ~3 extra cores
 alongside ffmpeg on a Pi 4) and caps threads with `AIPORT_ORT_INTRA_THREADS` (e.g. `2`
-on a Pi 4; unset = onnxruntime's default). `AIPORT_OBJ_THRESH` overrides the detection
-confidence gate.
+on a Pi 4; unset = onnxruntime's default). `AIPORT_OBJ_THRESH` (default 0.5) is the score a
+detection needs to open a track; a box overlapping an existing track keeps it alive down to
+`AIPORT_KEEP_THRESH` (default 0.3), so a car half hidden by people or cut off at the frame
+edge doesn't drop out. Weak boxes never open a track or take one by distance. The first
+weak tick of a track and its return above 0.5 are logged at INFO; every weak box with
+`--debug`.
 
-On macOS (Apple silicon, bare metal) the onnx backend uses onnxruntime's **Core ML** provider
-(`MLProgram` on the Neural Engine): ~6.5 ms vs ~37 ms per frame on CPU (M1 Pro, `yolov5n`),
-with the same detections. `AIPORT_ORT_PROVIDER=cpu` forces CPU; `auto` (default) picks Core ML
+On macOS (Apple silicon, bare metal) the onnx backend uses onnxruntime's **Core ML** provider:
+~6.5 ms vs ~37 ms per frame on CPU (M1 Pro, `yolov5n`), with the same detections. The Core ML
+format follows the model's input dtype: `MLProgram` for the fp16 Ultralytics YOLOv5 (the default
+NeuralNetwork format runs it at ~95 ms), NeuralNetwork for float32 graphs such as YOLOv9
+(3 ms vs 22 ms under MLProgram, M2). `AIPORT_ORT_PROVIDER=cpu` forces CPU; `auto` (default) picks Core ML
 when onnxruntime offers it (never on Linux) and falls back to CPU if the model won't compile.
+
+**YOLOv8/v9 models.** The onnx backend also reads anchor-free exports (one `[1,4+classes,N]`
+output: xywh and class scores, no objectness), e.g. Frigate's `yolov9-s-320.onnx`. The input
+size comes from the graph: frames (640x640) are resized to it and boxes scaled back, so nothing
+else changes. Select one with `AIPORT_MODEL_PATH`; the startup log shows `layout=anchor_free,
+input=320x320`. The score is the class confidence (no objectness to multiply), gated by the same
+`AIPORT_OBJ_THRESH`. On the M2's doorbell frame YOLOv9-s at 320 left out two flower pots YOLOv5s
+called birds (0.55/0.54) and named an RV a truck where YOLOv5s said train; it is 3.4 ms per
+frame vs ~8 ms. Small, distant objects at 320 are not yet compared.
+
+`scripts/fetch_models.py` does not install it: there is no published YOLOv9 ONNX. Frigate
+exports it locally from the YOLOv9 authors' weights (<https://github.com/WongKinYiu/yolov9>,
+GPL-3.0; `yolov9-s-converted.pt`, release `v0.1`) with the Docker recipe in its object-detector
+docs (`MODEL_SIZE=s`, `IMG_SIZE=320`). Copy that export into `piport/models/` (gitignored like
+the other models); the one in use is sha256
+`ae31147e082ac2026b67f930f92dcbe99328deda19a51e493ecaf26b495e081f`:
+
+```bash
+cp <frigate config>/model_cache/yolov9-s-320.onnx piport/models/
+AIPORT_MODEL_PATH=$PWD/piport/models/yolov9-s-320.onnx ...   # on the run_all.py command
+```
 
 ### Enrichment: vehicle attributes, license plates, faces (`enrich.py`, best-guess wire format)
 
@@ -210,7 +239,21 @@ RTSP pull uses `-flags low_delay`.
 **Confirmation.** A new track joins the camera event only after it has been seen for
 Protect's `eventStartMSec` (from `ChangeSmartDetectSettings`; 0 until Protect sends it), so
 a detection lasting a frame or two never opens a dashboard event. A track lost before then
-is dropped without any event. `AIPORT_CONFIRM_MS` overrides Protect's value.
+is dropped without any event. `AIPORT_CONFIRM_MS` overrides Protect's value. A person or
+animal also has to **move** before it confirms (its centre shifting by a quarter of its
+size): a tree stump on Backyard scored "animal" ~0.5 for a minute at a time. A still one
+stays a silent, unconfirmed track. A face or plate confirms as soon as a confirmed person or
+vehicle is there, since it's only looked for inside that box and only once per snapshot.
+
+**Resuming tracks.** A track that closed within `AIPORT_RESUME_S` (default 60 s) is picked
+up again by a same-type detection overlapping its last or first box (IoU >= 0.4): it rejoins
+its event if that is still open, and a vehicle that never moved (centre within a quarter of
+its size) or was parked comes back quietly as parked. Seen live: a car backed in with its
+hatch open and two people unloading it was re-detected as a "new" vehicle in three
+successive events. A person or a car that moved and left is still new next time. Weak boxes keep a parked
+track but never move or wake it, and a box mostly (70%) inside a parked car's box is part of
+that car, not a new vehicle: on the doorbell, weak boxes shrank a parked car's box onto its
+lower half and a second box on that half opened "vehicle" events while nothing moved.
 
 **Tracking.** Detections match tracks by box overlap; a moving track no box overlaps takes
 the nearest same-type detection near where its last movement predicts it (within 3x its size),
@@ -253,7 +296,10 @@ in it (a 1920x2560 doorbell fills the middle 42%). Boxes are converted to that c
 sent, and zone/line checks run in it; crops and plate/face reads stay in image space.
 Each track keeps its best-scoring frame (full-res JPEG, box, time); on `leave` the
 object crop, the Full-FoV image and `clockBestWall` come from it, not from the frame
-seconds after the object was last seen. Seen live: Protect shows vehicle attributes
+seconds after the object was last seen. The JPEG is the very frame the detector scored:
+ffmpeg encodes every detection frame at full resolution, numbered like the raw frames
+(a once-a-second snapshot was up to a second off, enough for a passing bus to leave
+the crop). Seen live: Protect shows vehicle attributes
 (`Truck (70%), White (70%)`, `Red (42%)`). Attributes become labels verbatim, so only
 Protect's values show: `vehicleType` car/suv/truck/van/bus/motorcycle/bike (COCO "car" is
 sent as `car`; `sedan` displayed nothing) and `color`
@@ -264,7 +310,10 @@ meaningful frame change skips inference entirely (on a static scene this is the 
 between a busied core and ~1% CPU). `AIPORT_MOTION_GATE=0` disables it and
 `AIPORT_MOTION_GATE_THRESH` tunes the threshold (default `0.02`, on an 80x80 grayscale
 diff). Tracks that are already open always classify, so a stationary object keeps its
-track and can close normally.
+track and can close normally. It is **off by default on macOS** (`AIPORT_MOTION_GATE=1` turns it
+on): the diff is averaged over the whole frame, so a person walking through Backyard's
+background (~0.5% of the frame) never reached the detector, and a frame costs only ~3-8 ms
+there. On a Pi it stays on.
 
 **Conversion must run on a separate x86_64 build host.** `rknn-toolkit-lite2` is the on-device,
 inference-only API (aarch64-only wheels for Python <= 3.12); it can only run an already-converted
@@ -290,9 +339,15 @@ in `models/` next to `detector.py`.
   `detector.py`.
 
 `avclient.py` runs one ffmpeg process per paired camera that pulls the RTSP stream and uses
-`filter_complex split=2` for both outputs from a single decode: a 1/2-fps JPEG still (snapshots)
-and 2-fps 640x640 raw RGB frames piped to Python for classification (no image-decode library
-needed). A background loop classifies the latest frame every 1.5s (`MOTION_POLL_INTERVAL_S`): a
+`filter_complex fps,split=2` for both outputs from a single decode: a full-res JPEG of every
+detection frame (an `image2pipe` on a second pipe; best frames come from it, and every 1-2 s it
+becomes the snapshot file) and the same frames as 640x640 raw RGB on stdout for classification
+(no image-decode library needed). The JPEGs cost ~8% of a core per 2560x1440 camera at 5 fps
+on an M2; they're made at the detection rate (`AIPORT_DETECT_FPS`), so expect about twice
+that at macOS's default 10. Files live in a RAM/temp stream dir unique to each `--state-dir`
+(`<tmp>/aiport-streams/<hash>/`), so several AI Ports can share a host; its `tmp/` folder
+holds the in-flight files (snapshot rewrites, crop inputs) and is emptied at startup, so a
+crash leaves nothing behind. A background loop classifies the latest frame every 1.5s (`MOTION_POLL_INTERVAL_S`): a
 detection opens (`"enter"`) or refreshes (`"moving"`) a track, and a track closes (`"leave"`)
 only after `AIPORT_MISS_S` (default 3 s) of **consecutive** empty ticks. Simultaneous
 objects are tracked independently and matched frame-to-frame by bounding-box IOU within each

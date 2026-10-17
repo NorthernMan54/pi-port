@@ -1567,38 +1567,54 @@ except Exception:  # numpy is a project dep but keep the suite runnable without 
 
 @unittest.skipIf(_np is None, "numpy unavailable")
 class MotionGate(unittest.TestCase):
-    """_scene_changed drives the frame-diff gate that skips static-scene inference."""
+    """_scene_changed asks Frigate's motion detector (motion.py) whether this frame moved."""
 
     def setUp(self):
-        self.addCleanup(av._latest_frame.clear)
-        self.addCleanup(av._scene_ref.clear)
-        av._latest_frame.clear()
-        av._scene_ref.clear()
+        for table in (av._latest_frame, av._motion_detectors, av._motion_settings,
+                      av._motion_boxes, av._stream_dims):
+            self.addCleanup(table.clear)
+            table.clear()
 
-    def test_first_frame_triggers(self):
-        av._latest_frame["d"] = _np.zeros((640, 640, 3), _np.uint8)
-        self.assertTrue(av._scene_changed("d"))
+    def frame(self, value=100, square=None):
+        f = _np.full((640, 640, 3), value, _np.uint8)
+        if square:
+            x, y, size = square
+            f[y:y + size, x:x + size] = 250
+        av._latest_frame["d"] = f
+        return av._scene_changed("d")
 
-    def test_slow_change_accumulates_within_interval(self):
-        # Frames analysed faster than reports differ only a little from each other; the
-        # reference is held for a report interval, so slow movement still adds up.
-        av._latest_frame["d"] = _np.full((640, 640, 3), 100, _np.uint8)
-        av._scene_changed("d")
-        av._latest_frame["d"] = _np.full((640, 640, 3), 103, _np.uint8)
-        self.assertFalse(av._scene_changed("d"))   # 3/255 below the 0.02 gate
-        av._latest_frame["d"] = _np.full((640, 640, 3), 106, _np.uint8)
-        self.assertTrue(av._scene_changed("d"))    # 6/255 against the held reference
+    def test_static_scene_has_no_motion(self):
+        for _ in range(5):
+            self.assertFalse(self.frame())
 
-    def test_static_scene_does_not_trigger(self):
-        av._latest_frame["d"] = _np.full((640, 640, 3), 100, _np.uint8)
-        av._scene_changed("d")                    # first tick sets the reference
-        self.assertFalse(av._scene_changed("d"))  # identical frame -> below threshold
+    def test_small_mover_is_motion(self):
+        # ~0.5% of the frame, like a person walking through Backyard's background.
+        for _ in range(20):
+            self.frame()
+        self.assertTrue(self.frame(square=(500, 100, 45)))
+        (x1, y1, x2, y2), = av._motion_boxes["d"]
+        self.assertTrue(x1 <= 500 and x2 >= 545 and y1 <= 100 and y2 >= 145)
 
-    def test_large_change_triggers(self):
-        av._latest_frame["d"] = _np.zeros((640, 640, 3), _np.uint8)
-        av._scene_changed("d")
-        av._latest_frame["d"] = _np.full((640, 640, 3), 200, _np.uint8)
-        self.assertTrue(av._scene_changed("d"))
+    def test_whole_frame_change_is_lighting_not_motion(self):
+        for _ in range(5):
+            self.frame(60)
+        self.assertFalse(self.frame(220))           # recalibrates instead
+        self.assertTrue(av._motion_detectors["d"].is_calibrating())
+
+    def test_motion_zones_mask_the_rest(self):
+        av._apply_motion_settings({"deviceID": "d", "zones": {"1": {
+            "coord": [0, 0, 500, 0, 500, 1000, 0, 1000], "level": 50}}})
+        for _ in range(20):
+            self.frame()
+        self.assertFalse(self.frame(square=(560, 300, 45)))   # right half isn't watched
+        self.assertTrue(self.frame(square=(100, 300, 45)))
+
+    def test_protect_sensitivity_sets_threshold(self):
+        av._apply_motion_settings({"deviceID": "d", "zones": {"1": {
+            "coord": [0, 0, 1000, 0, 1000, 1000, 0, 1000], "level": 80}}})
+        self.frame()
+        self.assertEqual(av._motion_detectors["d"].threshold, 12)
+        self.assertIsNone(av._motion_detectors["d"].mask)   # whole-frame zone: no mask
 
     def test_no_frame_is_no_change(self):
         self.assertFalse(av._scene_changed("absent"))
@@ -1623,10 +1639,9 @@ class _Chunks:
 
 
 class TestMotionGateDefault(unittest.TestCase):
-    @unittest.skipUnless(sys.platform == "darwin" and "AIPORT_MOTION_GATE" not in os.environ,
-                         "macOS default only")
-    def test_off_on_macos(self):
-        self.assertFalse(av.MOTION_GATE)
+    @unittest.skipIf("AIPORT_MOTION_GATE" in os.environ, "set in the environment")
+    def test_on_everywhere(self):
+        self.assertTrue(av.MOTION_GATE)
 
 
 class TestFrameJpegs(unittest.TestCase):

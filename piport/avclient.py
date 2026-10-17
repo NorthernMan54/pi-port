@@ -240,12 +240,14 @@ RESUME_MAX = 32
 CONFIRM_WITH = {"face": "person", "licensePlate": "vehicle"}
 INSIDE_PARKED_FRACTION = 0.7
 # Motion/scene gate: skip the classifier on a near-static frame with no open track.
-# AIPORT_MOTION_GATE=0 disables; AIPORT_MOTION_GATE_THRESH tunes (default 0.02). Off by default
-# on macOS, where a frame costs ~3-8 ms: the gate averages change over the whole frame, so a
-# person walking through Backyard's background (~0.5% of the frame) never reached the detector.
-MOTION_GATE = os.environ.get(
-    "AIPORT_MOTION_GATE", "0" if sys.platform == "darwin" else "1"
-).strip().lower() not in ("0", "false", "no", "off")
+# The gate asks motion.py (Frigate's motion detector) for motion boxes against a running
+# background, so a person walking through Backyard's background (~0.5% of the frame) counts;
+# the old whole-frame average diff missed them. AIPORT_MOTION_GATE=0 disables the gate.
+# Protect's motion sensitivity and motion zones set its pixel threshold and mask;
+# AIPORT_MOTION_THRESHOLD (1-255) overrides the threshold. Without OpenCV the old average
+# diff is the fallback (AIPORT_MOTION_GATE_THRESH, default 0.02).
+MOTION_GATE = os.environ.get("AIPORT_MOTION_GATE", "1").strip().lower() not in (
+    "0", "false", "no", "off")
 MOTION_GATE_THRESH = float(os.environ.get("AIPORT_MOTION_GATE_THRESH", "0.02"))
 _GATE_STRIDE = 8  # sample every Nth pixel -> 80x80 grayscale for the diff
 # Paired camera's smartDetectZones row id -- zonesStatus's key must match it (not always "1").
@@ -356,6 +358,7 @@ def _stop_stream(device_id):
         _frame_jpegs.pop(device_id, None)
         _latest_frame_time.pop(device_id, None)
         _analysed_frame_time.pop(device_id, None)
+    _motion_detectors.pop(device_id, None)  # a new stream starts a new background
 
 
 def _jpeg_end(buf):
@@ -987,18 +990,60 @@ def _dedupe_detections(detections, iou_thresh=0.4):
 
 
 _scene_ref = {}  # deviceID -> (downsampled grayscale reference frame, monotonic ms taken)
+_motion_detectors = {}  # deviceID -> motion.MotionDetector (rebuilt when settings change)
+_motion_settings = {}   # deviceID -> {"level", "zones"} from ChangeSmartMotionSettings
+_motion_boxes = {}      # deviceID -> this frame's motion boxes (detector-frame pixels)
+
+
+def _canvas_to_image(device_id, x, y):
+    """Protect canvas point (0-1000) -> image-normalised point (0-1000), clamped."""
+    sx, sy = _canvas_scale(device_id)
+    half = CAMERA_COORD_END / 2
+    clamp = lambda v: min(CAMERA_COORD_END, max(0.0, v))  # noqa: E731
+    return clamp(half + (x - half) / sx), clamp(half + (y - half) / sy)
+
+
+def _motion_detector(device_id, shape):
+    det = _motion_detectors.get(device_id)
+    if det is None or det.frame_shape != tuple(shape[:2]):
+        import motion
+        settings = _motion_settings.get(device_id) or {}
+        override = os.environ.get("AIPORT_MOTION_THRESHOLD")
+        threshold = (int(override) if override and override.isdigit()
+                     else motion.threshold_for_level(settings.get("level", 50)))
+        mask = motion.zones_mask(settings.get("zones"), shape,
+                                 lambda x, y: _canvas_to_image(device_id, x, y))
+        det = _motion_detectors[device_id] = motion.MotionDetector(shape[:2], threshold=threshold,
+                                                                   mask=mask)
+        log.info("motion detector for deviceID=%s: threshold %d, %s", device_id, threshold,
+                 "masked to Protect's motion zones" if mask is not None else "whole frame")
+    return det
 
 
 def _scene_changed(device_id):
-    """True if this frame differs enough from the reference frame. The reference
-    advances at most once per report interval: frames analysed faster than that are only
-    a little apart, and slow movement would otherwise stay under the gate. A static scene
-    still stays below it."""
-    import numpy as np  # lazy, like the detector path: avclient imports without numpy
+    """True if this frame has motion boxes (Frigate's motion detector, which must see
+    every frame to keep its background current). While it calibrates -- at start, or after
+    lightning or IR switching changed most of the picture -- nothing counts as motion."""
     with _frame_lock:
         frame = _latest_frame.get(device_id)
     if frame is None:
         return False
+    try:
+        import cv2
+    except ImportError:
+        return _scene_changed_mean(device_id, frame)
+    det = _motion_detector(device_id, frame.shape)
+    boxes = det.detect(cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY))
+    _motion_boxes[device_id] = boxes
+    return bool(boxes) and not det.is_calibrating()
+
+
+def _scene_changed_mean(device_id, frame):
+    """Fallback without OpenCV: true if this frame differs enough from the reference. The reference
+    advances at most once per report interval: frames analysed faster than that are only
+    a little apart, and slow movement would otherwise stay under the gate. A static scene
+    still stays below it."""
+    import numpy as np  # lazy, like the detector path: avclient imports without numpy
     gray = frame[::_GATE_STRIDE, ::_GATE_STRIDE].mean(axis=2)
     now = int(time.monotonic() * 1000)
     ref, ref_ms = _scene_ref.get(device_id) or (None, None)
@@ -1312,6 +1357,9 @@ def _motion_tick(ws, device_id):
     # and be able to close); otherwise skip the classifier when nothing moved.
     with _motion_lock:
         has_tracks = bool(_motion_state.get(device_id, {}).get("tracks"))
+    with _frame_lock:  # this tick describes this frame, whether or not the gate skips it
+        if device_id in _latest_frame_time:
+            _analysed_frame_time[device_id] = _latest_frame_time[device_id]
     changed = _scene_changed(device_id)
     gated = MOTION_GATE and not has_tracks and not changed
     if gated:
@@ -2292,6 +2340,21 @@ def _used_points():
     return _points_value(sum(_stream_points.values()))
 
 
+def _apply_motion_settings(payload):
+    """Protect's motion zones and sensitivity (each zone's `level`, 0-100) for the motion
+    gate; the detector is rebuilt on its next frame when they change."""
+    device_id = payload.get("deviceID")
+    zones = payload.get("zones")
+    if not device_id or not isinstance(zones, dict):
+        return
+    levels = [z.get("level") for z in zones.values()
+              if isinstance(z, dict) and isinstance(z.get("level"), (int, float))]
+    settings = {"zones": zones, "level": max(levels) if levels else 50}
+    if _motion_settings.get(device_id) != settings:
+        _motion_settings[device_id] = settings
+        _motion_detectors.pop(device_id, None)
+
+
 def _stop_all_streams(preserve_tracks=False):
     for device_id in list(set(_active_streams) | set(_stream_points)):
         _stop_stream(device_id)
@@ -2438,6 +2501,7 @@ def handle_function(ws, msg, device_info):
         max_ms = payload.get("eventMaxDurationMSec")
         if payload.get("deviceID") and isinstance(max_ms, (int, float)) and max_ms > 0:
             _event_max_ms[payload["deviceID"]] = int(max_ms)
+        _apply_motion_settings(payload)
         if msg.get("responseExpected"):
             send_msg(ws, fn, {}, in_response_to=msg_id)
         return

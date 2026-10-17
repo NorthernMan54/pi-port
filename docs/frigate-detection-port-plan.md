@@ -87,6 +87,9 @@ Size: small. Net code removed.
 
 ### Step 3. Frigate's motion detector (item 2)
 
+Done: `piport/motion.py`; the gate is on everywhere again. Also fixed on the way: a tick the gate
+skipped took the wall clock instead of its frame's time.
+
 Port `frigate/motion/improved_motion.py` (`ImprovedMotionDetector`) as `piport/motion.py`:
 
 - 100 px high grayscale, contrast stretched to the 4th-96th percentile averaged over 50 frames,

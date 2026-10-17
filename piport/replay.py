@@ -116,7 +116,8 @@ def replay(av, frames, settings=None, start_ms=0, settle_s=5.0, startup=False):
         for table in (av._motion_state, av._stream_dims, av._latest_frame,
                       av._latest_frame_seq, av._latest_frame_time, av._analysed_frame_time,
                       av._detect_zones, av._exclude_zones, av._lines, av._event_start_ms,
-                      av._event_max_ms, av._stream_started_monotonic_ms, av._scene_ref):
+                      av._event_max_ms, av._stream_started_monotonic_ms, av._scene_ref,
+                      av._motion_detectors, av._motion_settings, av._motion_boxes):
             table.pop(DEVICE, None)
     return sent
 
@@ -124,7 +125,8 @@ def replay(av, frames, settings=None, start_ms=0, settle_s=5.0, startup=False):
 def _run(av, frames, settings, start_ms, settle_s, now):
     import numpy as np
     for table in (av._motion_state, av._detect_zones, av._exclude_zones, av._lines,
-                  av._event_start_ms, av._event_max_ms):
+                  av._event_start_ms, av._event_max_ms, av._motion_detectors,
+                  av._motion_settings, av._motion_boxes):
         table.pop(DEVICE, None)
     if settings.get("width") and settings.get("height"):
         av._stream_dims[DEVICE] = (int(settings["width"]), int(settings["height"]))
@@ -137,6 +139,9 @@ def _run(av, frames, settings, start_ms, settle_s, now):
     motion = settings.get("smartMotion") or {}
     if isinstance(motion.get("eventMaxDurationMSec"), (int, float)):
         av._event_max_ms[DEVICE] = int(motion["eventMaxDurationMSec"])
+    av._motion_detectors.pop(DEVICE, None)
+    av._motion_settings.pop(DEVICE, None)
+    av._apply_motion_settings(dict(motion, deviceID=DEVICE))
     av._stream_started_monotonic_ms[DEVICE] = 0
 
     step_ms = 1000.0 / av.DETECT_FPS

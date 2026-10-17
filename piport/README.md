@@ -316,15 +316,18 @@ Protect's values show: `vehicleType` car/suv/truck/van/bus/motorcycle/bike (COCO
 sent as `car`; `sedan` displayed nothing) and `color`
 red/orange/yellow/green/blue/purple/pink/brown/black/white/gray (silver is sent as `gray`).
 
-Classification is also **gated by a cheap frame-diff**: a tick with no open track and no
-meaningful frame change skips inference entirely (on a static scene this is the difference
-between a busied core and ~1% CPU). `AIPORT_MOTION_GATE=0` disables it and
-`AIPORT_MOTION_GATE_THRESH` tunes the threshold (default `0.02`, on an 80x80 grayscale
-diff). Tracks that are already open always classify, so a stationary object keeps its
-track and can close normally. It is **off by default on macOS** (`AIPORT_MOTION_GATE=1` turns it
-on): the diff is averaged over the whole frame, so a person walking through Backyard's
-background (~0.5% of the frame) never reached the detector, and a frame costs only ~3-8 ms
-there. On a Pi it stays on.
+Classification is also **gated by motion** (`motion.py`, adapted from Frigate's
+`improved_motion.py`, MIT): each frame is shrunk to 100 rows of grayscale, contrast-stretched,
+blurred and compared with a running-average background; pixels differing by more than the
+threshold form motion boxes, and a frame where most of the picture changes (lightning, IR
+switching) recalibrates instead. A frame with no motion box and no open track skips
+inference. Unlike the old whole-frame average diff, this finds a person walking through
+Backyard's background (~0.5% of the frame). Protect's motion sensitivity (`level`, 50 by
+default) sets the pixel threshold (50 -> 30, Frigate's default; 100 -> 5) and its motion zones
+mask the rest of the frame; `AIPORT_MOTION_THRESHOLD` overrides the threshold and
+`AIPORT_MOTION_GATE=0` disables the gate. It costs ~0.4 ms a frame on the M2. Without OpenCV
+the old average diff (`AIPORT_MOTION_GATE_THRESH`) is the fallback. Tracks that are already
+open always classify, so a stationary object keeps its track and can close normally.
 
 **Conversion must run on a separate x86_64 build host.** `rknn-toolkit-lite2` is the on-device,
 inference-only API (aarch64-only wheels for Python <= 3.12); it can only run an already-converted

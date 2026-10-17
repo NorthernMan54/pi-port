@@ -415,6 +415,12 @@ def _frame_jpeg(device_id, seq, timeout=FRAME_JPEG_WAIT_S):
             _frame_cond.wait(left)
 
 
+def _detect_filter_graph(size=DETECT_IMG_SIZE):
+    """ffmpeg filter graph for the detection pipeline: [jpg] full-res frames, [det] the same
+    frames scaled for the detector. replay.py runs clips through this same graph."""
+    return f"[0:v]fps={DETECT_FPS},split=2[jpg][detin];[detin]scale={size}:{size}[det]"
+
+
 # One ffmpeg pulls RTSP and splits post-decode into a full-res JPEG and a 640x640 RGB
 # copy of each detection frame; decoding twice was wasteful (CPU-side NAL parsing
 # dominates, not the NPU). Both outputs come after one fps filter, so frame n of
@@ -438,8 +444,7 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
         # split/fps pipeline it left the rawvideo detection output empty (ffmpeg 8).
         "-flags", "low_delay",
         *hwdec_args, "-i", url,
-        "-filter_complex",
-        f"[0:v]fps={DETECT_FPS},split=2[jpg][detin];[detin]scale={size}:{size}[det]",
+        "-filter_complex", _detect_filter_graph(size),
         "-map", "[jpg]", *encode_args, "-f", "image2pipe", f"pipe:{jpeg_w}",
         "-map", "[det]", "-pix_fmt", "rgb24", "-f", "rawvideo", "-",
     ]

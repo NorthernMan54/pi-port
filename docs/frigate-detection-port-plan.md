@@ -26,6 +26,9 @@ decided after step 5.
 
 ### Step 0. Replay harness (prerequisite)
 
+Done: `piport/replay.py`, `scripts/record_clip.py`, `piport/tests/test_replay.py`
+(see "Replaying clips" in `piport/README.md`). Golden clips still to record.
+
 Every change so far was judged on live events after a restart. Instead:
 
 - `scripts/record_clip.sh <camera-uri> <seconds> <name>`: `ffmpeg -rtsp_transport tcp -i ... -c copy`

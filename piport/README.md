@@ -359,6 +359,34 @@ camera's own `featureFlags.smartDetectTypes` / `hasMotionDetection` must be popu
 (above). The controller writes these into the AI Port's `featureFlagsMap` for the paired camera's
 MAC and propagates the overridable subset on the next reconnect pass.
 
+## Replaying clips (`replay.py`, `scripts/record_clip.py`)
+
+Tracking changes are checked offline on recorded clips instead of waiting for live events.
+Record what a paired camera sends while pi-port is running (it finds the stream URL and the
+camera's Protect settings in `~/piport.log`):
+
+```bash
+scripts/record_clip.py F4E2C60D4B4C 60 backyard-walk
+```
+
+That writes `~/piport-clips/backyard-walk.mp4` (video copied, not re-encoded) and
+`backyard-walk.json` (stream size, zones, exclusion zones, lines, `eventStartMSec`, event
+time limit, start time). Clips stay outside git. Then replay it through the live detector and
+tracker, with the same env vars as the live command:
+
+```bash
+AIPORT_TICK_S=0.2 AIPORT_MODEL_PATH=$HOME/Code/pi-port/piport/models/yolov9-s-320.onnx \
+  venv/bin/python piport/replay.py ~/piport-clips/backyard-walk.mp4 [--moves] [--json] [-v]
+```
+
+It prints each `enter`/`leave` (with `--moves`, every update) at clip time, then one line per
+event with its objects and their best confidence; `-v` adds avclient's log. The clip runs
+through the same ffmpeg filter graph as a live camera at `AIPORT_DETECT_FPS`, with the clock
+taken from frame timestamps (20 s of Backyard replays in ~5 s on the M2); 5 s of empty frames
+after the clip let open tracks close (`--settle`). The live 15 s startup window, in which
+objects already in view are parked, is off unless `--startup`. Not covered: thumbnails,
+plates and faces (they read the live snapshot file).
+
 ## Known limitations and next steps
 
 - Live verification of multi-object tracking in a genuinely simultaneous different-type scene is

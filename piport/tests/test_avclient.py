@@ -356,7 +356,9 @@ class TestCameraEvent(Base):
         av._motion_state.pop("D", None)
         self.addCleanup(av._motion_state.pop, "D", None)
         self.addCleanup(av._event_max_ms.pop, "D", None)
-        for name, value in (("LEAVE_FALLBACK_S", 3600), ("STARTUP_WINDOW_MS", -1)):
+        # Most tests use still boxes: the must-move rule has its own tests.
+        for name, value in (("LEAVE_FALLBACK_S", 3600), ("STARTUP_WINDOW_MS", -1),
+                            ("MUST_MOVE", ())):
             patcher = mock.patch.object(av, name, value)  # start outside the startup window
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -492,6 +494,91 @@ class TestCameraEvent(Base):
         av._motion_state["D"]["event"] = {"id": 1, "started_ms": 0, "finished": []}
         self.tick()
         self.assertIsNone(av._motion_state["D"].get("event"))
+        self.assertEqual(self.events(), [])
+
+    def _park_car(self, car):
+        av._event_max_ms["D"] = 0
+        self.tick(car)
+        self.tick(car)                   # time limit: leave, car parks
+        av._event_max_ms["D"] = 10 ** 9
+        self.sent.clear()
+
+    def test_weak_boxes_dont_walk_a_parked_car_awake(self):
+        # Live 2026-10-17 12:25 (doorbell): weak boxes shrank a parked car's box onto its
+        # lower half, which counted as the car moving.
+        car = dict(self.CAR, coord=[388, 437, 144, 171])
+        self._park_car(car)
+        for box in ([385, 437, 99, 171], [385, 468, 87, 139], [384, 510, 71, 97],
+                    [384, 515, 69, 92]):
+            for _ in range(av.STATIONARY_RESUME_TICKS + 1):
+                self.tick(dict(car, score=av.KEEP_THRESH + 0.05, coord=box))
+        self.assertEqual(self.events(), [])
+        self.assertTrue(av._motion_state["D"]["tracks"][1].get("stationary_coord"))
+
+    def test_box_inside_a_parked_car_is_the_same_car(self):
+        car = dict(self.CAR, coord=[388, 437, 144, 171])
+        self._park_car(car)
+        self.tick(car, dict(car, score=0.6, coord=[390, 515, 69, 92]))
+        self.assertEqual(self.events(), [])
+        self.assertEqual(list(av._motion_state["D"]["tracks"]), [1])
+
+    def test_strong_move_still_wakes_a_parked_car(self):
+        car = dict(self.CAR, coord=[388, 437, 144, 171])
+        self._park_car(car)
+        self.tick(dict(car, coord=[700, 437, 144, 171]))
+        self.assertEqual(self.events(), [("enter", ["vehicle"], [])])
+
+    def _must_move(self):
+        patcher = mock.patch.object(av, "MUST_MOVE", ("person", "animal"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_still_animal_never_opens_an_event(self):
+        # Live 2026-10-17 13:33, 13:54, 14:31 (Backyard): a tree stump scored "animal" ~0.5.
+        self._must_move()
+        stump = {"objectType": "animal", "score": 0.6, "coord": [788, 571, 98, 203]}
+        for _ in range(av.STILL_TICKS + 5):
+            self.tick(dict(stump, coord=[789, 569, 95, 204]))
+        self.assertEqual(self.events(), [])
+
+    def test_moving_animal_opens_an_event(self):
+        self._must_move()
+        cat = {"objectType": "animal", "score": 0.7, "coord": [300, 600, 80, 60]}
+        self.tick(cat)
+        self.assertEqual(self.events(), [])
+        self.tick(dict(cat, coord=[340, 600, 80, 60]))      # moved half its width
+        self.assertEqual(self.events(), [("enter", ["animal"], [])])
+
+    def test_walking_person_still_waits_for_confirm_ms(self):
+        self._must_move()
+        clock = self._clock()
+        av._event_start_ms["D"] = 1000
+        for x in (400, 450, 500):
+            self.tick(dict(self.PERSON, coord=[x, 200, 200, 600]))
+            clock[0] += 400
+        self.assertEqual(self.events(), [])
+        self.tick(dict(self.PERSON, coord=[550, 200, 200, 600]))
+        self.assertEqual(self.events(), [("enter", ["person"], [])])
+
+    def test_face_confirms_with_its_person(self):
+        # Live 13:54:51: a face found once was dropped before it could confirm on its own.
+        clock = self._clock()
+        av._event_start_ms["D"] = 1000
+        self.tick(self.PERSON, self.FACE)
+        for _ in range(5):
+            clock[0] += 300
+            self.tick(self.PERSON)                    # the face isn't re-found every frame
+        self.assertEqual([e[1] for e in self.events()], [["person"]])
+        self.tick(self.PERSON, self.FACE)
+        tracks = av._motion_state["D"]["tracks"]
+        self.assertTrue(all(tr.get("confirmed") for tr in tracks.values()))
+
+    def test_face_alone_never_confirms(self):
+        clock = self._clock()
+        av._event_start_ms["D"] = 1000
+        for _ in range(5):
+            self.tick(self.FACE)
+            clock[0] += 500
         self.assertEqual(self.events(), [])
 
     def test_parked_car_flickering_comes_back_quietly(self):
@@ -1548,6 +1635,13 @@ class _Chunks:
     def read1(self, _n):
         chunk, self.data = self.data[:self.size], self.data[self.size:]
         return chunk
+
+
+class TestMotionGateDefault(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin" and "AIPORT_MOTION_GATE" not in os.environ,
+                         "macOS default only")
+    def test_off_on_macos(self):
+        self.assertFalse(av.MOTION_GATE)
 
 
 class TestFrameJpegs(unittest.TestCase):

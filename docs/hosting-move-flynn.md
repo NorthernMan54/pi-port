@@ -25,7 +25,7 @@ once Flynn is running.
 | --- | --- | --- |
 | Console | `AIPORT_CONSOLE_HOST=192.168.1.1` | the Protect console (Cottage GW) |
 | Detector model | `AIPORT_MODEL_PATH=…/piport/models/yolov5s.onnx` | YOLOv5s on Core ML (~8 ms/frame on M1 Pro): better on small/distant objects than YOLOv5n. To try YOLOv9: `AIPORT_MODEL_PATH=…/piport/models/yolov9-s-320.onnx` (copied from Frigate's `model_cache`, 3.4 ms/frame on M2; see `piport/README.md`) |
-| Box delay | `AIPORT_BOX_DELAY_MS=3000,AABBCC3344CC=1800` | back-dates boxes to their frame time. 2.2-3.1 s was measured on Driveway **before** frames were stamped on read; 1800 ms was estimated from a passing sedan on 2026-10-16, also before. Event times now come from each frame's stamp, so re-measure: the residual should be smaller |
+| Box delay | `AIPORT_BOX_DELAY_MS=1500,AABBCC3344CC=1800` | back-dates boxes to their frame time. 2.2-3.1 s was measured on Driveway **before** frames were stamped on read; 1800 ms was estimated from a passing sedan on 2026-10-16, also before. Event times now come from each frame's stamp, so re-measure: the residual should be smaller. 1500 ms for the other cameras is a starting point after Backyard boxes came ~2 s early |
 | Tick rate | default 0.33 s on macOS (`AIPORT_TICK_S`) | how often `moving` updates go out; matches a G5 Bullet's ~330 ms update rate |
 | Detection rate | default 10 frames/s per camera on macOS (`AIPORT_DETECT_FPS`) | frames analysed per second; lower it if the Mac struggles with many cameras |
 | Event end | default 3 s with no detection (`AIPORT_MISS_S`) | a G5 Bullet sends `leave` ~2 s after the object leaves |
@@ -70,7 +70,7 @@ once Flynn is running.
 
    ```bash
    cd ~/Code/pi-port && sudo AIPORT_CONSOLE_HOST=192.168.1.1 \
-     AIPORT_BOX_DELAY_MS=3000,AABBCC3344CC=1800 AIPORT_TICK_S=0.2 \
+     AIPORT_BOX_DELAY_MS=1500,AABBCC3344CC=1800 AIPORT_TICK_S=0.2 \
      AIPORT_MODEL_PATH=$HOME/Code/pi-port/piport/models/yolov9-s-320.onnx \
      caffeinate -is venv/bin/python piport/run_all.py --iface en0 --state-dir ~/.piport-state \
      --mac FCECDAD4C3CD --device-id fe6488e7-7042-5bcb-ab86-6f0ad1a5baed 2>&1 | tee -a ~/piport.log

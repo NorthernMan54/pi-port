@@ -239,14 +239,21 @@ RTSP pull uses `-flags low_delay`.
 **Confirmation.** A new track joins the camera event only after it has been seen for
 Protect's `eventStartMSec` (from `ChangeSmartDetectSettings`; 0 until Protect sends it), so
 a detection lasting a frame or two never opens a dashboard event. A track lost before then
-is dropped without any event. `AIPORT_CONFIRM_MS` overrides Protect's value.
+is dropped without any event. `AIPORT_CONFIRM_MS` overrides Protect's value. A person or
+animal also has to **move** before it confirms (its centre shifting by a quarter of its
+size): a tree stump on Backyard scored "animal" ~0.5 for a minute at a time. A still one
+stays a silent, unconfirmed track. A face or plate confirms as soon as a confirmed person or
+vehicle is there, since it's only looked for inside that box and only once per snapshot.
 
 **Resuming tracks.** A track that closed within `AIPORT_RESUME_S` (default 60 s) is picked
 up again by a same-type detection overlapping its last or first box (IoU >= 0.4): it rejoins
 its event if that is still open, and a vehicle that never moved (centre within a quarter of
 its size) or was parked comes back quietly as parked. Seen live: a car backed in with its
 hatch open and two people unloading it was re-detected as a "new" vehicle in three
-successive events. A person or a car that moved and left is still new next time.
+successive events. A person or a car that moved and left is still new next time. Weak boxes keep a parked
+track but never move or wake it, and a box mostly (70%) inside a parked car's box is part of
+that car, not a new vehicle: on the doorbell, weak boxes shrank a parked car's box onto its
+lower half and a second box on that half opened "vehicle" events while nothing moved.
 
 **Tracking.** Detections match tracks by box overlap; a moving track no box overlaps takes
 the nearest same-type detection near where its last movement predicts it (within 3x its size),
@@ -303,7 +310,10 @@ meaningful frame change skips inference entirely (on a static scene this is the 
 between a busied core and ~1% CPU). `AIPORT_MOTION_GATE=0` disables it and
 `AIPORT_MOTION_GATE_THRESH` tunes the threshold (default `0.02`, on an 80x80 grayscale
 diff). Tracks that are already open always classify, so a stationary object keeps its
-track and can close normally.
+track and can close normally. It is **off by default on macOS** (`AIPORT_MOTION_GATE=1` turns it
+on): the diff is averaged over the whole frame, so a person walking through Backyard's
+background (~0.5% of the frame) never reached the detector, and a frame costs only ~3-8 ms
+there. On a Pi it stays on.
 
 **Conversion must run on a separate x86_64 build host.** `rknn-toolkit-lite2` is the on-device,
 inference-only API (aarch64-only wheels for Python <= 3.12); it can only run an already-converted

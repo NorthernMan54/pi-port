@@ -195,9 +195,21 @@ RESUME_S = float(os.environ.get("AIPORT_RESUME_S") or 60)
 RESUME_IOU = 0.4
 RESUME_MOVE_FRACTION = 0.25
 RESUME_MAX = 32
+# A person or animal joins an event only once its box has moved (centre shifted by more than
+# RESUME_MOVE_FRACTION of its size): a tree stump on Backyard scored "animal" ~0.5 for a
+# minute at a time without moving. A still one stays a silent unconfirmed track.
+MUST_MOVE = ("person", "animal")
+# A face or plate is only looked for inside a person or vehicle box, so it confirms with
+# that parent (it's seen once per snapshot, too rarely to confirm on its own).
+CONFIRM_WITH = {"face": "person", "licensePlate": "vehicle"}
+INSIDE_PARKED_FRACTION = 0.7
 # Motion/scene gate: skip the classifier on a near-static frame with no open track.
-# AIPORT_MOTION_GATE=0 disables; AIPORT_MOTION_GATE_THRESH tunes (default 0.02).
-MOTION_GATE = os.environ.get("AIPORT_MOTION_GATE", "1").strip().lower() not in ("0", "false", "no", "off")
+# AIPORT_MOTION_GATE=0 disables; AIPORT_MOTION_GATE_THRESH tunes (default 0.02). Off by default
+# on macOS, where a frame costs ~3-8 ms: the gate averages change over the whole frame, so a
+# person walking through Backyard's background (~0.5% of the frame) never reached the detector.
+MOTION_GATE = os.environ.get(
+    "AIPORT_MOTION_GATE", "0" if sys.platform == "darwin" else "1"
+).strip().lower() not in ("0", "false", "no", "off")
 MOTION_GATE_THRESH = float(os.environ.get("AIPORT_MOTION_GATE_THRESH", "0.02"))
 _GATE_STRIDE = 8  # sample every Nth pixel -> 80x80 grayscale for the diff
 # Paired camera's smartDetectZones row id -- zonesStatus's key must match it (not always "1").
@@ -996,6 +1008,23 @@ def _center_moved(a, b, frac=RESUME_MOVE_FRACTION):
             or abs((by + bh / 2) - (ay + ah / 2)) > frac * ah)
 
 
+def _inside_parked(tracks, d, frac=INSIDE_PARKED_FRACTION):
+    """tracker_id of a parked same-type track whose box holds >= frac of d's box, or None:
+    a second box on part of a parked car (the doorbell saw one on its lower half) is the
+    same car, not a new vehicle."""
+    x, y, w, h = d["coord"]
+    area = max(1.0, w * h)
+    for tid, tr in tracks.items():
+        if tr["objectType"] != d["objectType"] or not tr.get("stationary_coord"):
+            continue
+        px, py, pw, ph = tr["stationary_coord"]
+        iw = min(x + w, px + pw) - max(x, px)
+        ih = min(y + h, py + ph) - max(y, py)
+        if iw > 0 and ih > 0 and iw * ih / area >= frac:
+            return tid
+    return None
+
+
 def _resume_recent(dev, d, event):
     """(tracker_id, track, how) of a recently closed track detection d continues, taken out
     of dev["recent"]; how is "event" (its event is still open) or "parked" (a vehicle that
@@ -1300,6 +1329,14 @@ def _motion_tick(ws, device_id):
         for tracker_id, tr in list(tracks.items()):
             if tracker_id in matches:
                 d = detections[matches[tracker_id]]
+                if tr.get("stationary_coord") and d["score"] < OPEN_THRESH:
+                    # A weak box only keeps a parked track: it neither moves nor wakes it.
+                    # Live 2026-10-17 12:25 (doorbell): weak boxes (0.30-0.43) on one parked
+                    # car walked a track's box onto a part of the car, which counted as
+                    # moving and opened an event three times.
+                    tr["miss_count"] = 0
+                    tr["seen_ms"] = now_ms
+                    continue
                 _follow(tr, d["coord"])
                 tr["score"] = d["score"]
                 tr["miss_count"] = 0
@@ -1333,7 +1370,9 @@ def _motion_tick(ws, device_id):
                 tr["seen_ms"] = now_ms
                 # Only a full-strength box confirms: weak ones keep a track, never promote it.
                 if (not tr.get("confirmed", True) and d["score"] >= OPEN_THRESH
-                        and now_ms - tr["first_shown_ms"] >= confirm_ms):
+                        and now_ms - tr["first_shown_ms"] >= confirm_ms
+                        and tr["objectType"] not in CONFIRM_WITH
+                        and (tr["objectType"] not in MUST_MOVE or tr.get("moved"))):
                     tr["confirmed"] = True
                     log.info("real motion tick: %s tracker_id=%s confirmed after %d ms, joining "
                              "for deviceID=%s", tr["objectType"], tracker_id,
@@ -1351,7 +1390,7 @@ def _motion_tick(ws, device_id):
                          else MOTION_MISS_TOLERANCE_TICKS)
             if not tr.get("confirmed", True) and tr["miss_count"] >= tolerance:
                 # Gone before it was confirmed: a passing false detection, no event.
-                log.info("real motion tick: unconfirmed %s tracker_id=%s lost, dropped for "
+                (log.info if tr.get("moved") else log.debug)("real motion tick: unconfirmed %s tracker_id=%s lost, dropped for "
                          "deviceID=%s", tr["objectType"], tracker_id, device_id)
                 del tracks[tracker_id]
                 continue
@@ -1380,6 +1419,12 @@ def _motion_tick(ws, device_id):
             if d["score"] < OPEN_THRESH:
                 log.debug("real motion tick: sub-threshold %s (score %.2f) matched no track for "
                           "deviceID=%s -- ignored", d["objectType"], d["score"], device_id)
+                continue
+            part_of = _inside_parked(tracks, d)
+            if part_of is not None:
+                log.debug("real motion tick: %s (score %.2f) lies inside parked tracker_id=%s for "
+                          "deviceID=%s -- part of it, ignored", d["objectType"], d["score"],
+                          part_of, device_id)
                 continue
             resumed = _resume_recent(dev, d, event)
             if resumed:
@@ -1411,7 +1456,9 @@ def _motion_tick(ws, device_id):
                                   "first_coord": list(d["coord"]),
                                   "prev_center": _protect_center(device_id, d["coord"]),
                                   "crossed_lines": {},
-                                  "confirmed": starting or confirm_ms <= 0}
+                                  "confirmed": starting or (
+                                      confirm_ms <= 0 and d["objectType"] not in MUST_MOVE
+                                      and d["objectType"] not in CONFIRM_WITH)}
             _update_still(tracks[tracker_id], now_ms)
             _merge_extra(tracks[tracker_id], d)
             _capture_best(device_id, tracks[tracker_id], d)
@@ -1422,7 +1469,8 @@ def _motion_tick(ws, device_id):
                          "tracker_id=%s", d["objectType"], device_id, tracker_id)
                 continue
             if not tracks[tracker_id]["confirmed"]:
-                log.info("real motion tick: %s detected (score=%.2f), tracker_id=%s waiting %d ms "
+                (log.debug if d["objectType"] in MUST_MOVE or d["objectType"] in CONFIRM_WITH
+                 else log.info)("real motion tick: %s detected (score=%.2f), tracker_id=%s waiting %d ms "
                          "to confirm for deviceID=%s", d["objectType"], d["score"], tracker_id,
                          confirm_ms, device_id)
                 continue
@@ -1440,6 +1488,18 @@ def _motion_tick(ws, device_id):
                 _park(tr)
                 if event is not None and tr.get("event_id") == event["id"]:
                     event["finished"].append((tid, tr))
+
+        # 3b. A face or plate confirms as soon as a confirmed, active track of its parent
+        #     type is there (it was found inside that track's box).
+        for tid, tr in tracks.items():
+            parent = CONFIRM_WITH.get(tr["objectType"])
+            if parent and not tr.get("confirmed", True) and tr["miss_count"] == 0 and any(
+                    p["objectType"] == parent and p.get("confirmed", True)
+                    and not p.get("stationary_coord") for p in tracks.values()):
+                tr["confirmed"] = True
+                log.info("real motion tick: %s tracker_id=%s confirmed with its %s, joining for "
+                         "deviceID=%s", tr["objectType"], tid, parent, device_id)
+                joining.append((tid, tr))
 
         # 4. Camera event lifecycle. Unconfirmed tracks aren't part of it yet.
         active = [(tid, tr) for tid, tr in tracks.items()

@@ -454,6 +454,46 @@ class TestCameraEvent(Base):
         self.tick(self.CAR)                                   # full-strength: confirmed
         self.assertEqual(self.events(), [("enter", ["vehicle"], [])])
 
+    def _clock(self, start=0):
+        clock = [start]
+        patcher = mock.patch.object(av, "_frame_wall_ms", lambda dev: clock[0])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(av._event_start_ms.pop, "D", None)
+        return clock
+
+    def test_weak_boxes_dont_keep_an_unconfirmed_track(self):
+        # Live 2026-10-17 07:08: a car hovering at 0.49 stayed unconfirmed for 88 s.
+        clock = self._clock()
+        av._event_start_ms["D"] = 1000
+        self.tick(self.CAR)
+        weak = dict(self.CAR, score=av.KEEP_THRESH + 0.05)
+        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
+            clock[0] += 100
+            self.tick(weak)
+        self.assertEqual(av._motion_state["D"]["tracks"], {})
+        self.assertEqual(self.events(), [])
+
+    def test_confirmed_and_parked_in_one_tick_opens_nothing(self):
+        # ...then it confirmed and parked in the same tick: an event opened with no
+        # active track, and every later tick crashed closing it.
+        clock = self._clock()
+        av._event_start_ms["D"] = (av.STILL_TICKS + 5) * 100
+        for _ in range(av.STILL_TICKS + 10):
+            self.tick(self.CAR)
+            clock[0] += 100
+        self.tick()
+        self.assertEqual(self.events(), [])
+        self.assertIsNone(av._motion_state["D"].get("event"))
+        self.assertTrue(av._motion_state["D"]["tracks"][1].get("stationary_coord"))
+
+    def test_event_with_no_tracks_closes_quietly(self):
+        self.tick()
+        av._motion_state["D"]["event"] = {"id": 1, "started_ms": 0, "finished": []}
+        self.tick()
+        self.assertIsNone(av._motion_state["D"].get("event"))
+        self.assertEqual(self.events(), [])
+
     def test_parked_car_flickering_comes_back_quietly(self):
         # Live 14:57: a car with its hatch open behind people unloading it kept dropping
         # out; each re-detection joined the next event as another vehicle.

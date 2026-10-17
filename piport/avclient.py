@@ -1007,10 +1007,11 @@ def _resume_recent(dev, d, event):
         iou = max(_iou(tr["coord"], d["coord"]), _iou(tr.get("first_coord") or tr["coord"], d["coord"]))
         if iou < best_iou:
             continue
-        if event is not None and tr.get("event_id") == event["id"]:
+        if tr.get("stationary_coord"):
+            how = "parked"  # stays in its event's finished list, if it is in one
+        elif event is not None and tr.get("event_id") == event["id"]:
             how = "event"
-        elif tr["objectType"] in PARK_WHEN_STILL and (tr.get("stationary_coord")
-                                                      or not tr.get("moved")):
+        elif tr["objectType"] in PARK_WHEN_STILL and not tr.get("moved"):
             how = "parked"
         else:
             continue
@@ -1277,8 +1278,11 @@ def _motion_tick(ws, device_id):
                 if d["objectType"] != tr["objectType"]:
                     continue
                 iou = _iou(tr["coord"], d["coord"])
-                if d["score"] < OPEN_THRESH and iou < IOU_MATCH_THRESHOLD:
-                    continue  # a weak box only keeps a track it overlaps
+                if d["score"] < OPEN_THRESH and (iou < IOU_MATCH_THRESHOLD
+                                                 or not tr.get("confirmed", True)):
+                    # A weak box only keeps a confirmed track it overlaps: one kept a
+                    # car hovering at 0.49 unconfirmed for 88 s (2026-10-17 07:08).
+                    continue
                 if iou > best_iou:
                     best_idx, best_iou = idx, iou
             if best_idx is not None:
@@ -1440,7 +1444,9 @@ def _motion_tick(ws, device_id):
         # 4. Camera event lifecycle. Unconfirmed tracks aren't part of it yet.
         active = [(tid, tr) for tid, tr in tracks.items()
                   if not tr.get("stationary_coord") and tr.get("confirmed", True)]
-        if event is None and joining:
+        # A track can join and park in one tick (still since before it was confirmed):
+        # that's a parked car, not an event.
+        if event is None and joining and active:
             event = dev["event"] = {"id": next(_event_id_counter), "started_ms": now_ms,
                                     "finished": []}
             for _, tr in active:
@@ -1455,6 +1461,13 @@ def _motion_tick(ws, device_id):
             timed_out = now_ms - event["started_ms"] >= max_ms
             if not active or timed_out:
                 members = event["finished"] + active
+            if (not active or timed_out) and not members:
+                # Nothing to report (shouldn't happen): close it quietly rather than
+                # failing every frame with the event stuck open.
+                log.warning("smartDetectZone event %s for deviceID=%s has no tracks left; "
+                            "closing it without a leave", event["id"], device_id)
+                dev["event"] = None
+            elif not active or timed_out:
                 lead = _leave_track(members)
                 log.info("smartDetectZone event %s closed for deviceID=%s (%s; %d track(s), "
                          "snapshot from %s tracker_id=%s)", event["id"], device_id,

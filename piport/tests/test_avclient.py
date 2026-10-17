@@ -581,6 +581,12 @@ class TestCameraEvent(Base):
             clock[0] += 500
         self.assertEqual(self.events(), [])
 
+    def test_empty_static_frame_is_not_logged(self):
+        with mock.patch.object(av, "MOTION_GATE", False), \
+                mock.patch.object(av, "_scene_changed", lambda dev: False), \
+                self.assertNoLogs(av.log, level="INFO"):
+            self.tick()
+
     def test_parked_car_flickering_comes_back_quietly(self):
         # Live 14:57: a car with its hatch open behind people unloading it kept dropping
         # out; each re-detection joined the next event as another vehicle.

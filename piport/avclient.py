@@ -1557,8 +1557,10 @@ def _motion_tick(ws, device_id):
                     _send_event_message(ws, device_id, "moving", event["id"], seen)
                     dev["last_report_ms"] = now_ms
 
+        # Logged only when the frame really changed: with the gate off every frame is
+        # classified, and an empty one isn't news.
         if (not any(d["score"] >= OPEN_THRESH for d in detections)
-                and not tracks and not gated):
+                and not tracks and not gated and changed):
             # Classified and found nothing = non-smart motion (lighting/noise); ignore.
             log.info("real motion tick: scene changed but no person/vehicle/animal found "
                       "for deviceID=%s -- ignoring (not smart-detect-worthy)", device_id)

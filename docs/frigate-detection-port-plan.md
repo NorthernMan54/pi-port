@@ -110,6 +110,8 @@ Frigate's, which are well exercised.
 
 ### Step 4. Pixel-based "did the parked object move" (item 4)
 
+Done: `piport/stationary.py`, used by `_parked_spot_unchanged` in `avclient.py`.
+
 Port `frigate/track/stationary_classifier.py` (`StationaryMotionClassifier`):
 
 - When a track parks, store an anchor crop: the luma inside its median box from the last 10

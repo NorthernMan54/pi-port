@@ -463,6 +463,39 @@ class TestCameraEvent(Base):
         av._event_max_ms["D"] = 10 ** 9
         self.sent.clear()
 
+    def _scene(self, car_at=None):
+        import numpy as _np
+        rng = _np.random.default_rng(3)
+        frame = _np.full((640, 640, 3), 90, _np.uint8)
+        if car_at is not None:  # a textured car at image coords x 388-532, y 437-608 (0-1000)
+            x1 = int(car_at * 0.64)
+            frame[280:389, x1:x1 + 92] = (rng.random((109, 92, 1)) * 200 + 30).astype(_np.uint8)
+        av._latest_frame["D"] = frame
+        self.addCleanup(av._latest_frame.pop, "D", None)
+
+    def test_jittering_boxes_dont_move_a_parked_car_its_pixels_stay(self):
+        # Live 2026-10-17 12:25 (doorbell): boxes on a parked car shrank onto its lower half.
+        self._scene(car_at=388)
+        car = dict(self.CAR, coord=[388, 437, 144, 171])
+        self._park_car(car)
+        self.tick(car)                                       # anchors the parked spot
+        self.assertIn("pixel_anchor", av._motion_state["D"]["tracks"][1])
+        for box in ([385, 437, 99, 171], [385, 468, 87, 139], [384, 510, 71, 97]):
+            for _ in range(av.STATIONARY_RESUME_TICKS + 1):
+                self.tick(dict(car, coord=box))
+        self.assertEqual(self.events(), [])
+        self.assertTrue(av._motion_state["D"]["tracks"][1].get("stationary_coord"))
+
+    def test_parked_car_whose_spot_changed_rejoins(self):
+        self._scene(car_at=388)
+        car = dict(self.CAR, coord=[388, 437, 144, 171])
+        self._park_car(car)
+        self.tick(car)
+        self._scene(car_at=450)                              # the car really rolled forward
+        for _ in range(av.STATIONARY_RESUME_TICKS + 2):
+            self.tick(dict(car, coord=[450, 437, 144, 171]))
+        self.assertEqual(self.events()[0], ("enter", ["vehicle"], []))
+
     def test_box_inside_a_parked_car_is_the_same_car(self):
         car = dict(self.CAR, coord=[388, 437, 144, 171])
         self._park_car(car)

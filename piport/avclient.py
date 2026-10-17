@@ -1352,6 +1352,58 @@ def _moved_since(tr):
     return tr["moved_ticks"] >= STATIONARY_RESUME_TICKS
 
 
+def _frame_gray(device_id):
+    """This frame in grayscale (detector-frame pixels), or None without one or OpenCV."""
+    with _frame_lock:
+        frame = _latest_frame.get(device_id)
+    if frame is None:
+        return None
+    try:
+        import cv2
+    except ImportError:
+        return None
+    return cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+
+
+def _coord_px(coord, shape):
+    """Image-normalised [x, y, w, h] -> pixel box (x1, y1, x2, y2) in a frame of shape."""
+    h, w = shape[:2]
+    x, y, bw, bh = coord
+    s = CAMERA_COORD_END
+    return (x * w / s, y * h / s, (x + bw) * w / s, (y + bh) * h / s)
+
+
+def _anchor_parked(device_id, tracks):
+    """Give each parked track an anchor crop of its spot, for _parked_spot_unchanged."""
+    todo = [tr for tr in tracks.values() if tr.get("stationary_coord") and "pixel_anchor" not in tr]
+    if not todo:
+        return
+    gray = _frame_gray(device_id)
+    if gray is None:
+        return
+    import stationary
+    for tr in todo:
+        tr["pixel_anchor"] = stationary.anchor(gray, _coord_px(tr["stationary_coord"], gray.shape))
+
+
+def _parked_spot_unchanged(device_id, tracker_id, tr):
+    """True if the parked track's spot still looks as it did when it parked (Frigate's
+    stationary classifier), though its boxes say it moved. Without an anchor or a frame,
+    False: the boxes decide, as before."""
+    state = tr.get("pixel_anchor")
+    gray = _frame_gray(device_id) if state else None
+    if gray is None:
+        return False
+    import stationary
+    keep = stationary.still_there(state, gray)
+    ncc, shift = state["last"]
+    log.log(logging.DEBUG if keep else logging.INFO,
+            "real motion tick: parked %s tracker_id=%s boxes moved; its spot %s (ncc %.2f, "
+            "shift %.3f) for deviceID=%s", tr["objectType"], tracker_id,
+            "looks the same, staying parked" if keep else "changed", ncc, shift, device_id)
+    return keep
+
+
 def _motion_tick(ws, device_id):
     # With open tracks we always classify (a stationary object must keep its track
     # and be able to close); otherwise skip the classifier when nothing moved.
@@ -1427,18 +1479,26 @@ def _motion_tick(ws, device_id):
                 _record_score(tr, d["score"])
                 _update_still(tr, now_ms)
                 if tr.get("stationary_coord") and _moved_since(tr):
-                    # A stationary object moved again: it rejoins as a fresh participant.
-                    log.info("real motion tick: stationary %s tracker_id=%s moved, rejoining "
-                             "for deviceID=%s", tr["objectType"], tracker_id, device_id)
-                    tr.pop("stationary_coord")
-                    tr.pop("moved_ticks", None)
-                    tr["first_shown_ms"] = now_ms
-                    tr.pop("best", None)
-                    tr.pop("anchor", None)
-                    _update_still(tr, now_ms)
-                    if event is not None:  # parked earlier in this same event
-                        event["finished"] = [m for m in event["finished"] if m[0] != tracker_id]
-                    joining.append((tracker_id, tr))
+                    if _parked_spot_unchanged(device_id, tracker_id, tr):
+                        # Its boxes moved but its pixels didn't (jitter, a partial box,
+                        # someone walking past): it stays where it parked.
+                        tr["coord"] = list(tr["stationary_coord"])
+                        tr["moved_ticks"] = 0
+                    else:
+                        # A stationary object moved again: it rejoins as a fresh participant.
+                        log.info("real motion tick: stationary %s tracker_id=%s moved, rejoining "
+                                 "for deviceID=%s", tr["objectType"], tracker_id, device_id)
+                        tr.pop("stationary_coord")
+                        tr.pop("moved_ticks", None)
+                        tr.pop("pixel_anchor", None)
+                        tr["first_shown_ms"] = now_ms
+                        tr.pop("best", None)
+                        tr.pop("anchor", None)
+                        _update_still(tr, now_ms)
+                        if event is not None:  # parked earlier in this same event
+                            event["finished"] = [m for m in event["finished"]
+                                                 if m[0] != tracker_id]
+                        joining.append((tracker_id, tr))
                 _merge_extra(tr, d)
                 _capture_best(device_id, tr, d)
                 tr["seen_ms"] = now_ms
@@ -1631,6 +1691,9 @@ def _motion_tick(ws, device_id):
                 if seen:
                     _send_event_message(ws, device_id, "moving", event["id"], seen)
                     dev["last_report_ms"] = now_ms
+
+        # 5. A parked track without a pixel anchor gets one from this frame.
+        _anchor_parked(device_id, tracks)
 
         # Logged only when the frame really changed: with the gate off every frame is
         # classified, and an empty one isn't news.

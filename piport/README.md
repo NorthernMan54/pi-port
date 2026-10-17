@@ -262,6 +262,14 @@ successive events. A person or a car that moved and left is still new next time.
 parked car's box is part of that car, not a new vehicle: on the doorbell a second box on a
 parked car's lower half opened "vehicle" events while nothing moved.
 
+**Parked objects move by their pixels, not their boxes** (`stationary.py`, adapted from
+Frigate's `stationary_classifier.py`, MIT). When a track parks, a crop of its spot becomes an
+anchor. When its boxes later say it moved, the same spot is compared with the anchor
+(normalised cross-correlation and phase-correlation shift): only if the picture there has
+changed on two checks in a row, or drifted, does it rejoin as moving. Otherwise its box snaps
+back to where it parked. On the doorbell, boxes on a parked car shrinking onto its lower half
+had counted as the car moving.
+
 **Tracking.** Detections match tracks by box overlap; a moving track no box overlaps takes
 the nearest same-type detection near where its last movement predicts it (within 3x its size),
 so small, fast objects no longer split into a new track every tick. Parked tracks never take a

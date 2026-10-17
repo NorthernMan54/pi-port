@@ -64,8 +64,10 @@ child=""
 stop_child() {
     if [ -n "$child" ] && kill -0 "$child" 2>/dev/null; then
         kill -INT -- "-$child" 2>/dev/null || kill -INT "$child"   # its whole process group
+        kill -CONT -- "-$child" 2>/dev/null   # a stopped process can't act on the signal
         for _ in $(seq 1 20); do kill -0 "$child" 2>/dev/null || break; sleep 0.5; done
         kill -TERM -- "-$child" 2>/dev/null
+        kill -CONT -- "-$child" 2>/dev/null
         wait "$child" 2>/dev/null
     fi
     child=""
@@ -89,7 +91,8 @@ while true; do
 signal.signal(signal.SIGINT, signal.SIG_DFL)
 os.execv(sys.argv[1], sys.argv[1:])' "$REPO/venv/bin/python" "$REPO/piport/run_all.py" \
         --iface "$PIPORT_IFACE" --state-dir "$PIPORT_STATE_DIR" --mac "$PIPORT_MAC" \
-        --device-id "$PIPORT_DEVICE_ID" &
+        --device-id "$PIPORT_DEVICE_ID" < /dev/null &   # a background job reading the
+    # terminal is stopped (SIGTTIN): ffmpeg and ffprobe read stdin
     child=$!
     while kill -0 "$child" 2>/dev/null; do
         sleep 1

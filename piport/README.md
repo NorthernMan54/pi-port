@@ -133,6 +133,10 @@ Identity and the console endpoint default from `aiport.cfg` -- edit it (or pass 
 before the first run. Then adopt "AI Port" from the Protect UI like a normal camera, and pair a
 real camera to it from the camera's own settings.
 
+On macOS, `sudo scripts/piport_service.sh` runs it from settings in `~/.piport.env`
+(`scripts/piport.env.example`) and restarts it on `touch ~/.piport-restart`, so a code or
+settings change needs neither a new terminal nor the password.
+
 ## Object detection (NPU / CPU)
 
 The pipeline runs a real YOLOv5 model through `detector.py`, which picks a backend at

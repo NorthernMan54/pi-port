@@ -66,15 +66,22 @@ once Flynn is running.
    cd ~/Code/pi-port && sudo scripts/macos_move_host.sh import ~/piport-move.tgz
    ```
 
-6. Check the interface (`route -n get default`, usually `en0`), then start:
+6. Check the interface (`route -n get default`, usually `en0`), put the settings in
+   `~/.piport.env` (start from `scripts/piport.env.example`), then start:
 
    ```bash
-   cd ~/Code/pi-port && sudo AIPORT_CONSOLE_HOST=192.168.1.1 \
-     AIPORT_BOX_DELAY_MS=1500,AABBCC3344CC=1800 AIPORT_TICK_S=0.2 \
-     AIPORT_MODEL_PATH=$HOME/Code/pi-port/piport/models/yolov9-s-320.onnx \
-     caffeinate -is venv/bin/python piport/run_all.py --iface en0 --state-dir ~/.piport-state \
-     --mac FCECDAD4C3CD --device-id fe6488e7-7042-5bcb-ab86-6f0ad1a5baed 2>&1 | tee -a ~/piport.log
+   cd ~/Code/pi-port && sudo scripts/piport_service.sh
    ```
+
+   It runs pi-port with `caffeinate`, logs to the terminal and `~/piport.log`, and
+   restarts it whenever `~/.piport-restart` is touched (no sudo needed), re-reading
+   `~/.piport.env` each time. So after a code or settings change:
+
+   ```bash
+   touch ~/.piport-restart
+   ```
+
+   Ctrl-C in its terminal stops it; if pi-port exits on its own it comes back after 5 s.
 
 7. Delete `~/piport-move.tgz` on both Macs.
 

@@ -95,8 +95,8 @@ class TestRegionDetection(unittest.TestCase):
                       av._motion_state, av._last_parked_check, av._stream_dims):
             table.pop("R", None)
             self.addCleanup(table.pop, "R", None)
-        av._startup_scanned.add("R")
-        self.addCleanup(av._startup_scanned.discard, "R")
+        av._startup_scan["R"] = {"first": -1e9, "last": None}   # startup window over
+        self.addCleanup(av._startup_scan.pop, "R", None)
 
     def frame(self, spot=None):
         f = np.full(SHAPE, 90, np.uint8)
@@ -125,11 +125,26 @@ class TestRegionDetection(unittest.TestCase):
         self.assertEqual(self.det.calls, [])
 
     def test_startup_looks_at_the_whole_frame(self):
-        av._startup_scanned.discard("R")
+        av._startup_scan.pop("R", None)
         self.frame(spot=(1000, 150))
         out = av._classify_frame_detections("R")
         self.assertEqual(len(out), 1)
         self.assertTrue(all(c == (720, 720) for c in self.det.calls))
+
+    def test_startup_look_repeats_through_the_startup_window(self):
+        # One coarse look missed a parked car at the doorbell; keep looking for 15 s.
+        av._startup_scan.pop("R", None)
+        self.frame()
+        av._motion_boxes["R"] = []
+        clock = [1000.0]
+        with mock.patch.object(av.time, "monotonic", lambda: clock[0]):
+            looks = []
+            for t in (0.0, 0.5, 1.1, 1.5, 2.2, 14.9, 15.5, 30.0):
+                clock[0] = 1000.0 + t
+                before = len(self.det.calls)
+                av._classify_frame_detections("R")
+                looks.append(len(self.det.calls) > before)
+        self.assertEqual(looks, [True, False, True, False, True, True, False, False])
 
     def test_parked_object_is_seeded_between_rechecks(self):
         self.frame()

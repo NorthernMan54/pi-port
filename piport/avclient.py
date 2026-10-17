@@ -381,7 +381,7 @@ def _stop_stream(device_id):
         _latest_frame_time.pop(device_id, None)
         _analysed_frame_time.pop(device_id, None)
     _motion_detectors.pop(device_id, None)  # a new stream starts a new background
-    _startup_scanned.discard(device_id)
+    _startup_scan.pop(device_id, None)
     _last_parked_check.pop(device_id, None)
 
 
@@ -682,7 +682,9 @@ def _is_outside_detect_zones(device_id, coord):
     return not any(_point_in_polygon(cx, cy, poly) for poly in polygons)
 
 
-_startup_scanned = set()   # deviceIDs whose detector frame has had its full startup look
+# deviceID -> {"first", "last"}: monotonic s of the stream's first frame and last full look.
+_startup_scan = {}
+STARTUP_SCAN_INTERVAL_S = 1.0
 _last_parked_check = {}    # deviceID -> monotonic s when parked objects were last re-detected
 
 
@@ -712,8 +714,13 @@ def _detect_regions(device_id, detector, frame):
             object_boxes.append(box)
     found = regions.regions_for(shape, object_boxes)
     found += regions.regions_for(shape, [b for b in motion if not regions.inside_any(b, found)])
-    if device_id not in _startup_scanned:
-        _startup_scanned.add(device_id)
+    # A full look about once a second through the startup window, not just on the first
+    # frame: on one coarse look a parked car at the doorbell scored too low, so it wasn't
+    # parked at start and later opened an event as an arrival.
+    scan = _startup_scan.setdefault(device_id, {"first": now, "last": None})
+    if (now - scan["first"] <= STARTUP_WINDOW_MS / 1000.0
+            and (scan["last"] is None or now - scan["last"] >= STARTUP_SCAN_INTERVAL_S)):
+        scan["last"] = now
         found += regions.startup_regions(shape)
     dets = []
     for region in found:
@@ -1603,6 +1610,23 @@ def _parked_spot_unchanged(device_id, tracker_id, tr):
     return keep
 
 
+EMPTY_MOTION_LOG_S = 60.0
+_empty_motion = {}  # deviceID -> [monotonic s of the last log line, frames since]
+
+
+def _log_empty_motion(device_id):
+    """"Scene changed but nothing found", at most once a minute per camera with the count:
+    leaves and shadows on Backyard moved on ~40 frames a minute."""
+    now = time.monotonic()
+    entry = _empty_motion.setdefault(device_id, [None, 0])
+    entry[1] += 1
+    if entry[0] is None or now - entry[0] >= EMPTY_MOTION_LOG_S:
+        log.info("real motion tick: scene changed but no person/vehicle/animal found for "
+                 "deviceID=%s -- ignoring (not smart-detect-worthy; %d such frame(s) since "
+                 "the last note)", device_id, entry[1])
+        entry[0], entry[1] = now, 0
+
+
 def _motion_tick(ws, device_id):
     # With open tracks we always classify (a stationary object must keep its track
     # and be able to close); otherwise skip the classifier when nothing moved.
@@ -1883,8 +1907,7 @@ def _motion_tick(ws, device_id):
         # classified, and an empty one isn't news.
         if not detections and not tracks and not gated and changed:
             # Classified and found nothing = non-smart motion (lighting/noise); ignore.
-            log.info("real motion tick: scene changed but no person/vehicle/animal found "
-                      "for deviceID=%s -- ignoring (not smart-detect-worthy)", device_id)
+            _log_empty_motion(device_id)
 
 
 def _stop_motion_detector(device_id, preserve_tracks=False):

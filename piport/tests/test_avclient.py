@@ -614,6 +614,20 @@ class TestCameraEvent(Base):
             clock[0] += 500
         self.assertEqual(self.events(), [])
 
+    def test_empty_motion_logged_once_a_minute(self):
+        # Live 2026-10-17 (Backyard): leaves and shadows logged this ~40 times a minute.
+        av._empty_motion.pop("D", None)
+        self.addCleanup(av._empty_motion.pop, "D", None)
+        clock = [500.0]
+        with mock.patch.object(av.time, "monotonic", lambda: clock[0]), \
+                self.assertLogs(av.log, level="INFO") as logs:
+            for t in (0, 10, 20, 59, 61, 70):
+                clock[0] = 500.0 + t
+                av._log_empty_motion("D")
+        lines = [r.getMessage() for r in logs.records if "scene changed" in r.getMessage()]
+        self.assertEqual(len(lines), 2)
+        self.assertIn("4 such frame(s)", lines[1])   # 10, 20, 59 and 61
+
     def test_empty_static_frame_is_not_logged(self):
         with mock.patch.object(av, "MOTION_GATE", False), \
                 mock.patch.object(av, "_scene_changed", lambda dev: False), \

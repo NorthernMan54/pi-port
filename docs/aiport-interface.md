@@ -93,6 +93,7 @@ outbound WebSockets, and the console pins its fingerprint at adoption.
 | GET | `/api/1.2/status` | Camera-style capability blob `{fw, board:{hwaddr}, features:{smartDetect,...}}`. Not the real capability mechanism (see `EventFeatureFlagsUpdated`). |
 | GET/POST | `/api/1.2/snapshot`, `/api/snapshot` | Freshest complete JPEG from any paired camera (request has no camera id). 404 if none yet. |
 | GET | `/api/info` | Identity: mac, type, sysid, name, firmware, `isAdopted`, `connectionHost`... |
+| GET | `/api/support` | `{"statusCode":200}` stub. |
 | POST | `/api/adopt`, `/api/readopt` | Legacy paths; accepted but unused by the console. |
 
 Unknown paths get `200 {"statusCode":200}` and are logged.
@@ -219,7 +220,7 @@ URLs from it, and the device's own IP left paired cameras without thumbnails.
 | `ResetAIPortStreams` | Stop every stream (console, firmware ≥ 4.75.6). | Stops all pulls and detectors but keeps track state, since `UiStreamControl` follows straight away; reply `{}` |
 | `ChangeVideoSettings` | A query, not a push. | `{video:{video1:{enabled,width,height,fps,bitrate},video2,video3}, audio:{...}}` — `{}` blocks provisioning. |
 | `ChangeIspSettings` | Query. | `{irLedMode:"auto", wdr:1}` |
-| `ChangeSmartDetectSettings` | Zones for a paired camera: `zones`, `excludeZones`, `lines` (vertices 0–1000). | Stored per `deviceID`; detections outside detect zones / inside exclude zones are dropped; lines drive Line Crossing. |
+| `ChangeSmartDetectSettings` | Zones for a paired camera: `zones`, `excludeZones`, `lines` (vertices 0–1000), and `eventStartMSec`. | Stored per `deviceID`; detections outside detect zones / inside exclude zones are dropped; lines drive Line Crossing; `eventStartMSec` is how long a new track must be seen before it joins the event (section 5). Per-zone sensitivity isn't applied. |
 | `ChangeSmartMotionSettings` | Includes `eventMaxDurationMSec` (default 5 min). | Stored; the device ends long events itself. |
 | `GetRequest` (`what` contains `snapshot`) | Fetch a thumbnail named in an earlier event: `filename`, `uri`, `what`, `deviceID`. | Ack `{}`, then upload the JPEG to `uri` (section 6). |
 | `UpdateFaceDBRequest` | URL of Protect's known-faces DB. | Ack, download to `<state>/facedb/known.db` (matching not implemented). |
@@ -282,8 +283,8 @@ Key rules:
   when it's read from ffmpeg. `AIPORT_BOX_DELAY_MS` back-dates them further by the
   remaining relay and decode delay so boxes line up with playback.
 - Protect keeps **one event per camera**, so all tracks share an `eventId`: `enter` on
-  the first track, one batched `moving` per tick, one `leave` when the last track ends
-  or `eventMaxDurationMSec` expires.
+  the first confirmed track, one batched `moving` per `AIPORT_TICK_S`, one `leave` when
+  the last track ends or `eventMaxDurationMSec` expires.
 
 A `leave` adds thumbnails and final classification:
 
@@ -327,15 +328,24 @@ camera decodes once and splits:
 
 - a full-resolution JPEG written in place to `<stream dir>/<deviceID>.jpg` (every 2 s,
   or every 1 s when plate/face enrichment is on) — the snapshot source;
-- 640×640 RGB raw frames to stdout for the detector.
+- 640×640 RGB raw frames to stdout for the detector, at the detection rate.
 
 The stream dir is RAM-backed (`config.stream_dir`) and shared with `http_api.py` and
 `ucp4_client.py` for their snapshot endpoints. If ffmpeg dies unexpectedly it restarts
 (0.5 s backoff, then 2 s).
 
-Detection runs every `AIPORT_TICK_S` (0.33 s on macOS, 1.5 s elsewhere), gated by a
-cheap frame-diff when no track is open. Tracks close after `AIPORT_MISS_S` (default 3 s)
-without a detection.
+Detecting and reporting run at separate rates:
+
+| Knob | Default | What it controls |
+|------|---------|------------------|
+| `AIPORT_DETECT_FPS` | 10 on macOS; elsewhere one frame per tick | Frames analysed per camera per second. Each frame is analysed once, and tracking runs on every analysed frame. Never slower than reporting. |
+| `AIPORT_TICK_S` | 0.33 s on macOS, 1.5 s elsewhere | How often a batched `moving` goes to the console, with every track seen since the last one (a G5 Bullet sends ~every 330 ms). `enter` and `leave` go out as they happen. |
+| `eventStartMSec` / `AIPORT_CONFIRM_MS` | Protect's value from `ChangeSmartDetectSettings` (0 until sent) | How long a new track must be seen before it joins the event. A track lost before then is dropped with no event, so one- or two-frame false detections never open a dashboard event. The env var overrides Protect's value. |
+| `AIPORT_MISS_S` | 3 s | How long without a detection before a track closes. |
+
+When no track is open, a cheap frame-diff gate (`AIPORT_MOTION_GATE`,
+`AIPORT_MOTION_GATE_THRESH`) skips the detector on a static scene. Its reference frame
+advances at most once per tick, so slow movement still registers at high detection rates.
 
 ## 6. Snapshot upload and face DB (HTTPS to the console)
 

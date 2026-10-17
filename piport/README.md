@@ -160,12 +160,9 @@ for the measured numbers and the known Pi 4 decoder limits.
 
 The CPU detector disables onnxruntime's thread **spin-wait** (it burned ~3 extra cores
 alongside ffmpeg on a Pi 4) and caps threads with `AIPORT_ORT_INTRA_THREADS` (e.g. `2`
-on a Pi 4; unset = onnxruntime's default). `AIPORT_OBJ_THRESH` (default 0.5) is the score a
-detection needs to open a track; a box overlapping an existing track keeps it alive down to
-`AIPORT_KEEP_THRESH` (default 0.3), so a car half hidden by people or cut off at the frame
-edge doesn't drop out. Weak boxes never open a track or take one by distance. The first
-weak tick of a track and its return above 0.5 are logged at INFO; every weak box with
-`--debug`.
+on a Pi 4; unset = onnxruntime's default). `AIPORT_OBJ_THRESH` (default 0.5) is the score every
+detection needs (Frigate's `min_score`); whether a track is real is decided by its median
+score (see **Confirmation**).
 
 On macOS (Apple silicon, bare metal) the onnx backend uses onnxruntime's **Core ML** provider:
 ~6.5 ms vs ~37 ms per frame on CPU (M1 Pro, `yolov5n`), with the same detections. The Core ML
@@ -239,21 +236,27 @@ RTSP pull uses `-flags low_delay`.
 **Confirmation.** A new track joins the camera event only after it has been seen for
 Protect's `eventStartMSec` (from `ChangeSmartDetectSettings`; 0 until Protect sends it), so
 a detection lasting a frame or two never opens a dashboard event. A track lost before then
-is dropped without any event. `AIPORT_CONFIRM_MS` overrides Protect's value. A person or
-animal also has to **move** before it confirms (its centre shifting by a quarter of its
-size): a tree stump on Backyard scored "animal" ~0.5 for a minute at a time. A still one
-stays a silent, unconfirmed track. A face or plate confirms as soon as a confirmed person or
-vehicle is there, since it's only looked for inside that box and only once per snapshot.
+is dropped without any event. `AIPORT_CONFIRM_MS` overrides Protect's value.
+
+It must also be a **true positive**, Frigate's rule (`frigate/track/tracked_object.py`): the
+median of its last 10 scores, counting 0.0 for each analysed frame it was missed in, must
+reach `AIPORT_TRUE_THRESH` (default 0.7; per type as `0.7,animal=0.75`). Once reached it
+stays reached, and the track confirms as soon as it is also old enough, even on a frame it
+was missed in. A tree stump on Backyard (median ~0.55) and a pot by the doorbell never pass;
+a sedan seen on only two frames (0.85, 0.78) passes on the second and still gets its event
+after the 1 s wait. A track that never passes is dropped silently; the debug log gives its
+median, for tuning the threshold per type. A face or plate confirms as soon as a confirmed
+person or vehicle is there, since it's only looked for inside that box and only once per
+snapshot.
 
 **Resuming tracks.** A track that closed within `AIPORT_RESUME_S` (default 60 s) is picked
 up again by a same-type detection overlapping its last or first box (IoU >= 0.4): it rejoins
 its event if that is still open, and a vehicle that never moved (centre within a quarter of
 its size) or was parked comes back quietly as parked. Seen live: a car backed in with its
 hatch open and two people unloading it was re-detected as a "new" vehicle in three
-successive events. A person or a car that moved and left is still new next time. Weak boxes keep a parked
-track but never move or wake it, and a box mostly (70%) inside a parked car's box is part of
-that car, not a new vehicle: on the doorbell, weak boxes shrank a parked car's box onto its
-lower half and a second box on that half opened "vehicle" events while nothing moved.
+successive events. A person or a car that moved and left is still new next time. A box mostly (70%) inside a
+parked car's box is part of that car, not a new vehicle: on the doorbell a second box on a
+parked car's lower half opened "vehicle" events while nothing moved.
 
 **Tracking.** Detections match tracks by box overlap; a moving track no box overlaps takes
 the nearest same-type detection near where its last movement predicts it (within 3x its size),

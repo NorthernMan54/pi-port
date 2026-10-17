@@ -21,6 +21,7 @@ import math
 import os
 import shutil
 import ssl
+import statistics
 import subprocess
 import tempfile
 import sys
@@ -181,12 +182,51 @@ NN_DIST_FACTOR = 3.0
 NN_DIST_MARGIN = 30
 # Min IOU (same objectType) to match a detection to an existing track.
 IOU_MATCH_THRESHOLD = 0.3
-# A detection opens a track at OPEN_THRESH (AIPORT_OBJ_THRESH, as in detector.py) but an
-# existing track it overlaps (IOU_MATCH_THRESHOLD) stays alive down to KEEP_THRESH
-# (AIPORT_KEEP_THRESH): a car with its hatch open behind people unloading it scored
-# 0.50-0.59 and kept dropping out. Weak boxes never open tracks or take one by distance.
-OPEN_THRESH = float(os.environ.get("AIPORT_OBJ_THRESH", "0.5"))
-KEEP_THRESH = min(OPEN_THRESH, float(os.environ.get("AIPORT_KEEP_THRESH", "0.3")))
+# A track is a true positive once the median of its last SCORE_HISTORY scores (0.0 for each
+# analysed frame it was missed in) reaches AIPORT_TRUE_THRESH -- Frigate's false-positive
+# filter (frigate/track/tracked_object.py, MIT). Every detection already needs
+# AIPORT_OBJ_THRESH (detector.py). Seen 2026-10-17: a tree stump on Backyard and a pot by
+# the doorbell scored "animal" ~0.5-0.6 for a minute at a time; a passing sedan scored
+# 0.85 and 0.78 on its only two frames.
+SCORE_HISTORY = 10
+DEFAULT_TRUE_THRESH = 0.7
+
+
+def _parse_true_thresh(spec):
+    """AIPORT_TRUE_THRESH: "<default>[,<objectType>=<value>...]" -> (default, {type: value})."""
+    default, per = DEFAULT_TRUE_THRESH, {}
+    for part in (spec or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            if "=" in part:
+                name, value = part.split("=", 1)
+                per[name.strip()] = float(value)
+            else:
+                default = float(part)
+        except ValueError:
+            log.warning("ignoring bad AIPORT_TRUE_THRESH entry %r", part)
+    return default, per
+
+
+_TRUE_THRESH_DEFAULT, _TRUE_THRESH = _parse_true_thresh(os.environ.get("AIPORT_TRUE_THRESH"))
+
+
+def _true_thresh(object_type):
+    return _TRUE_THRESH.get(object_type, _TRUE_THRESH_DEFAULT)
+
+
+def _record_score(tr, score):
+    """Add this frame's score (0.0 if missed) and latch true_positive once the median of the
+    last SCORE_HISTORY passes the type's threshold."""
+    history = tr.setdefault("score_history", [])
+    history.append(score)
+    del history[:-SCORE_HISTORY]
+    if not tr.get("true_positive"):
+        tr["true_positive"] = statistics.median(history) >= _true_thresh(tr["objectType"])
+
+
 # A same-type detection where a track closed within RESUME_S (AIPORT_RESUME_S) resumes it
 # (IoU >= RESUME_IOU with its last or first box): back into its event while that is still
 # open, or quietly as parked for a vehicle that never moved -- the unloading car came back
@@ -195,10 +235,6 @@ RESUME_S = float(os.environ.get("AIPORT_RESUME_S") or 60)
 RESUME_IOU = 0.4
 RESUME_MOVE_FRACTION = 0.25
 RESUME_MAX = 32
-# A person or animal joins an event only once its box has moved (centre shifted by more than
-# RESUME_MOVE_FRACTION of its size): a tree stump on Backyard scored "animal" ~0.5 for a
-# minute at a time without moving. A still one stays a silent unconfirmed track.
-MUST_MOVE = ("person", "animal")
 # A face or plate is only looked for inside a person or vehicle box, so it confirms with
 # that parent (it's seen once per snapshot, too rarely to confirm on its own).
 CONFIRM_WITH = {"face": "person", "licensePlate": "vehicle"}
@@ -613,7 +649,7 @@ def _classify_frame_detections(device_id):
         return []
     try:
         detector = _get_detector()
-        results = detector.detect(frame, min_score=KEEP_THRESH)
+        results = detector.detect(frame)
     except Exception:
         log.exception("classification failed for deviceID=%s", device_id)
         return []
@@ -623,18 +659,16 @@ def _classify_frame_detections(device_id):
     for r in results:
         x1, y1, x2, y2 = r["box"]
         coord = [max(0, x1 * s), max(0, y1 * s), max(1, (x2 - x1) * s), max(1, (y2 - y1) * s)]
-        report = log.info if r["score"] >= OPEN_THRESH else log.debug
         if _is_excluded(device_id, coord):
-            report("real motion tick: %s detection excluded by configured excludeZones for "
+            log.info("real motion tick: %s detection excluded by configured excludeZones for "
                       "deviceID=%s (score=%.2f)", r["objectType"], device_id, r["score"])
             continue
         if _is_outside_detect_zones(device_id, coord):
-            report("real motion tick: %s detection outside all configured detection zones for "
+            log.info("real motion tick: %s detection outside all configured detection zones for "
                       "deviceID=%s (score=%.2f)", r["objectType"], device_id, r["score"])
             continue
         d = {"objectType": r["objectType"], "score": r["score"], "coord": coord}
-        if (r["objectType"] == "vehicle" and r["score"] >= OPEN_THRESH
-                and enrich.vehicle_attrs_enabled()):
+        if r["objectType"] == "vehicle" and enrich.vehicle_attrs_enabled():
             try:
                 attrs = enrich.vehicle_attributes(r.get("label"), frame, coord)
             except Exception:
@@ -1286,7 +1320,7 @@ def _motion_tick(ws, device_id):
     else:
         detections = _dedupe_detections(_classify_frame_detections(device_id))
         detections += _enrich_detections(
-            device_id, [d for d in detections if d["score"] >= OPEN_THRESH])
+            device_id, detections)
     with _motion_lock:
         now_ms = _frame_wall_ms(device_id)
         confirm_ms = _confirm_ms(device_id)
@@ -1321,11 +1355,6 @@ def _motion_tick(ws, device_id):
                 if d["objectType"] != tr["objectType"]:
                     continue
                 iou = _iou(tr["coord"], d["coord"])
-                if d["score"] < OPEN_THRESH and (iou < IOU_MATCH_THRESHOLD
-                                                 or not tr.get("confirmed", True)):
-                    # A weak box only keeps a confirmed track it overlaps: one kept a
-                    # car hovering at 0.49 unconfirmed for 88 s (2026-10-17 07:08).
-                    continue
                 if iou > best_iou:
                     best_idx, best_iou = idx, iou
             if best_idx is not None:
@@ -1334,8 +1363,7 @@ def _motion_tick(ws, device_id):
         for tracker_id, tr in sorted(tracks.items(), key=lambda m: m[1]["miss_count"]):
             if tracker_id in matches or tr.get("stationary_coord"):
                 continue
-            idx = _nearest_detection(tr, detections,
-                                     [i for i in unclaimed if detections[i]["score"] >= OPEN_THRESH])
+            idx = _nearest_detection(tr, detections, unclaimed)
             if idx is not None:
                 matches[tracker_id] = idx
                 unclaimed.remove(idx)
@@ -1343,28 +1371,12 @@ def _motion_tick(ws, device_id):
         for tracker_id, tr in list(tracks.items()):
             if tracker_id in matches:
                 d = detections[matches[tracker_id]]
-                if tr.get("stationary_coord") and d["score"] < OPEN_THRESH:
-                    # A weak box only keeps a parked track: it neither moves nor wakes it.
-                    # Live 2026-10-17 12:25 (doorbell): weak boxes (0.30-0.43) on one parked
-                    # car walked a track's box onto a part of the car, which counted as
-                    # moving and opened an event three times.
-                    tr["miss_count"] = 0
-                    tr["seen_ms"] = now_ms
-                    continue
                 _follow(tr, d["coord"])
                 tr["score"] = d["score"]
                 tr["miss_count"] = 0
                 if _center_moved(tr.get("first_coord") or d["coord"], d["coord"]):
                     tr["moved"] = True
-                if d["score"] < OPEN_THRESH:
-                    tr["weak_ticks"] = tr.get("weak_ticks", 0) + 1
-                    (log.info if tr["weak_ticks"] == 1 else log.debug)(
-                        "real motion tick: %s tracker_id=%s kept on sub-threshold score %.2f "
-                        "for deviceID=%s", tr["objectType"], tracker_id, d["score"], device_id)
-                elif tr.get("weak_ticks"):
-                    log.info("real motion tick: %s tracker_id=%s back above %.2f (score %.2f) "
-                             "after %d sub-threshold tick(s) for deviceID=%s", tr["objectType"],
-                             tracker_id, OPEN_THRESH, d["score"], tr.pop("weak_ticks"), device_id)
+                _record_score(tr, d["score"])
                 _update_still(tr, now_ms)
                 if tr.get("stationary_coord") and _moved_since(tr):
                     # A stationary object moved again: it rejoins as a fresh participant.
@@ -1382,16 +1394,6 @@ def _motion_tick(ws, device_id):
                 _merge_extra(tr, d)
                 _capture_best(device_id, tr, d)
                 tr["seen_ms"] = now_ms
-                # Only a full-strength box confirms: weak ones keep a track, never promote it.
-                if (not tr.get("confirmed", True) and d["score"] >= OPEN_THRESH
-                        and now_ms - tr["first_shown_ms"] >= confirm_ms
-                        and tr["objectType"] not in CONFIRM_WITH
-                        and (tr["objectType"] not in MUST_MOVE or tr.get("moved"))):
-                    tr["confirmed"] = True
-                    log.info("real motion tick: %s tracker_id=%s confirmed after %d ms, joining "
-                             "for deviceID=%s", tr["objectType"], tracker_id,
-                             now_ms - tr["first_shown_ms"], device_id)
-                    joining.append((tracker_id, tr))
                 # Line Crossing: check this frame's movement against configured lines.
                 new_center = _protect_center(device_id, d["coord"])
                 if tr["objectType"] not in ("licensePlate", "face") and tr.get("confirmed", True):
@@ -1400,12 +1402,14 @@ def _motion_tick(ws, device_id):
                 continue
             # No matching detection this frame for this track.
             tr["miss_count"] += 1
+            _record_score(tr, 0.0)
             tolerance = (PARKED_MISS_TOLERANCE_TICKS if tr.get("stationary_coord")
                          else MOTION_MISS_TOLERANCE_TICKS)
             if not tr.get("confirmed", True) and tr["miss_count"] >= tolerance:
                 # Gone before it was confirmed: a passing false detection, no event.
-                (log.info if tr.get("moved") else log.debug)("real motion tick: unconfirmed %s tracker_id=%s lost, dropped for "
-                         "deviceID=%s", tr["objectType"], tracker_id, device_id)
+                log.debug("real motion tick: unconfirmed %s tracker_id=%s lost (median score "
+                          "%.2f), dropped for deviceID=%s", tr["objectType"], tracker_id,
+                          statistics.median(tr.get("score_history") or [0.0]), device_id)
                 del tracks[tracker_id]
                 continue
             if tr["miss_count"] < tolerance:
@@ -1423,17 +1427,12 @@ def _motion_tick(ws, device_id):
                 event["finished"].append((tracker_id, tr))  # its snapshot goes in the leave
             _close_line_events(ws, device_id, tracker_id, tr)
             del tracks[tracker_id]
-            tr.pop("weak_ticks", None)
             dev["recent"].append((tracker_id, tr, now_ms))
 
         # 2. Any unclaimed detection resumes a track that just closed, or opens a new track
-        #    and joins the camera event. Weak ones can do neither.
+        #    (which joins the camera event once confirmed).
         for idx in unclaimed:
             d = detections[idx]
-            if d["score"] < OPEN_THRESH:
-                log.debug("real motion tick: sub-threshold %s (score %.2f) matched no track for "
-                          "deviceID=%s -- ignored", d["objectType"], d["score"], device_id)
-                continue
             part_of = _inside_parked(tracks, d)
             if part_of is not None:
                 log.debug("real motion tick: %s (score %.2f) lies inside parked tracker_id=%s for "
@@ -1469,10 +1468,11 @@ def _motion_tick(ws, device_id):
                                   "first_shown_ms": now_ms, "seen_ms": now_ms, "miss_count": 0,
                                   "first_coord": list(d["coord"]),
                                   "prev_center": _protect_center(device_id, d["coord"]),
-                                  "crossed_lines": {},
-                                  "confirmed": starting or (
-                                      confirm_ms <= 0 and d["objectType"] not in MUST_MOVE
-                                      and d["objectType"] not in CONFIRM_WITH)}
+                                  "crossed_lines": {}}
+            _record_score(tracks[tracker_id], d["score"])
+            tracks[tracker_id]["confirmed"] = starting or (
+                confirm_ms <= 0 and tracks[tracker_id]["true_positive"]
+                and d["objectType"] not in CONFIRM_WITH)
             _update_still(tracks[tracker_id], now_ms)
             _merge_extra(tracks[tracker_id], d)
             _capture_best(device_id, tracks[tracker_id], d)
@@ -1483,15 +1483,28 @@ def _motion_tick(ws, device_id):
                          "tracker_id=%s", d["objectType"], device_id, tracker_id)
                 continue
             if not tracks[tracker_id]["confirmed"]:
-                (log.debug if d["objectType"] in MUST_MOVE or d["objectType"] in CONFIRM_WITH
-                 else log.info)("real motion tick: %s detected (score=%.2f), tracker_id=%s waiting %d ms "
-                         "to confirm for deviceID=%s", d["objectType"], d["score"], tracker_id,
-                         confirm_ms, device_id)
+                log.debug("real motion tick: %s detected (score=%.2f), tracker_id=%s waiting to "
+                          "confirm for deviceID=%s", d["objectType"], d["score"], tracker_id,
+                          device_id)
                 continue
             log.info("real motion tick: %s detected (score=%.2f), opening smartDetectZone track "
                       "for deviceID=%s tracker_id=%s", d["objectType"], d["score"],
                       device_id, tracker_id)
             joining.append((tracker_id, tracks[tracker_id]))
+
+        # 2b. A track confirms once it's a true positive (median score) and has been around
+        #     for Protect's eventStartMSec -- even on a frame it was missed in, so an object
+        #     seen on only its first few frames still makes its event.
+        for tid, tr in tracks.items():
+            if (not tr.get("confirmed", True) and tr.get("true_positive")
+                    and tr["objectType"] not in CONFIRM_WITH
+                    and now_ms - tr["first_shown_ms"] >= confirm_ms):
+                tr["confirmed"] = True
+                log.info("real motion tick: %s tracker_id=%s confirmed after %d ms (median score "
+                         "%.2f), joining for deviceID=%s", tr["objectType"], tid,
+                         now_ms - tr["first_shown_ms"], statistics.median(tr["score_history"]),
+                         device_id)
+                joining.append((tid, tr))
 
         # 3. A vehicle that has stopped (still ~30 s) parks; its snapshot stays in the leave.
         for tid, tr in tracks.items():
@@ -1573,8 +1586,7 @@ def _motion_tick(ws, device_id):
 
         # Logged only when the frame really changed: with the gate off every frame is
         # classified, and an empty one isn't news.
-        if (not any(d["score"] >= OPEN_THRESH for d in detections)
-                and not tracks and not gated and changed):
+        if not detections and not tracks and not gated and changed:
             # Classified and found nothing = non-smart motion (lighting/noise); ignore.
             log.info("real motion tick: scene changed but no person/vehicle/animal found "
                       "for deviceID=%s -- ignoring (not smart-detect-worthy)", device_id)

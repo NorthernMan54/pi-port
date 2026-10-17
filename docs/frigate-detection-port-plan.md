@@ -60,6 +60,9 @@ Backyard zones in Protect afterwards.
 
 ### Step 2. True-positive gating by median score (item 1)
 
+Done. One change from the plan: a track confirms once it is a true positive and old enough even
+on a frame it was missed in, so Protect's `eventStartMSec` doesn't drop objects seen briefly.
+
 Port Frigate's `TrackedObject.compute_score` / `_is_false_positive`:
 
 - Each detection still needs `AIPORT_OBJ_THRESH` (0.5) to exist at all (Frigate's `min_score`).

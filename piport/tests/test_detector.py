@@ -258,9 +258,6 @@ class TestAnchorFree(unittest.TestCase):
         self.assertEqual(len(boxes), 1)
         self.assertAlmostEqual(float(scores[0]), 0.35, places=5)
 
-    def test_keep_thresh_never_above_obj_thresh(self):
-        self.assertLessEqual(detector.KEEP_THRESH, detector.OBJ_THRESH)
-
     def test_empty(self):
         import numpy as np
         boxes, _, _ = detector._post_process_anchor_free(np.zeros((1, 84, 5), np.float32))

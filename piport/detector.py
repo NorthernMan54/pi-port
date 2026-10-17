@@ -44,9 +44,6 @@ IMG_SIZE = (640, 640)  # (width, height) of the frames callers pass; models may 
 # Objectness x class gate; raised from 0.35 to suppress night false "person" hits
 # (0.36-0.48). Override with AIPORT_OBJ_THRESH.
 OBJ_THRESH = float(os.environ.get("AIPORT_OBJ_THRESH", "0.5"))
-# An object already being tracked only needs this much to stay tracked (AIPORT_KEEP_THRESH):
-# a car with its hatch open behind people scored 0.50-0.59 and kept dropping out.
-KEEP_THRESH = min(OBJ_THRESH, float(os.environ.get("AIPORT_KEEP_THRESH", "0.3")))
 NMS_THRESH = 0.45
 
 # AI Port's objectType vocabulary is just person/vehicle/animal; map YOLO's

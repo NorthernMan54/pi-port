@@ -29,7 +29,7 @@ once Flynn is running.
 | Tick rate | default 0.33 s on macOS (`AIPORT_TICK_S`) | how often `moving` updates go out; matches a G5 Bullet's ~330 ms update rate |
 | Detection rate | default 10 frames/s per camera on macOS (`AIPORT_DETECT_FPS`) | frames analysed per second; lower it if the Mac struggles with many cameras |
 | Event end | default 3 s with no detection (`AIPORT_MISS_S`) | a G5 Bullet sends `leave` ~2 s after the object leaves |
-| Tracks | keep at score 0.3 (`AIPORT_KEEP_THRESH`), resume within 60 s (`AIPORT_RESUME_S`) | a parked car behind people unloading it kept coming back as a new vehicle |
+| Tracks | confirm on a median score of 0.7 over the last 10 frames (`AIPORT_TRUE_THRESH`), resume within 60 s (`AIPORT_RESUME_S`) | a tree stump and a pot scored "animal" ~0.5-0.6; a parked car behind people unloading it kept coming back as a new vehicle |
 | Log | `2>&1 \| tee -a ~/piport.log` | the terminal keeps only a few minutes |
 | Video decode | VideoToolbox for HEVC cameras, the default on macOS (`AIPORT_HWDEC`) | ~4x less CPU per camera; H.264 (Driveway) stays software |
 | Sleep | `caffeinate -is` | a sleeping Mac drops off the console |

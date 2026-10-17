@@ -366,9 +366,7 @@ class TestCameraEvent(Base):
         av._motion_state.pop("D", None)
         self.addCleanup(av._motion_state.pop, "D", None)
         self.addCleanup(av._event_max_ms.pop, "D", None)
-        # Most tests use still boxes: the must-move rule has its own tests.
-        for name, value in (("LEAVE_FALLBACK_S", 3600), ("STARTUP_WINDOW_MS", -1),
-                            ("MUST_MOVE", ())):
+        for name, value in (("LEAVE_FALLBACK_S", 3600), ("STARTUP_WINDOW_MS", -1)):
             patcher = mock.patch.object(av, name, value)  # start outside the startup window
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -430,42 +428,6 @@ class TestCameraEvent(Base):
             self.tick(self.CAR)
         self.assertEqual(self.events()[-1], ("leave", [], ["face", "person"]))
 
-    def test_weak_score_keeps_an_open_track(self):
-        self.tick(self.CAR)
-        weak = dict(self.CAR, score=av.KEEP_THRESH + 0.05)
-        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS + 2):
-            self.tick(weak)
-        self.assertEqual([e[0] for e in self.events()][-1], "moving")
-        self.assertEqual(len(av._motion_state["D"]["tracks"]), 1)
-
-    def test_weak_score_opens_nothing(self):
-        self.tick(dict(self.CAR, score=av.OPEN_THRESH - 0.05))
-        self.assertEqual(self.events(), [])
-        self.assertEqual(av._motion_state["D"]["tracks"], {})
-
-    def test_weak_box_elsewhere_does_not_take_the_track(self):
-        self.tick(self.CAR)
-        far = dict(self.CAR, score=av.OPEN_THRESH - 0.05, coord=[700, 100, 200, 100])
-        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
-            self.tick(far)
-        self.assertEqual(self.events()[-1][0], "leave")
-
-    def test_weak_box_never_confirms_a_track(self):
-        clock = [0]
-        for target, value in (("_frame_wall_ms", lambda dev: clock[0]),):
-            patcher = mock.patch.object(av, target, value)
-            patcher.start()
-            self.addCleanup(patcher.stop)
-        av._event_start_ms["D"] = 1000
-        self.addCleanup(av._event_start_ms.pop, "D", None)
-        self.tick(self.CAR)                                   # waits to confirm
-        clock[0] = 1500
-        self.tick(dict(self.CAR, score=av.KEEP_THRESH + 0.05))  # old enough, but weak
-        self.assertEqual(self.events(), [])
-        clock[0] = 1700
-        self.tick(self.CAR)                                   # full-strength: confirmed
-        self.assertEqual(self.events(), [("enter", ["vehicle"], [])])
-
     def _clock(self, start=0):
         clock = [start]
         patcher = mock.patch.object(av, "_frame_wall_ms", lambda dev: clock[0])
@@ -473,18 +435,6 @@ class TestCameraEvent(Base):
         self.addCleanup(patcher.stop)
         self.addCleanup(av._event_start_ms.pop, "D", None)
         return clock
-
-    def test_weak_boxes_dont_keep_an_unconfirmed_track(self):
-        # Live 2026-10-17 07:08: a car hovering at 0.49 stayed unconfirmed for 88 s.
-        clock = self._clock()
-        av._event_start_ms["D"] = 1000
-        self.tick(self.CAR)
-        weak = dict(self.CAR, score=av.KEEP_THRESH + 0.05)
-        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
-            clock[0] += 100
-            self.tick(weak)
-        self.assertEqual(av._motion_state["D"]["tracks"], {})
-        self.assertEqual(self.events(), [])
 
     def test_confirmed_and_parked_in_one_tick_opens_nothing(self):
         # ...then it confirmed and parked in the same tick: an event opened with no
@@ -513,18 +463,6 @@ class TestCameraEvent(Base):
         av._event_max_ms["D"] = 10 ** 9
         self.sent.clear()
 
-    def test_weak_boxes_dont_walk_a_parked_car_awake(self):
-        # Live 2026-10-17 12:25 (doorbell): weak boxes shrank a parked car's box onto its
-        # lower half, which counted as the car moving.
-        car = dict(self.CAR, coord=[388, 437, 144, 171])
-        self._park_car(car)
-        for box in ([385, 437, 99, 171], [385, 468, 87, 139], [384, 510, 71, 97],
-                    [384, 515, 69, 92]):
-            for _ in range(av.STATIONARY_RESUME_TICKS + 1):
-                self.tick(dict(car, score=av.KEEP_THRESH + 0.05, coord=box))
-        self.assertEqual(self.events(), [])
-        self.assertTrue(av._motion_state["D"]["tracks"][1].get("stationary_coord"))
-
     def test_box_inside_a_parked_car_is_the_same_car(self):
         car = dict(self.CAR, coord=[388, 437, 144, 171])
         self._park_car(car)
@@ -538,29 +476,60 @@ class TestCameraEvent(Base):
         self.tick(dict(car, coord=[700, 437, 144, 171]))
         self.assertEqual(self.events(), [("enter", ["vehicle"], [])])
 
-    def _must_move(self):
-        patcher = mock.patch.object(av, "MUST_MOVE", ("person", "animal"))
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def test_still_animal_never_opens_an_event(self):
-        # Live 2026-10-17 13:33, 13:54, 14:31 (Backyard): a tree stump scored "animal" ~0.5.
-        self._must_move()
-        stump = {"objectType": "animal", "score": 0.6, "coord": [788, 571, 98, 203]}
-        for _ in range(av.STILL_TICKS + 5):
-            self.tick(dict(stump, coord=[789, 569, 95, 204]))
+    def test_stump_scoring_about_half_never_opens_an_event(self):
+        # Live 2026-10-17 13:33, 13:54, 14:31 (Backyard): a tree stump scored "animal"
+        # 0.30-0.73, median ~0.55.
+        stump = {"objectType": "animal", "coord": [788, 571, 98, 203]}
+        for score in [0.5, 0.55, 0.73, 0.52, 0.6, 0.51, 0.58, 0.5, 0.64, 0.55] * 5:
+            self.tick(dict(stump, score=score))
         self.assertEqual(self.events(), [])
 
-    def test_moving_animal_opens_an_event(self):
-        self._must_move()
-        cat = {"objectType": "animal", "score": 0.7, "coord": [300, 600, 80, 60]}
-        self.tick(cat)
+    def test_median_counts_missed_frames_as_zero(self):
+        car = dict(self.CAR, score=0.9)
+        self.tick(dict(car, score=0.6))
+        for _ in range(6):                     # seen every other frame: median 0.45 at best
+            self.tick()
+            self.tick(car)
         self.assertEqual(self.events(), [])
-        self.tick(dict(cat, coord=[340, 600, 80, 60]))      # moved half its width
-        self.assertEqual(self.events(), [("enter", ["animal"], [])])
+
+    def test_strong_object_opens_at_once(self):
+        self.tick(dict(self.PERSON, score=0.85))
+        self.assertEqual(self.events(), [("enter", ["person"], [])])
+
+    def test_median_reaching_threshold_confirms(self):
+        self.tick(dict(self.PERSON, score=0.6))
+        self.tick(dict(self.PERSON, score=0.75))
+        self.assertEqual(self.events(), [])    # median 0.675
+        self.tick(dict(self.PERSON, score=0.9))  # median 0.75
+        self.assertEqual(self.events()[0], ("enter", ["person"], []))
+
+    def test_true_thresh_per_type(self):
+        with mock.patch.object(av, "_TRUE_THRESH", {"animal": 0.9}):
+            self.tick({"objectType": "animal", "score": 0.85, "coord": [300, 600, 80, 60]})
+            self.assertEqual(self.events(), [])
+            self.tick(dict(self.PERSON, score=0.85))
+            self.assertEqual(self.events(), [("enter", ["person"], [])])
+
+    def test_parse_true_thresh(self):
+        self.assertEqual(av._parse_true_thresh(None), (0.7, {}))
+        self.assertEqual(av._parse_true_thresh("0.6, animal=0.8"), (0.6, {"animal": 0.8}))
+        self.assertEqual(av._parse_true_thresh("x,person=0.75"), (0.7, {"person": 0.75}))
+
+    def test_sedan_seen_twice_still_makes_its_event(self):
+        # Live 14:51 (Driveway): a sedan crossing the far road was detected on 2 frames
+        # (0.85, 0.78), less than Protect's 1 s eventStartMSec apart.
+        clock = self._clock()
+        av._event_start_ms["D"] = 1000
+        sedan = dict(self.CAR, coord=[160, 49, 103, 76])
+        self.tick(dict(sedan, score=0.85))
+        clock[0] += 220
+        self.tick(dict(sedan, score=0.78, coord=[126, 58, 105, 80]))
+        for _ in range(10):
+            clock[0] += 100
+            self.tick()
+        self.assertEqual(self.events()[0], ("enter", ["vehicle"], []))
 
     def test_walking_person_still_waits_for_confirm_ms(self):
-        self._must_move()
         clock = self._clock()
         av._event_start_ms["D"] = 1000
         for x in (400, 450, 500):
@@ -787,8 +756,8 @@ class TestCameraEvent(Base):
     def test_unconfirmed_track_dropped_without_event(self):
         self.confirm_after(5000)
         self.tick(self.PERSON)
-        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
-            self.tick()
+        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):   # misses at the detection rate
+            self.tick(after_ms=int(av.DETECT_INTERVAL_S * 1000))
         self.assertEqual(self.sent, [])
         self.assertEqual(av._motion_state["D"]["tracks"], {})
 

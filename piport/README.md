@@ -294,6 +294,10 @@ or shifts at about the same size for ~6 s (someone walking past only shrinks it 
 lines) on a 16:9 canvas the height of the video; a camera of another aspect sits centred
 in it (a 1920x2560 doorbell fills the middle 42%). Boxes are converted to that canvas when
 sent, and zone/line checks run in it; crops and plate/face reads stay in image space.
+A detection is in a zone (or an exclusion zone) when its box's **bottom-centre** is, where the
+object stands, as in Frigate; line crossing still follows the box centre. A person walking
+along Backyard's hedge had their box centre on the edge of zone 2 while their feet were well
+inside it.
 Each track keeps its best-scoring frame (full-res JPEG, box, time); on `leave` the
 object crop, the Full-FoV image and `clockBestWall` come from it, not from the frame
 seconds after the object was last seen. The JPEG is the very frame the detector scored:

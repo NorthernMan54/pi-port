@@ -572,22 +572,31 @@ def _protect_center(device_id, coord):
     return _zone_center_norm(_to_protect(device_id, coord))
 
 
+def _protect_foot(device_id, coord):
+    """Bottom-centre of the box in Protect's canvas space: where the object stands, which
+    zones are tested against (as in Frigate). Line crossing keeps using the centre. Seen
+    live: a person walking along Backyard's hedge had their box centre near the edge of
+    zone 2 while their feet were well inside it."""
+    x, y, w, h = _to_protect(device_id, coord)
+    return x + w / 2.0, y + h
+
+
 def _is_excluded(device_id, coord):
-    """True if the detection box center falls inside any configured excludeZones."""
+    """True if the detection's bottom-centre falls inside any configured excludeZones."""
     polygons = _exclude_zones.get(device_id)
     if not polygons:
         return False
-    cx, cy = _protect_center(device_id, coord)
+    cx, cy = _protect_foot(device_id, coord)
     return any(_point_in_polygon(cx, cy, poly) for poly in polygons)
 
 
 def _is_outside_detect_zones(device_id, coord):
-    """True if the detection center is outside all configured `zones` (no zones
+    """True if the detection's bottom-centre is outside all configured `zones` (no zones
     means no restriction)."""
     polygons = _detect_zones.get(device_id)
     if not polygons:
         return False
-    cx, cy = _protect_center(device_id, coord)
+    cx, cy = _protect_foot(device_id, coord)
     return not any(_point_in_polygon(cx, cy, poly) for poly in polygons)
 
 

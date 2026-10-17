@@ -47,6 +47,8 @@ Size: medium. Risk: low.
 
 ### Step 1. Zones by bottom-centre (item 3)
 
+Done: `_protect_foot` in `avclient.py`; the three recorded clips still replay to 0 events.
+
 - `_is_outside_detect_zones` and `_is_excluded` test `(x + w/2, y + h)` instead of the centre,
   in Protect's coordinate space as now. Line crossing keeps using the centre path (Frigate does
   the same: zones use the bottom-centre, the path uses centroids).

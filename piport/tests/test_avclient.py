@@ -120,8 +120,8 @@ class TestParsers(Base):
 class TestZoneFiltering(Base):
     def test_exclude_and_detect_zones(self):
         av._exclude_zones["M"] = [SQUARE]
-        self.assertTrue(av._is_excluded("M", [4, 4, 2, 2]))    # center (5,5)
-        self.assertFalse(av._is_excluded("M", [40, 40, 2, 2]))  # center (41,41)
+        self.assertTrue(av._is_excluded("M", [4, 4, 2, 2]))    # bottom-centre (5,6)
+        self.assertFalse(av._is_excluded("M", [40, 40, 2, 2]))  # bottom-centre (41,42)
         self.assertFalse(av._is_excluded("OTHER", [4, 4, 2, 2]))  # no zones -> not excluded
 
         av._detect_zones["M2"] = [SQUARE]
@@ -282,6 +282,16 @@ class TestProtectCanvas(Base):
         self.assertAlmostEqual(x, 500 - 500 * 0.421875)
         self.assertAlmostEqual(w, 421.875)
         self.assertEqual((y, h), (244, 747))
+
+    def test_zones_use_the_bottom_centre(self):
+        # Backyard's zone 2 (2026-10-17): its top edge runs from (781, 262) to (1000, 356).
+        # A person by the hedge: box centre above that edge, feet below it.
+        av._stream_dims["B"] = (2688, 1512)
+        av._detect_zones["B"] = [[(22, 353), (781, 262), (1000, 356), (1000, 1000), (38, 1000)]]
+        person = [930, 220, 40, 153]                 # centre y 296; edge at x 950 is y ~334
+        self.assertFalse(av._is_outside_detect_zones("B", person))
+        av._exclude_zones["B"] = [[(900, 200), (1000, 200), (1000, 300), (900, 300)]]
+        self.assertFalse(av._is_excluded("B", person))  # covers the head, not the feet
 
     def test_ultrawide_letterboxed(self):
         av._stream_dims["U"] = (3200, 1200)

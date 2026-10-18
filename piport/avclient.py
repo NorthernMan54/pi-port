@@ -1751,12 +1751,17 @@ def _motion_tick(ws, device_id):
     # With open tracks we always classify (a stationary object must keep its track
     # and be able to close); otherwise skip the classifier when nothing moved.
     with _motion_lock:
-        has_tracks = bool(_motion_state.get(device_id, {}).get("tracks"))
+        dev_state = _motion_state.get(device_id, {})
+        has_tracks = bool(dev_state.get("tracks"))
+        started = dev_state.get("started_ms")
     with _frame_lock:  # this tick describes this frame, whether or not the gate skips it
         if device_id in _latest_frame_time:
             _analysed_frame_time[device_id] = _latest_frame_time[device_id]
     changed = _scene_changed(device_id)
-    gated = MOTION_GATE and not has_tracks and not changed
+    # The startup look runs on a still scene too: live 17:05 the doorbell saw no motion for
+    # 27 s at dusk, so its parked cars were first detected after the window and opened an event.
+    in_startup = started is None or _frame_wall_ms(device_id) - started <= STARTUP_WINDOW_MS
+    gated = MOTION_GATE and not has_tracks and not changed and not in_startup
     if gated:
         log.debug("motion gate: static scene, skipping inference for deviceID=%s", device_id)
         detections = []

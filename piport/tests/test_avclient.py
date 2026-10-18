@@ -773,6 +773,20 @@ class TestCameraEvent(Base):
         self.assertEqual(self.sent, [])
         self.assertTrue(av._motion_state["D"]["tracks"][1].get("stationary_coord"))
 
+    def test_startup_look_runs_on_a_still_scene(self):
+        # Live 17:05 on the doorbell: no motion at dusk, so the gate skipped the startup look.
+        from unittest import mock
+        with mock.patch.object(av, "STARTUP_WINDOW_MS", 15000), \
+                mock.patch.object(av, "MOTION_GATE", True), \
+                mock.patch.object(av, "_scene_changed", lambda dev: False):
+            self.tick(self.CAR)
+            self.tick(self.CAR)
+            self.assertTrue(av._motion_state["D"]["tracks"][1].get("stationary_coord"))
+            av._motion_state["D"]["tracks"].clear()
+            self.tick(self.CAR, after_ms=20000)   # after the window a still scene is gated
+            self.assertEqual(av._motion_state["D"]["tracks"], {})
+        self.assertEqual(self.sent, [])
+
     def test_window_does_not_restart_without_a_stream_restart(self):
         from unittest import mock
         with mock.patch.object(av, "STARTUP_WINDOW_MS", 15000):

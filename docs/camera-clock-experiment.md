@@ -39,3 +39,17 @@ cameras. To handle:
 - no report yet (fall back to today's clocks)
 
 Tests replay a clip recorded with its sender reports.
+
+## Result (2026-10-18, doorbell)
+
+- **Variant A** (camera clock, no skew), walk at 19:29: boxes early in playback, as with the
+  normal clocks; not the ~1.5 s late that placement by the camera clock would have given.
+- **Variant B** (camera clock, `clockWall` +5 s), walk at 19:32: boxes late.
+
+Protect places boxes by `clockWall`; the camera's clock in `clockMonotonic`/`clockStream` doesn't
+change where they're drawn. Phase 2 is not worth doing. The experiment is off (neither setting
+in `~/.piport.env`); the code stays, unused, for a later look.
+
+Walk A also measured the doorbell's real delay: the event's first box was at 19:29:54.007 in
+playback, and the person appears at 19:29:55.307, 1.3 s early with the 1500 ms default. The
+doorbell's residual is about 0.2 s, so its delay is now 200 ms (`8CEDE172C456=200`).

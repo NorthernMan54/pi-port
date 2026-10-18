@@ -161,6 +161,11 @@ alongside ffmpeg on a Pi 4) and caps threads with `AIPORT_ORT_INTRA_THREADS` (e.
 on a Pi 4; unset = onnxruntime's default). `AIPORT_OBJ_THRESH` overrides the detection
 confidence gate.
 
+On macOS (Apple silicon, bare metal) the onnx backend uses onnxruntime's **Core ML** provider
+(`MLProgram` on the Neural Engine): ~6.5 ms vs ~37 ms per frame on CPU (M1 Pro, `yolov5n`),
+with the same detections. `AIPORT_ORT_PROVIDER=cpu` forces CPU; `auto` (default) picks Core ML
+when onnxruntime offers it (never on Linux) and falls back to CPU if the model won't compile.
+
 Classification is also **gated by a cheap frame-diff**: a tick with no open track and no
 meaningful frame change skips inference entirely (on a static scene this is the difference
 between a busied core and ~1% CPU). `AIPORT_MOTION_GATE=0` disables it and

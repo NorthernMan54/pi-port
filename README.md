@@ -95,6 +95,7 @@ paired, the console hands the host an RTSP URL on its own internal relay
 | x86_64 server / PC | amd64 | Verified | `docker/` CPU image; no NPU |
 | Raspberry Pi 4 | BCM2711 | Verified | `docker/` image; H.264 hardware decode bare-metal only |
 | Raspberry Pi 5 | BCM2712 | Untested | CPU image; **no H.264 hardware decoder** (software decode) |
+| Mac (Apple silicon) | M-series | Verified | Bare metal only (Docker Desktop has no LAN L2); `onnxruntime` on the Neural Engine (Core ML) |
 
 ## Features
 
@@ -229,6 +230,26 @@ KillMode=control-group
 WantedBy=multi-user.target
 ```
 
+### macOS (bare metal)
+
+Verified on an Apple-silicon Mac (adopted, 3 cameras paired, detections with thumbnails).
+Run it on the host: Docker Desktop's VM can't do the L2 discovery the console needs.
+With no `/sys`, `/proc` or `ip`, `config.py` finds the interface, MAC and IP through
+`route`, `networksetup` and `ifconfig` (`--iface en0` to pick one explicitly).
+The detector runs on the Neural Engine through onnxruntime's Core ML provider
+(~6.5 ms vs ~37 ms per frame on CPU, M1 Pro); `AIPORT_ORT_PROVIDER=cpu` forces CPU.
+
+```bash
+brew install ffmpeg
+python3 -m venv venv
+venv/bin/pip install -r piport/requirements.txt onnxruntime
+python3 scripts/fetch_models.py                 # downloads yolov5n.onnx
+$EDITOR piport/aiport.cfg                        # set [console] host (+ identity)
+sudo caffeinate -is venv/bin/python piport/run_all.py --iface en0 --state-dir ~/.piport-state
+```
+
+`caffeinate -is` stops the Mac sleeping while it runs (a sleeping Mac drops off the console).
+
 ### Manual install
 
 ```bash
@@ -300,7 +321,7 @@ Device identity, network mode and the console address live in
 | `[console] host` / `port` | — / `7442` | The Protect console to dial when not yet adopted |
 
 Detector/runtime environment overrides: `AIPORT_BACKEND`, `AIPORT_MODEL_PATH`,
-`AIPORT_OBJ_THRESH`, `AIPORT_HWDEC`, `AIPORT_ORT_INTRA_THREADS`,
+`AIPORT_OBJ_THRESH`, `AIPORT_HWDEC`, `AIPORT_ORT_INTRA_THREADS`, `AIPORT_ORT_PROVIDER`,
 `AIPORT_MOTION_GATE` / `AIPORT_MOTION_GATE_THRESH` (see `piport/README.md`).
 
 ## Verification

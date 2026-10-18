@@ -308,6 +308,8 @@ _stream_points = {}
 _exclude_zones = {}
 # Prototype app exposes `zones` (not excludeZones): when non-default, a detection must be inside one.
 _detect_zones = {}
+# deviceID -> each detection zone's objectTypes (None = any), parallel to _detect_zones.
+_detect_zone_types = {}
 # deviceID -> Line Crossing segments parsed from ChangeSmartDetectSettings.lines.
 _lines = {}
 _snapshot_seq_by_device = {}  # deviceID -> monotonic counter for fullfov snapshot filenames
@@ -689,14 +691,27 @@ def _is_excluded(device_id, coord):
     return any(_point_in_polygon(cx, cy, poly) for poly in polygons)
 
 
-def _is_outside_detect_zones(device_id, coord):
-    """True if the detection's bottom-centre is outside all configured `zones` (no zones
-    means no restriction)."""
+# A detection counts in a zone listing what it confirms with (a plate rides its vehicle).
+ZONE_TYPE_ALIASES = {"licensePlate": ("licensePlate", "vehicle")}
+
+
+def _zone_allows(types, object_type):
+    if types is None or object_type is None:
+        return True
+    return any(t in types for t in ZONE_TYPE_ALIASES.get(object_type, (object_type,)))
+
+
+def _is_outside_detect_zones(device_id, coord, object_type=None):
+    """True if the detection's bottom-centre is outside every configured `zones` polygon
+    that lists its objectType (no zones means no restriction): live 16:47 on Driveway two
+    vehicles were reported from a zone set to person/animal/face."""
     polygons = _detect_zones.get(device_id)
     if not polygons:
         return False
+    types = _detect_zone_types.get(device_id) or [None] * len(polygons)
     cx, cy = _protect_foot(device_id, coord)
-    return not any(_point_in_polygon(cx, cy, poly) for poly in polygons)
+    return not any(_zone_allows(t, object_type) and _point_in_polygon(cx, cy, poly)
+                   for poly, t in zip(polygons, types))
 
 
 # deviceID -> {"first", "last"}: monotonic s of the stream's first frame and last full look.
@@ -788,7 +803,7 @@ def _classify_frame_detections(device_id):
             log.info("real motion tick: %s detection excluded by configured excludeZones for "
                       "deviceID=%s (score=%.2f)", r["objectType"], device_id, r["score"])
             continue
-        if _is_outside_detect_zones(device_id, coord):
+        if _is_outside_detect_zones(device_id, coord, r["objectType"]):
             log.info("real motion tick: %s detection outside all configured detection zones for "
                       "deviceID=%s (score=%.2f)", r["objectType"], device_id, r["score"])
             continue
@@ -1088,6 +1103,17 @@ def _iou(box_a, box_b):
     inter = iw * ih
     union = aw * ah + bw * bh - inter
     return inter / union if union > 0 else 0.0
+
+
+def _parse_zone_types(zones_field):
+    """Each zone's objectTypes (None when it doesn't say), in _parse_zones' order."""
+    out = []
+    for zone in (zones_field or {}).values():
+        coord = zone.get("coord") or []
+        if len(coord) >= 6 and len(coord) % 2 == 0:
+            types = zone.get("objectTypes")
+            out.append(list(types) if isinstance(types, list) else None)
+    return out
 
 
 def _parse_zones(zones_field):
@@ -2923,13 +2949,18 @@ def handle_function(ws, msg, device_info):
         if device_id and isinstance(start_ms, (int, float)) and start_ms >= 0:
             _event_start_ms[device_id] = int(start_ms)
         if device_id:
-            _exclude_zones[device_id] = _parse_zones(payload.get("excludeZones"))
-            _detect_zones[device_id] = _parse_zones(payload.get("zones"))
-            _lines[device_id] = _parse_lines(payload.get("lines"))
+            # Protect also sends partial updates ({"isLprCamera": 0}): keep what they omit.
+            if "excludeZones" in payload:
+                _exclude_zones[device_id] = _parse_zones(payload.get("excludeZones"))
+            if "zones" in payload:
+                _detect_zones[device_id] = _parse_zones(payload.get("zones"))
+                _detect_zone_types[device_id] = _parse_zone_types(payload.get("zones"))
+            if "lines" in payload:
+                _lines[device_id] = _parse_lines(payload.get("lines"))
             log.info("ChangeSmartDetectSettings: deviceID=%s now has %d excludeZones "
                       "polygon(s), %d detection-zone polygon(s), %d Line Crossing segment(s)",
-                      device_id, len(_exclude_zones[device_id]), len(_detect_zones[device_id]),
-                      len(_lines[device_id]))
+                      device_id, len(_exclude_zones.get(device_id, ())),
+                      len(_detect_zones.get(device_id, ())), len(_lines.get(device_id, ())))
         if msg.get("responseExpected"):
             send_msg(ws, fn, {}, in_response_to=msg_id)
         return
@@ -2941,6 +2972,7 @@ def handle_function(ws, msg, device_info):
         _stop_all_streams()
         _exclude_zones.clear()
         _detect_zones.clear()
+        _detect_zone_types.clear()
         _lines.clear()
         _clear_adopt_state()
         if msg.get("responseExpected"):

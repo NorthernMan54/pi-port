@@ -37,6 +37,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         av._lines.clear()
         av._detect_zones.clear()
+        av._detect_zone_types.clear()
         av._exclude_zones.clear()
         av._snapshot_filename_to_device.clear()
         av._recent_snapshot_announcements.clear()
@@ -128,6 +129,32 @@ class TestZoneFiltering(Base):
         self.assertFalse(av._is_outside_detect_zones("M2", [4, 4, 2, 2]))
         self.assertTrue(av._is_outside_detect_zones("M2", [40, 40, 2, 2]))
         self.assertFalse(av._is_outside_detect_zones("M3", [40, 40, 2, 2]))  # unset -> no restriction
+
+    def test_zone_object_types(self):
+        # Live 16:47 on Driveway: vehicles were reported from the plants zone, which Protect
+        # has set to person/animal/face only.
+        other = [(100, 0), (200, 0), (200, 100), (100, 100)]
+        av._detect_zones["Z"] = [SQUARE, other]
+        av._detect_zone_types["Z"] = [["person", "vehicle"], ["person", "animal", "face"]]
+        in_square, in_other = [4, 4, 2, 2], [140, 40, 2, 2]
+        self.assertFalse(av._is_outside_detect_zones("Z", in_square, "vehicle"))
+        self.assertTrue(av._is_outside_detect_zones("Z", in_other, "vehicle"))
+        self.assertFalse(av._is_outside_detect_zones("Z", in_other, "person"))
+        self.assertTrue(av._is_outside_detect_zones("Z", in_square, "face"))
+        self.assertFalse(av._is_outside_detect_zones("Z", in_square, "licensePlate"))  # rides vehicle
+        self.assertTrue(av._is_outside_detect_zones("Z", in_other, "licensePlate"))
+        self.assertFalse(av._is_outside_detect_zones("Z", in_other))  # no type: any zone
+
+    def test_settings_carry_zone_types_and_survive_partial_updates(self):
+        zones = {"1": {"coord": [0, 0, 10, 0, 10, 10, 0, 10], "objectTypes": ["vehicle"]},
+                 "2": {"coord": [100, 0, 200, 0, 200, 100, 100, 100]}}
+        av.handle_function(None, {"functionName": "ChangeSmartDetectSettings", "messageId": 1,
+                                  "payload": {"deviceID": "Z", "zones": zones}}, {})
+        self.assertEqual(av._detect_zone_types["Z"], [["vehicle"], None])
+        av.handle_function(None, {"functionName": "ChangeSmartDetectSettings", "messageId": 2,
+                                  "payload": {"deviceID": "Z", "isLprCamera": 0}}, {})
+        self.assertEqual(len(av._detect_zones["Z"]), 2)  # live 11:47: this wiped the zones
+        self.assertEqual(av._detect_zone_types["Z"], [["vehicle"], None])
 
 
 class TestLineCrossing(Base):

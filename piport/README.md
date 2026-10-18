@@ -335,7 +335,10 @@ sent, and zone/line checks run in it; crops and plate/face reads stay in image s
 A detection is in a zone (or an exclusion zone) when its box's **bottom-centre** is, where the
 object stands, as in Frigate; line crossing still follows the box centre. A person walking
 along Backyard's hedge had their box centre on the edge of zone 2 while their feet were well
-inside it.
+inside it. A detection only counts in a zone whose `objectTypes` list its type (a license plate
+counts where vehicles do): a vehicle in a zone set to person/animal/face isn't reported. A
+partial settings update (`{"isLprCamera": 0}`) keeps the zones, exclusion zones and lines it
+leaves out.
 Each track keeps its best-scoring frame (full-res JPEG, box, time); on `leave` the
 object crop, the Full-FoV image and `clockBestWall` come from it, not from the frame
 seconds after the object was last seen. The JPEG is the very frame the detector scored:

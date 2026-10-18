@@ -118,7 +118,7 @@ def replay(av, frames, settings=None, start_ms=0, settle_s=5.0, startup=False):
         shutil.rmtree(patches["_STREAM_DIR"], ignore_errors=True)
         for table in (av._motion_state, av._stream_dims, av._latest_frame,
                       av._latest_frame_seq, av._latest_frame_time, av._analysed_frame_time,
-                      av._detect_zones, av._exclude_zones, av._lines, av._event_start_ms,
+                      av._detect_zones, av._detect_zone_types, av._exclude_zones, av._lines, av._event_start_ms,
                       av._event_max_ms, av._stream_started_monotonic_ms, av._scene_ref,
                       av._motion_detectors, av._motion_settings, av._motion_boxes,
                       av._last_parked_check, av._empty_motion):
@@ -129,7 +129,7 @@ def replay(av, frames, settings=None, start_ms=0, settle_s=5.0, startup=False):
 
 def _run(av, frames, settings, start_ms, settle_s, now):
     import numpy as np
-    for table in (av._motion_state, av._detect_zones, av._exclude_zones, av._lines,
+    for table in (av._motion_state, av._detect_zones, av._detect_zone_types, av._exclude_zones, av._lines,
                   av._event_start_ms, av._event_max_ms, av._motion_detectors,
                   av._motion_settings, av._motion_boxes):
         table.pop(DEVICE, None)
@@ -137,6 +137,7 @@ def _run(av, frames, settings, start_ms, settle_s, now):
         av._stream_dims[DEVICE] = (int(settings["width"]), int(settings["height"]))
     detect = settings.get("smartDetect") or {}
     av._detect_zones[DEVICE] = av._parse_zones(detect.get("zones"))
+    av._detect_zone_types[DEVICE] = av._parse_zone_types(detect.get("zones"))
     av._exclude_zones[DEVICE] = av._parse_zones(detect.get("excludeZones"))
     av._lines[DEVICE] = av._parse_lines(detect.get("lines"))
     if isinstance(detect.get("eventStartMSec"), (int, float)):

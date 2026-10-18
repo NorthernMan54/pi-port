@@ -221,6 +221,12 @@ DEFAULT_TRUE_THRESH = 0.7
 # initialises an object after 2+ hits): a car scoring 0.9 on a single region crop became an
 # event on its own, confirmed a second later with nothing else seen.
 MIN_HITS = 2
+# ...and once it is initialised as Frigate's Norfair tracker does (detect.min_initialized,
+# default half the detection rate, ~0.5 s): a counter starts at 1 on the first detection, goes
+# up 1 per detection and down 1 per miss, and the track counts once it is above
+# MIN_INITIALIZED. Live 19:17 on Backyard four flickering night-time boxes in one corner each
+# became a person event. AIPORT_MIN_INITIALIZED overrides it, in frames.
+MIN_INITIALIZED = int(os.environ.get("AIPORT_MIN_INITIALIZED") or max(int(DETECT_FPS / 2), 2))
 
 
 def _parse_true_thresh(spec):
@@ -256,7 +262,11 @@ def _record_score(tr, score):
     del history[:-SCORE_HISTORY]
     if score > 0:
         tr["hits"] = tr.get("hits", 0) + 1
-    if not tr.get("true_positive") and tr.get("hits", 0) >= MIN_HITS:
+    tr["init_count"] = max(0, tr.get("init_count", 0) + (1 if score > 0 else -1))
+    if tr["init_count"] > MIN_INITIALIZED:
+        tr["initialized"] = True
+    if (not tr.get("true_positive") and tr.get("hits", 0) >= MIN_HITS
+            and tr.get("initialized")):
         tr["true_positive"] = statistics.median(history) >= _true_thresh(tr["objectType"])
 
 

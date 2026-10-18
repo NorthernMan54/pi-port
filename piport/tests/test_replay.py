@@ -71,8 +71,14 @@ class TestReplay(unittest.TestCase):
         events = replay.summarize(sent)
         self.assertEqual(len(events), 1)
         self.assertEqual([o["type"] for o in events[0]["objects"]], ["person"])
-        # it appears at 0.5 s; its track closes AIPORT_MISS_S after it goes at 2.5 s
-        self.assertAlmostEqual(events[0]["start_s"], 0.5, delta=0.3)
+        # it appears at 0.5 s and is sent once it has initialised (MIN_INITIALIZED frames
+        # later), its enter dated back to 0.5 s; its track closes AIPORT_MISS_S after it goes
+        # at 2.5 s
+        init_s = (av.MIN_INITIALIZED + 1) / av.DETECT_FPS
+        self.assertAlmostEqual(events[0]["start_s"], 0.5 + init_s, delta=0.3)
+        walls = [p["clockWall"] for _, p in sent]
+        self.assertAlmostEqual((walls[1] - walls[0]) / 1000.0, av.REPORT_INTERVAL_MS / 1000.0,
+                               delta=0.15)   # back-filled from the first frame
         self.assertAlmostEqual(events[0]["end_s"], 2.5 + av.MOTION_MISS_TOLERANCE_S, delta=0.5)
 
     def test_boxes_move_right(self):

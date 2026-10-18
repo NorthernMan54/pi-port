@@ -396,7 +396,7 @@ class TestCameraEvent(Base):
         # MIN_HITS has its own tests; the rest open on their first frame, as before.
         # TestCameraEventNorfair runs these again with Norfair.
         for name, value in (("LEAVE_FALLBACK_S", 3600), ("STARTUP_WINDOW_MS", -1),
-                            ("MIN_HITS", 1), ("TRACKER", "builtin")):
+                            ("MIN_HITS", 1), ("MIN_INITIALIZED", 0), ("TRACKER", "builtin")):
             patcher = mock.patch.object(av, name, value)  # start outside the startup window
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -599,12 +599,14 @@ class TestCameraEvent(Base):
         self.assertEqual(av._parse_true_thresh("0.6, animal=0.8"), (0.6, {"animal": 0.8}))
         self.assertEqual(av._parse_true_thresh("x,person=0.75"), (0.7, {"person": 0.75}))
 
-    def test_sedan_seen_twice_still_makes_its_event(self):
+    def test_sedan_seen_twice_makes_no_event_under_min_initialized(self):
         # Live 14:51 (Driveway): a sedan crossing the far road was detected on 2 frames
-        # (0.85, 0.78), less than Protect's 1 s eventStartMSec apart.
-        patcher = mock.patch.object(av, "MIN_HITS", 2)   # the live rule
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        # (0.85, 0.78). With Frigate's min_initialized (0.5 s of detections) that is too few,
+        # as in Frigate; region crops now see far-road cars on more frames (9 at 17:20).
+        for name, value in (("MIN_HITS", 2), ("MIN_INITIALIZED", 5)):   # the live rules
+            patcher = mock.patch.object(av, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         clock = self._clock()
         av._event_start_ms["D"] = 1000
         sedan = dict(self.CAR, coord=[160, 49, 103, 76])
@@ -614,7 +616,31 @@ class TestCameraEvent(Base):
         for _ in range(10):
             clock[0] += 100
             self.tick()
-        self.assertEqual(self.events()[0], ("enter", ["vehicle"], []))
+        self.assertEqual(self.events(), [])
+
+    def _live_init(self):
+        for name, value in (("MIN_HITS", 2), ("MIN_INITIALIZED", 5)):
+            patcher = mock.patch.object(av, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_flicker_never_initializes(self):
+        # Live 19:17 on Backyard: a corner box at night, seen on and off, made 4 person events.
+        self._live_init()
+        av._event_start_ms["D"] = 0
+        box = dict(self.PERSON, coord=[884, 667, 115, 331], score=0.8)
+        for seen in (1, 1, 0, 1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 1):
+            self.tick(box if seen else None, after_ms=100) if seen else self.tick(after_ms=100)
+        self.assertEqual(self.events(), [])
+
+    def test_steady_object_initializes_after_half_a_second(self):
+        self._live_init()
+        av._event_start_ms["D"] = 0
+        for i in range(5):
+            self.tick(self.PERSON, after_ms=100)
+        self.assertEqual(self.events(), [])            # counter 5: not above 5 yet
+        self.tick(self.PERSON, after_ms=100)
+        self.assertEqual(self.events()[0][0], "enter")
 
     def test_walking_person_still_waits_for_confirm_ms(self):
         clock = self._clock()

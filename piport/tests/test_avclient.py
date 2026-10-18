@@ -661,6 +661,24 @@ class TestCameraEvent(Base):
         self.assertEqual(len(lines), 2)
         self.assertIn("4 such frame(s)", lines[1])   # 10, 20, 59 and 61
 
+    def test_dropped_detection_logged_once_a_minute(self):
+        # Live 18:10: the doorbell's parked cars, outside its person/animal zone, logged a
+        # line several times a second.
+        for key in [k for k in av._dropped if k[0] == "D"]:
+            av._dropped.pop(key)
+        clock = [500.0]
+        car = {"objectType": "vehicle", "score": 0.77}
+        with mock.patch.object(av.time, "monotonic", lambda: clock[0]), \
+                self.assertLogs(av.log, level="INFO") as logs:
+            for t in (0, 0.1, 0.2, 30, 61):
+                clock[0] = 500.0 + t
+                av._log_dropped("D", car, "outside all configured detection zones")
+            av._log_dropped("D", dict(car, objectType="person"),
+                            "outside all configured detection zones")
+        lines = [r.getMessage() for r in logs.records if "detection outside" in r.getMessage()]
+        self.assertEqual(len(lines), 3)              # vehicle at 0 and 61, person once
+        self.assertIn("4 such detection(s)", lines[1])
+
     def test_empty_static_frame_is_not_logged(self):
         with mock.patch.object(av, "MOTION_GATE", False), \
                 mock.patch.object(av, "_scene_changed", lambda dev: False), \

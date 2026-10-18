@@ -801,12 +801,10 @@ def _classify_frame_detections(device_id):
                         "seeded": r["seeded"]})
             continue
         if _is_excluded(device_id, coord):
-            log.info("real motion tick: %s detection excluded by configured excludeZones for "
-                      "deviceID=%s (score=%.2f)", r["objectType"], device_id, r["score"])
+            _log_dropped(device_id, r, "excluded by configured excludeZones")
             continue
         if _is_outside_detect_zones(device_id, coord, r["objectType"]):
-            log.info("real motion tick: %s detection outside all configured detection zones for "
-                      "deviceID=%s (score=%.2f)", r["objectType"], device_id, r["score"])
+            _log_dropped(device_id, r, "outside all configured detection zones")
             continue
         d = {"objectType": r["objectType"], "score": r["score"], "coord": coord}
         if r["objectType"] == "vehicle" and enrich.vehicle_attrs_enabled():
@@ -1804,6 +1802,23 @@ def _log_empty_motion(device_id):
         log.info("real motion tick: scene changed but no person/vehicle/animal found for "
                  "deviceID=%s -- ignoring (not smart-detect-worthy; %d such frame(s) since "
                  "the last note)", device_id, entry[1])
+        entry[0], entry[1] = now, 0
+
+
+_dropped = {}  # (deviceID, objectType, reason) -> [monotonic s of the last log line, count]
+
+
+def _log_dropped(device_id, r, reason):
+    """A detection dropped by the zones, at most once a minute per camera, type and reason
+    with the count: live 18:10 the doorbell's parked cars (its zone is person/animal only)
+    logged a line several times a second."""
+    now = time.monotonic()
+    entry = _dropped.setdefault((device_id, r["objectType"], reason), [None, 0])
+    entry[1] += 1
+    if entry[0] is None or now - entry[0] >= EMPTY_MOTION_LOG_S:
+        log.info("real motion tick: %s detection %s for deviceID=%s (score=%.2f; %d such "
+                 "detection(s) since the last note)", r["objectType"], reason, device_id,
+                 r["score"], entry[1])
         entry[0], entry[1] = now, 0
 
 

@@ -123,6 +123,8 @@ def replay(av, frames, settings=None, start_ms=0, settle_s=5.0, startup=False):
                       av._motion_detectors, av._motion_settings, av._motion_boxes,
                       av._last_parked_check, av._empty_motion):
             table.pop(DEVICE, None)
+        for key in [k for k in av._dropped if k[0] == DEVICE]:
+            av._dropped.pop(key)
         av._startup_scan.pop(DEVICE, None)
     return sent
 

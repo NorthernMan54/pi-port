@@ -558,6 +558,7 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
         os.close(jpeg_w)
     jpeg_pipe = os.fdopen(jpeg_r, "rb")
     _active_streams[device_id] = proc
+    _start_camera_clock(device_id, url)
     # Origin for this device's clockMonotonic/clockStream (ms since the pull began).
     _stream_started_monotonic_ms[device_id] = int(time.monotonic() * 1000)
     frame_bytes = det_w * det_h * 3
@@ -1563,7 +1564,7 @@ def _send_multi_leave(ws, device_id, event_id, members, fallback):
     level = max(s_["confidenceLevel"] for s_ in snapshots)
     payload = {
         "deviceID": device_id, "clockMonotonic": clock_mono, "clockStream": clock_stream,
-        "clockStreamRate": 1000, "clockWall": now_ms,
+        "clockStreamRate": 1000, "clockWall": _clock_wall(device_id, now_ms),
         # Departing trackers aren't repeated in descriptors (real captures, notes s7).
         "descriptors": [], "displayTimeoutMSec": 200, "edgeType": "leave",
         "eventId": event_id, "objectTypes": [],
@@ -2535,6 +2536,40 @@ def _frame_wall_ms(device_id):
     return _frame_time(device_id)[0] - _box_delay_ms(device_id)
 
 
+# Experiment (docs/camera-clock-experiment.md): for the cameras in AIPORT_CAMERA_CLOCK
+# (deviceIDs), clockMonotonic/clockStream are the camera's own clock from its RTCP sender
+# reports; AIPORT_CLOCK_WALL_SKEW_MS ("<ms>[,<deviceID>=<ms>...]") shifts clockWall, to see
+# which clock Protect places boxes by.
+CAMERA_CLOCK_DEVICES = {d.strip().upper() for d in
+                        os.environ.get("AIPORT_CAMERA_CLOCK", "").split(",") if d.strip()}
+_WALL_SKEW_DEFAULT_MS, _WALL_SKEW_MS = _parse_box_delay(
+    os.environ.get("AIPORT_CLOCK_WALL_SKEW_MS"), "AIPORT_CLOCK_WALL_SKEW_MS")
+_camera_clocks = {}  # deviceID -> camera_clock.Reader (kept across stream restarts)
+
+
+def _start_camera_clock(device_id, url):
+    if str(device_id).upper() not in CAMERA_CLOCK_DEVICES:
+        return
+    reader = _camera_clocks.get(device_id)
+    if reader is not None and reader.url == url:
+        return
+    if reader is not None:
+        reader.stop()
+    import camera_clock
+    _camera_clocks[device_id] = camera_clock.Reader(device_id, url).start()
+    log.info("camera clock experiment on for deviceID=%s (wall skew %d ms)", device_id,
+             _clock_wall_skew_ms(device_id))
+
+
+def _clock_wall_skew_ms(device_id):
+    return _WALL_SKEW_MS.get(str(device_id).upper(), _WALL_SKEW_DEFAULT_MS)
+
+
+def _clock_wall(device_id, now_ms):
+    """clockWall for a message describing now_ms (AIPORT_CLOCK_WALL_SKEW_MS added)."""
+    return now_ms + _clock_wall_skew_ms(device_id)
+
+
 def _stream_clocks(device_id):
     """(clockMonotonic, clockStream) in ms for a device: the device's monotonic
     clock (ms since this process started the stream) and the media-timeline
@@ -2544,6 +2579,11 @@ def _stream_clocks(device_id):
     media timeline with these, so zeros -- what we used to send -- leave the
     console unable to place a track (no live overlay).
     """
+    reader = _camera_clocks.get(device_id)
+    offset = reader.offset_ms() if reader is not None else None
+    if offset is not None:  # the camera's own clock (AIPORT_CAMERA_CLOCK)
+        camera_ms = int(round(_frame_time(device_id)[0] - offset))
+        return camera_ms, camera_ms
     started = _stream_started_monotonic_ms.get(device_id)
     if started is None:
         return 0, 0
@@ -2582,7 +2622,7 @@ def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, statio
         "clockMonotonic": clock_mono,
         "clockStream": clock_stream,
         "clockStreamRate": 1000,
-        "clockWall": now_ms,
+        "clockWall": _clock_wall(device_id, now_ms),
         "descriptors": [{
             "attributes": None,
             "boxColor": "cyan",
@@ -2686,7 +2726,7 @@ def _send_line_detect_event(ws, device_id, line, edge_type, event_id, direction,
         "clockMonotonic": clock_mono,
         "clockStream": clock_stream,
         "clockStreamRate": 1000,
-        "clockWall": now_ms,
+        "clockWall": _clock_wall(device_id, now_ms),
         "descriptors": [{
             "attributes": None,
             "boxColor": "cyan",

@@ -886,6 +886,29 @@ class TestCameraEvent(Base):
         self.assertEqual(len(tracks), 1)
         self.assertEqual(tracks[1]["coord"], [710, 54, 66, 117])
 
+    def test_track_does_not_take_a_box_of_another_size(self):
+        # Live 10:20 on Driveway: a bicycle's track took a 49x136 box beside it, then a
+        # 107x253 one, and held the event open 16 s after the bicycle left.
+        bike = dict(self.CAR)
+        for coord in ([139, 85, 46, 57], [165, 76, 45, 57], [212, 61, 43, 57], [239, 54, 40, 57]):
+            self.tick(dict(bike, coord=coord))
+        self.tick(dict(bike, coord=[265, 22, 49, 136]))
+        tracks = av._motion_state["D"]["tracks"]
+        self.assertEqual(tracks[1]["coord"], [239, 54, 40, 57])
+        self.assertEqual(len(tracks), 2)
+
+    def test_track_follows_a_box_that_grows_gradually(self):
+        for coord in ([100, 300, 40, 60], [120, 290, 55, 80], [140, 280, 75, 110]):
+            self.tick(dict(self.CAR, coord=coord))
+        tracks = av._motion_state["D"]["tracks"]
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual(tracks[1]["coord"], [140, 280, 75, 110])
+
+    def test_size_jump(self):
+        self.assertTrue(av._size_jump([0, 0, 40, 57], [0, 0, 49, 136]))   # 2.4x taller
+        self.assertTrue(av._size_jump([0, 0, 107, 253], [0, 0, 49, 136]))  # 2.2x narrower
+        self.assertFalse(av._size_jump([0, 0, 40, 57], [0, 0, 60, 90]))
+
     def test_nearest_radius_is_capped(self):
         tall = {"objectType": "vehicle", "coord": [280, 96, 90, 264], "miss_count": 20}
         far = {"objectType": "vehicle", "coord": [600, 96, 90, 264]}

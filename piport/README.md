@@ -292,7 +292,9 @@ swapped them. Install it without its dependency pins, which would downgrade nump
 the nearest same-type detection near where its last movement predicts it (within 3x its size,
 at most 150 of 1000, widening by a quarter per missed tick up to 1.5x), so small, fast objects
 no longer split into a new track every tick, and a missed track can't take a car across the
-frame. A lone track and a lone detection no longer match regardless of distance. Parked tracks never take a
+frame. A lone track and a lone detection no longer match regardless of distance. A moving
+track never takes a box over 2x wider or taller (or narrower or shorter) than its own, from
+Norfair or the nearest rule: a bicycle's track mustn't move onto a bigger object beside it. Parked tracks never take a
 detection that doesn't overlap them (a passing car can't wake one). Reported boxes are
 smoothed (0.6 weight on the newest detection); matching and crops use the raw box.
 

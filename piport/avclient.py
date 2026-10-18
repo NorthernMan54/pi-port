@@ -186,6 +186,10 @@ NN_DIST_MARGIN = 30
 NN_DIST_MAX = 150
 NN_MISS_GROWTH = 0.25
 NN_MISS_GROWTH_MAX = 1.5
+# A moving track never takes a box more than this many times wider or taller (or narrower or
+# shorter) than its own, from Norfair or the nearest rule: live 10:20 on Driveway a bicycle's
+# track (40x57) took a 49x136 box beside it, then a 107x253 one, and held the event 16 s.
+NN_SIZE_RATIO_MAX = 2.0
 # Min IOU (same objectType) to match a detection to an existing track.
 IOU_MATCH_THRESHOLD = 0.3
 # Which detection belongs to which track (AIPORT_TRACKER): "norfair", Frigate's Kalman-filtered
@@ -944,6 +948,16 @@ def _enrich_detections(device_id, detections):
     return [dict(e, extra=dict(e["extra"])) for e in extra]
 
 
+def _size_jump(a, b):
+    """True if box b ([x, y, w, h]) is over NN_SIZE_RATIO_MAX x wider or taller than a, or
+    under 1/NN_SIZE_RATIO_MAX x: a different object, not this one moving."""
+    for i in (2, 3):
+        lo, hi = sorted((max(a[i], 1e-6), max(b[i], 1e-6)))
+        if hi / lo > NN_SIZE_RATIO_MAX:
+            return True
+    return False
+
+
 def _nearest_detection(tr, detections, unclaimed):
     """Index of the nearest same-type unclaimed detection to where tr's motion predicts it,
     within NN_DIST_FACTOR x its size (+ margin), at most NN_DIST_MAX, widening a little
@@ -957,7 +971,7 @@ def _nearest_detection(tr, detections, unclaimed):
     best, best_dist = None, limit
     for idx in unclaimed:
         d = detections[idx]
-        if d["objectType"] != tr["objectType"]:
+        if d["objectType"] != tr["objectType"] or _size_jump(tr["coord"], d["coord"]):
             continue
         dx, dy = _zone_center_norm(d["coord"])
         dist = ((dx - px) ** 2 + (dy - py) ** 2) ** 0.5
@@ -1614,6 +1628,9 @@ def _norfair_match(dev, tracks, detections):
         if (tr.get("stationary_coord")
                 and _iou(tr["stationary_coord"], detections[idx]["coord"]) < IOU_MATCH_THRESHOLD):
             del ids[gid]  # Norfair moved this object onto another one: the parked track lets go
+            continue
+        if not tr.get("stationary_coord") and _size_jump(tr["coord"], detections[idx]["coord"]):
+            del ids[gid]  # a box of another size beside it is another object
             continue
         matches[tid] = idx
     unclaimed = [i for i in range(len(detections)) if i not in set(matches.values())]

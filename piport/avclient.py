@@ -865,19 +865,34 @@ def _capture_best(device_id, tr, d):
 
 
 # A plate can't change on a vehicle that isn't moving, and a confident read won't improve.
+# As Frigate, a parked vehicle is still read for PLATE_PARKED_SCAN_MS after it parks (a car
+# that has just pulled in often shows its plate only once it stops).
 PLATE_CONFIDENT = 0.85
+PLATE_PARKED_SCAN_MS = 5000
 SETTLED_MATCH_IOU = 0.5
+
+
+def _parked_scan_over(tr):
+    """True once a parked track's plate-reading window has passed (or its start is unknown)."""
+    parked, seen = tr.get("parked_at_ms"), tr.get("seen_ms")
+    return parked is None or seen is None or seen - parked > PLATE_PARKED_SCAN_MS
 
 
 def _plate_settled(device_id, coord):
     """True if this vehicle box belongs to a track that is parked, still, or already has a
-    confident plate -- re-reading it is wasted work."""
+    confident plate -- re-reading it is wasted work. A partial box mostly inside a parked
+    car's box is that car (live 10:14 on Driveway: a parked car's plate was re-read and logged
+    on every snapshot from boxes on part of it)."""
     with _motion_lock:
-        tracks = list(_motion_state.get(device_id, {}).get("tracks", {}).values())
+        by_id = dict(_motion_state.get(device_id, {}).get("tracks", {}))
+    inside = _inside_parked(by_id, {"objectType": "vehicle", "coord": coord})
+    if inside is not None and _parked_scan_over(by_id[inside]):
+        return True
+    tracks = list(by_id.values())
     for tr in tracks:
         if tr["objectType"] != "vehicle" or _iou(tr["coord"], coord) < SETTLED_MATCH_IOU:
             continue
-        if (tr.get("stationary_coord") or tr.get("still")
+        if ((tr.get("stationary_coord") and _parked_scan_over(tr)) or tr.get("still")
                 or tr.get("extra_scores", {}).get("name", 0) >= PLATE_CONFIDENT):
             return True
     return False
@@ -907,7 +922,7 @@ def _enrich_detections(device_id, detections):
         try:
             for p in enricher.plates(img, [v["coord"] for v in vehicles]):
                 vehicles[p["parent"]].setdefault("scored", {})["name"] = (p["text"], p["confidence"])
-                log.info("enrichment: plate %r on vehicle for deviceID=%s (score=%.2f)",
+                log.debug("enrichment: plate %r on vehicle for deviceID=%s (score=%.2f)",
                          p["text"], device_id, p["confidence"])
             for f in enricher.faces(img, [p["coord"] for p in people]):
                 face = {"objectType": "face", "score": f["score"], "coord": f["coord"],
@@ -961,16 +976,81 @@ def _follow(tr, coord):
     tr["coord"] = coord
 
 
-def _merge_extra(tr, d):
-    """Carry enrichment fields onto a track. Scored keys (plate text in a
-    vehicle's `name`, a face's `faceEmbed`) keep the best-scoring read; other
+def _jaro_winkler(a, b):
+    """Jaro-Winkler similarity of two strings, 0-1 (as rapidfuzz's, which Frigate uses)."""
+    if a == b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    reach = max(0, max(len(a), len(b)) // 2 - 1)
+    a_hit, b_hit = [False] * len(a), [False] * len(b)
+    matches = 0
+    for i, ch in enumerate(a):
+        for j in range(max(0, i - reach), min(len(b), i + reach + 1)):
+            if not b_hit[j] and b[j] == ch:
+                a_hit[i] = b_hit[j] = True
+                matches += 1
+                break
+    if not matches:
+        return 0.0
+    a_m = [ch for ch, hit in zip(a, a_hit) if hit]
+    b_m = [ch for ch, hit in zip(b, b_hit) if hit]
+    half_transpositions = sum(x != y for x, y in zip(a_m, b_m))
+    jaro = (matches / len(a) + matches / len(b) + (matches - half_transpositions / 2) / matches) / 3
+    prefix = 0
+    for x, y in zip(a[:4], b[:4]):
+        if x != y:
+            break
+        prefix += 1
+    return jaro + prefix * 0.1 * (1 - jaro)
+
+
+# Plate reads: as Frigate, a track keeps its recent reads, groups those whose average
+# similarity is >= PLATE_CLUSTER_SIMILARITY and takes the largest group (ties: the group with
+# the most confident read). Unlike Frigate, which reports that group's most confident read,
+# the reading seen most often in it wins (ties: the most confident), so one confident misread
+# ('DEBM782' among 'DEPM782's) can't replace the plate.
+PLATE_READS_KEEP = 25
+PLATE_CLUSTER_SIMILARITY = 0.85
+
+
+def _plate_rep(reads):
+    """(text, confidence) representing a track's [(text, confidence), ...] plate reads."""
+    clusters = []
+    for read in reads:
+        for cluster in clusters:
+            if sum(_jaro_winkler(read[0], r[0]) for r in cluster) / len(cluster) >= PLATE_CLUSTER_SIMILARITY:
+                cluster.append(read)
+                break
+        else:
+            clusters.append([read])
+    best = max(clusters, key=lambda c: (len(c), max(r[1] for r in c)))
+    counts = collections.Counter(r[0] for r in best)
+    text = max(counts, key=lambda t: (counts[t], max(r[1] for r in best if r[0] == t)))
+    return text, max(r[1] for r in best if r[0] == text)
+
+
+def _merge_extra(tr, d, device_id=None, tracker_id=None):
+    """Carry enrichment fields onto a track. A vehicle's plate (`name`) is the
+    representative of its recent reads (_plate_rep), logged when it first appears or
+    changes; other scored keys (a face's `faceEmbed`) keep the best-scoring read; other
     keys (attributes, names) take the newest value and are never cleared by a
     tick that lacks them."""
     out = tr.setdefault("extra", {})
     out.update({k: v for k, v in (d.get("extra") or {}).items() if v not in ("", None)})
     scores = tr.setdefault("extra_scores", {})
     for key, (value, score) in (d.get("scored") or {}).items():
-        if score >= scores.get(key, 0):
+        if key == "name" and tr.get("objectType") == "vehicle":
+            reads = tr.setdefault("plate_reads", [])
+            reads.append((value, score))
+            del reads[:-PLATE_READS_KEEP]
+            text, conf = _plate_rep(reads)
+            if text != tr.get("plate_logged"):
+                log.info("plate %r for vehicle tracker_id=%s deviceID=%s (score=%.2f, %d read(s))",
+                         text, tracker_id, device_id, conf, len(reads))
+                tr["plate_logged"] = text
+            out[key], scores[key] = text, conf
+        elif score >= scores.get(key, 0):
             out[key] = value
             scores[key] = score
 
@@ -1272,6 +1352,7 @@ def _update_still(tr, now_ms):
 
 def _park(tr):
     tr["stationary_coord"] = list(tr["coord"])
+    tr["parked_at_ms"] = tr.get("seen_ms")
     tr["moved_ticks"] = 0
 
 
@@ -1705,7 +1786,7 @@ def _motion_tick(ws, device_id):
                             event["finished"] = [m for m in event["finished"]
                                                  if m[0] != tracker_id]
                         joining.append((tracker_id, tr))
-                _merge_extra(tr, d)
+                _merge_extra(tr, d, device_id, tracker_id)
                 _capture_best(device_id, tr, d)
                 tr["seen_ms"] = now_ms
                 # Line Crossing: check this frame's movement against configured lines.
@@ -1765,7 +1846,7 @@ def _motion_tick(ws, device_id):
                 tr["seen_ms"] = now_ms
                 tr["prev_center"] = _protect_center(device_id, d["coord"])
                 _update_still(tr, now_ms)
-                _merge_extra(tr, d)
+                _merge_extra(tr, d, device_id, tracker_id)
                 _capture_best(device_id, tr, d)
                 if how == "event":
                     event["finished"] = [m for m in event["finished"] if m[0] != tracker_id]
@@ -1792,7 +1873,7 @@ def _motion_tick(ws, device_id):
                 confirm_ms <= 0 and tracks[tracker_id].get("true_positive")
                 and d["objectType"] not in CONFIRM_WITH)
             _update_still(tracks[tracker_id], now_ms)
-            _merge_extra(tracks[tracker_id], d)
+            _merge_extra(tracks[tracker_id], d, device_id, tracker_id)
             _capture_best(device_id, tracks[tracker_id], d)
             if starting:
                 # Already there when the tracker started (a parked car): no event until it moves.

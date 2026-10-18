@@ -106,6 +106,33 @@ class TestMergeExtra(unittest.TestCase):
         avclient._merge_extra(tr, {"scored": {"name": ("ABC124", 0.95)}})
         self.assertEqual(tr["extra"]["name"], "ABC124")
 
+    def test_one_misread_does_not_replace_the_plate(self):
+        # Live 10:14 on Driveway: 'DEBM782' at 0.85 among 'DEPM782's; '782' at 0.93.
+        tr = {"objectType": "vehicle"}
+        for text, conf in [("DEPM782", 0.89), ("DEPM782", 0.90), ("DEBM782", 0.85),
+                           ("782", 0.93), ("DEPM782", 0.91)]:
+            avclient._merge_extra(tr, {"scored": {"name": (text, conf)}})
+        self.assertEqual(tr["extra"]["name"], "DEPM782")
+        self.assertEqual(tr["extra_scores"]["name"], 0.91)
+
+    def test_plate_logged_only_when_it_changes(self):
+        tr = {"objectType": "vehicle"}
+        with self.assertLogs("aiport-avclient", "INFO") as logs:
+            for _ in range(4):
+                avclient._merge_extra(tr, {"scored": {"name": ("DEPM782", 0.9)}}, "D", 7)
+            avclient._merge_extra(tr, {"scored": {"name": ("DEBM782", 0.95)}}, "D", 7)
+        plate_lines = [m for m in logs.output if "plate" in m]
+        self.assertEqual(len(plate_lines), 1)
+        self.assertIn("'DEPM782' for vehicle tracker_id=7 deviceID=D", plate_lines[0])
+
+    def test_jaro_winkler(self):
+        jw = avclient._jaro_winkler
+        self.assertEqual(jw("DEPM782", "DEPM782"), 1.0)
+        self.assertAlmostEqual(jw("MARTHA", "MARHTA"), 0.9611, places=3)
+        self.assertGreaterEqual(jw("DEPM782", "DEBM782"), 0.85)
+        self.assertLess(jw("DEPM782", "XYZ123"), 0.5)
+        self.assertEqual(jw("", "A"), 0.0)
+
     def test_face_embed_keeps_best_face(self):
         tr = {"objectType": "face"}
         avclient._merge_extra(tr, {"extra": {"name": ""}, "scored": {"faceEmbed": ([1.0], 0.8)}})
@@ -186,6 +213,23 @@ class TestEnrichDetections(unittest.TestCase):
 
     def test_parked_vehicle_not_reread(self):
         self._track(stationary_coord=[0, 0, 100, 100])
+        self.assertEqual(self._plates_read(), [])
+
+    def test_box_on_part_of_parked_vehicle_not_reread(self):
+        # Live 10:14 on Driveway: a partial box (IoU under 0.5) on a parked car re-read its
+        # plate on every snapshot.
+        self._track(coord=[0, 0, 300, 300], stationary_coord=[0, 0, 300, 300])
+        self.assertEqual(self._plates_read(), [])
+
+    def test_vehicle_beside_parked_one_is_read(self):
+        self._track(coord=[200, 0, 300, 300], stationary_coord=[200, 0, 300, 300])
+        self.assertEqual(self._plates_read(), [[[0, 0, 100, 100]]])
+
+    def test_just_parked_vehicle_still_read(self):
+        # Frigate reads a parked car for 5 s after it stops.
+        self._track(stationary_coord=[0, 0, 100, 100], parked_at_ms=1000, seen_ms=5000)
+        self.assertEqual(self._plates_read(), [[[0, 0, 100, 100]]])
+        self._track(stationary_coord=[0, 0, 100, 100], parked_at_ms=1000, seen_ms=6001)
         self.assertEqual(self._plates_read(), [])
 
     def test_still_vehicle_not_reread(self):

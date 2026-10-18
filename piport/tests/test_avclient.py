@@ -755,6 +755,24 @@ class TestCameraEvent(Base):
         self.assertEqual(self.sent, [])
         self.assertTrue(av._motion_state["D"]["tracks"][1].get("stationary_coord"))
 
+    def test_ticks_without_frames_do_not_use_up_the_window(self):
+        # Live 17:02 on Driveway: ticks ran through a 10 s reconnect with no frame.
+        from unittest import mock
+        with mock.patch.object(av, "STARTUP_WINDOW_MS", 15000):
+            self.tick()
+            self.tick(after_ms=20000)
+            av._stop_stream("D")
+            with mock.patch.object(av, "_frame_wall_ms", lambda dev: 1_760_000_000_000 + self.clock_ms):
+                for _ in range(3):
+                    self.clock_ms += 10000
+                    self.frames.append([])
+                    av._motion_tick(None, "D")   # no analysed frame yet
+            self.assertIsNone(av._motion_state["D"]["started_ms"])
+            self.tick(self.CAR, after_ms=1000)
+            self.tick(self.CAR)
+        self.assertEqual(self.sent, [])
+        self.assertTrue(av._motion_state["D"]["tracks"][1].get("stationary_coord"))
+
     def test_window_does_not_restart_without_a_stream_restart(self):
         from unittest import mock
         with mock.patch.object(av, "STARTUP_WINDOW_MS", 15000):

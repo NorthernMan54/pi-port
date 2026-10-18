@@ -1768,14 +1768,16 @@ def _motion_tick(ws, device_id):
         now_ms = _frame_wall_ms(device_id)
         confirm_ms = _confirm_ms(device_id)
         dev = _motion_state.setdefault(device_id, {"tracks": {}, "next_tracker_id": 1,
-                                                   "started_ms": now_ms})
+                                                   "started_ms": None})
         tracks = dev["tracks"]
         event = dev.get("event")
         dev["recent"] = [r for r in dev.get("recent", ())
                          if now_ms - r[2] <= RESUME_S * 1000][-RESUME_MAX:]
-        if dev.get("started_ms") is None:  # a new stream: _stop_stream reset it
+        # The startup window starts on the stream's first analysed frame, not on a tick with
+        # no frame yet (live 17:02 on Driveway ticks ran through a 10 s reconnect and used it up).
+        if dev.get("started_ms") is None and device_id in _analysed_frame_time:
             dev["started_ms"] = now_ms
-        starting = now_ms - dev["started_ms"] <= STARTUP_WINDOW_MS  # {"id", "started_ms", "finished": [(tid, tr)]} or None
+        starting = dev.get("started_ms") is None or now_ms - dev["started_ms"] <= STARTUP_WINDOW_MS  # {"id", "started_ms", "finished": [(tid, tr)]} or None
         unclaimed = list(range(len(detections)))
         joining = []  # tracks that start (or resume) taking part in the event this tick
 

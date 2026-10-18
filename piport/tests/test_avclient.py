@@ -1028,6 +1028,36 @@ class TestMultiLeave(Base):
         self.assertEqual(av._associate_faces(members), {})
 
 
+class TestMotionContourArea(Base):
+    """AIPORT_MOTION_CONTOUR_AREA sets the smallest motion blob per camera."""
+
+    def area(self, spec, device_id):
+        from unittest import mock
+        env = {"AIPORT_MOTION_CONTOUR_AREA": spec} if spec is not None else {}
+        with mock.patch.dict(os.environ, env, clear=False):
+            if spec is None:
+                os.environ.pop("AIPORT_MOTION_CONTOUR_AREA", None)
+            return av._motion_contour_area(device_id)
+
+    def test_default_is_frigates(self):
+        self.assertEqual(self.area(None, "DEV"), 10)
+
+    def test_per_camera(self):
+        self.assertEqual(self.area("10,aabbcc3344cc=100", "AABBCC3344CC"), 100)
+        self.assertEqual(self.area("10,AABBCC3344CC=100", "8CEDE172C456"), 10)
+        self.assertEqual(self.area("AABBCC3344CC=100", "OTHER"), 10)  # no default given
+        self.assertEqual(self.area("50", "OTHER"), 50)
+
+    def test_detector_uses_it(self):
+        import numpy as np
+        from unittest import mock
+        av._motion_detectors.pop("DEV", None)
+        self.addCleanup(av._motion_detectors.pop, "DEV", None)
+        with mock.patch.dict(os.environ, {"AIPORT_MOTION_CONTOUR_AREA": "10,DEV=100"}):
+            det = av._motion_detector("DEV", np.zeros((360, 640)).shape)
+        self.assertEqual(det.contour_area, 100)
+
+
 class TestBoxDelay(Base):
     """AIPORT_BOX_DELAY_MS back-dates frame-describing timestamps per camera."""
 

@@ -1210,6 +1210,16 @@ def _canvas_to_image(device_id, x, y):
     return clamp(half + (x - half) / sx), clamp(half + (y - half) / sy)
 
 
+def _motion_contour_area(device_id):
+    """AIPORT_MOTION_CONTOUR_AREA ("<default>[,<deviceID>=<area>...]"): the smallest motion
+    blob, in pixels of the 100-row motion frame (Frigate's motion.contour_area; 10 by
+    default, as in Frigate)."""
+    import motion
+    default, per = _parse_box_delay(os.environ.get("AIPORT_MOTION_CONTOUR_AREA"),
+                                    "AIPORT_MOTION_CONTOUR_AREA", motion.DEFAULT_CONTOUR_AREA)
+    return per.get(str(device_id).upper(), default)
+
+
 def _motion_detector(device_id, shape):
     det = _motion_detectors.get(device_id)
     if det is None or det.frame_shape != tuple(shape[:2]):
@@ -1220,9 +1230,11 @@ def _motion_detector(device_id, shape):
                      else motion.threshold_for_level(settings.get("level", 50)))
         mask = motion.zones_mask(settings.get("zones"), shape,
                                  lambda x, y: _canvas_to_image(device_id, x, y))
-        det = _motion_detectors[device_id] = motion.MotionDetector(shape[:2], threshold=threshold,
-                                                                   mask=mask)
-        log.info("motion detector for deviceID=%s: threshold %d, %s", device_id, threshold,
+        contour_area = _motion_contour_area(device_id)
+        det = _motion_detectors[device_id] = motion.MotionDetector(
+            shape[:2], threshold=threshold, contour_area=contour_area, mask=mask)
+        log.info("motion detector for deviceID=%s: threshold %d, contour area %d, %s", device_id,
+                 threshold, contour_area,
                  "masked to Protect's motion zones" if mask is not None else "whole frame")
     return det
 
@@ -2355,9 +2367,10 @@ def _download_face_db(uri, device_info):
              resp.headers.get("content-type"), summary)
 
 
-def _parse_box_delay(spec):
-    """AIPORT_BOX_DELAY_MS: "<default ms>[,<deviceID>=<ms>...]" -> (default, {deviceID: ms})."""
-    default, per = 0, {}
+def _parse_box_delay(spec, name="AIPORT_BOX_DELAY_MS", default=0):
+    """A per-camera integer setting such as AIPORT_BOX_DELAY_MS: "<default>[,<deviceID>=<value>
+    ...]" -> (default, {deviceID: value})."""
+    per = {}
     for part in (spec or "").split(","):
         part = part.strip()
         if not part:
@@ -2369,7 +2382,7 @@ def _parse_box_delay(spec):
             else:
                 default = int(part)
         except ValueError:
-            log.warning("ignoring bad AIPORT_BOX_DELAY_MS entry %r", part)
+            log.warning("ignoring bad %s entry %r", name, part)
     return default, per
 
 

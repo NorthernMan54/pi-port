@@ -370,7 +370,9 @@ inference. Unlike the old whole-frame average diff, this finds a person walking 
 Backyard's background (~0.5% of the frame). Protect's motion sensitivity (`level`, 50 by
 default) sets the pixel threshold (50 -> 30, Frigate's default; 100 -> 5) and its motion zones
 mask the rest of the frame; `AIPORT_MOTION_THRESHOLD` overrides the threshold and
-`AIPORT_MOTION_GATE=0` disables the gate. It costs ~0.4 ms a frame on the M2. Without OpenCV
+`AIPORT_MOTION_GATE=0` disables the gate. `AIPORT_MOTION_CONTOUR_AREA` sets the smallest
+motion blob, in pixels of the 100-row motion frame (Frigate's `motion.contour_area`), per
+camera like the box delay: `10,AABBCC3344CC=100` (10 by default, as in Frigate). It costs ~0.4 ms a frame on the M2. Without OpenCV
 the old average diff (`AIPORT_MOTION_GATE_THRESH`) is the fallback. Tracks that are already
 open always classify, so a stationary object keeps its track and can close normally.
 

@@ -284,8 +284,10 @@ swapped them. Install it without its dependency pins, which would downgrade nump
 `venv/bin/pip install --no-deps norfair==2.3.0 "filterpy>=1.4.5,<2"`.
 
 **Tracking.** Detections match tracks by box overlap; a moving track no box overlaps takes
-the nearest same-type detection near where its last movement predicts it (within 3x its size),
-so small, fast objects no longer split into a new track every tick. Parked tracks never take a
+the nearest same-type detection near where its last movement predicts it (within 3x its size,
+at most 150 of 1000, widening by a quarter per missed tick up to 1.5x), so small, fast objects
+no longer split into a new track every tick, and a missed track can't take a car across the
+frame. A lone track and a lone detection no longer match regardless of distance. Parked tracks never take a
 detection that doesn't overlap them (a passing car can't wake one). Reported boxes are
 smoothed (0.6 weight on the newest detection); matching and crops use the raw box.
 

@@ -177,9 +177,15 @@ BOX_SMOOTHING = 0.6
 # A moving track that no box overlaps takes the nearest same-type detection within this many
 # times its size (+ margin, 0-1000 units) of where its last movement predicts it: small, fast
 # objects (far-road cars and walkers) moved further than their width between ticks and were
-# re-created as a new track every tick.
+# re-created as a new track every tick. The radius is capped at NN_DIST_MAX and widens only
+# by NN_MISS_GROWTH per missed tick, to at most NN_MISS_GROWTH_MAX x: it used to multiply by
+# every missed tick, so a track missed for a second took any same-type box in the frame (live
+# 09:56 on Driveway: one vehicle track hopped between four cars over 24 s).
 NN_DIST_FACTOR = 3.0
 NN_DIST_MARGIN = 30
+NN_DIST_MAX = 150
+NN_MISS_GROWTH = 0.25
+NN_MISS_GROWTH_MAX = 1.5
 # Min IOU (same objectType) to match a detection to an existing track.
 IOU_MATCH_THRESHOLD = 0.3
 # Which detection belongs to which track (AIPORT_TRACKER): "norfair", Frigate's Kalman-filtered
@@ -925,12 +931,14 @@ def _enrich_detections(device_id, detections):
 
 def _nearest_detection(tr, detections, unclaimed):
     """Index of the nearest same-type unclaimed detection to where tr's motion predicts it,
-    within NN_DIST_FACTOR x its size (+ margin, growing while it's missed); None if none."""
+    within NN_DIST_FACTOR x its size (+ margin), at most NN_DIST_MAX, widening a little
+    while it's missed; None if none."""
     cx, cy = _zone_center_norm(tr["coord"])
     vx, vy = tr.get("velocity", (0.0, 0.0))
     steps = 1 + tr["miss_count"]
     px, py = cx + vx * steps, cy + vy * steps
-    limit = (NN_DIST_FACTOR * max(tr["coord"][2], tr["coord"][3]) + NN_DIST_MARGIN) * steps
+    limit = (min(NN_DIST_FACTOR * max(tr["coord"][2], tr["coord"][3]) + NN_DIST_MARGIN, NN_DIST_MAX)
+             * min(1 + NN_MISS_GROWTH * tr["miss_count"], NN_MISS_GROWTH_MAX))
     best, best_dist = None, limit
     for idx in unclaimed:
         d = detections[idx]
@@ -1463,18 +1471,12 @@ def _builtin_match(tracks, detections):
     nearest detection where their motion predicts them (parked tracks don't, so a passing
     car can't wake one)."""
     unclaimed = list(range(len(detections)))
-    # IOU only disambiguates multiple same-type candidates; with one track and one
-    # detection, match unconditionally.
-    type_track_count = collections.Counter(tr["objectType"] for tr in tracks.values())
-    type_detect_count = collections.Counter(d["objectType"] for d in detections)
+    # A lone track and a lone detection of a type no longer match unconditionally: a
+    # missed track then took a car anywhere in the frame. The nearest rule below covers a
+    # fast mover that no box overlaps.
     matches = {}
     for tracker_id, tr in tracks.items():
-        # One track + one detection of a type match unconditionally -- except a parked
-        # track, which a different object passing by mustn't take over.
-        unambiguous = (type_track_count[tr["objectType"]] == 1
-                        and type_detect_count[tr["objectType"]] == 1
-                        and not tr.get("stationary_coord"))
-        best_idx, best_iou = None, (-1.0 if unambiguous else IOU_MATCH_THRESHOLD)
+        best_idx, best_iou = None, IOU_MATCH_THRESHOLD
         for idx in unclaimed:
             d = detections[idx]
             if d["objectType"] != tr["objectType"]:

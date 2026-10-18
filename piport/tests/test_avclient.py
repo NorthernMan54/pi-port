@@ -862,6 +862,37 @@ class TestCameraEvent(Base):
         self.assertEqual(sorted(t["coord"][0] for t in tracks.values()), [150, 650])
         self.assertEqual(len(tracks), 2)
 
+    def test_missed_track_does_not_jump_across_the_frame(self):
+        # Live 09:56 on Driveway: a far-road car's track, missed for a second, took a car
+        # 180 units away, then another, then another (one track for four cars).
+        car = dict(self.CAR, coord=[631, 54, 66, 117])
+        self.tick(car)
+        self.tick(dict(car, coord=[650, 54, 66, 117]))
+        for _ in range(5):
+            self.tick()
+        self.tick(dict(car, coord=[469, 26, 60, 143]))
+        tracks = av._motion_state["D"]["tracks"]
+        self.assertEqual(len(tracks), 2)
+        self.assertEqual(tracks[1]["coord"], [650, 54, 66, 117])
+
+    def test_briefly_missed_track_keeps_its_car(self):
+        car = dict(self.CAR, coord=[631, 54, 66, 117])
+        self.tick(car)
+        self.tick(dict(car, coord=[650, 54, 66, 117]))
+        self.tick()
+        self.tick()
+        self.tick(dict(car, coord=[710, 54, 66, 117]))  # where its speed puts it
+        tracks = av._motion_state["D"]["tracks"]
+        self.assertEqual(len(tracks), 1)
+        self.assertEqual(tracks[1]["coord"], [710, 54, 66, 117])
+
+    def test_nearest_radius_is_capped(self):
+        tall = {"objectType": "vehicle", "coord": [280, 96, 90, 264], "miss_count": 20}
+        far = {"objectType": "vehicle", "coord": [600, 96, 90, 264]}
+        near = {"objectType": "vehicle", "coord": [480, 96, 90, 264]}
+        self.assertIsNone(av._nearest_detection(tall, [far], [0]))   # 320 away: past 150 x 1.5
+        self.assertEqual(av._nearest_detection(tall, [near], [0]), 0)  # 200 away
+
     def test_passing_car_does_not_take_over_parked_car(self):
         av._event_max_ms["D"] = 0
         parked = dict(self.CAR, coord=[100, 500, 200, 100])

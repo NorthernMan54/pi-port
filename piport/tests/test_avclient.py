@@ -742,6 +742,27 @@ class TestCameraEvent(Base):
         self.tick(dict(self.CAR, coord=[600, 500, 200, 100]))  # drives off
         self.assertEqual(self.events(), [("enter", ["vehicle"], [])])
 
+    def test_stream_restart_starts_the_startup_window_again(self):
+        # Live 11:47 on Driveway: the stream dropped just after start and the parked car,
+        # first seen once frames came back, opened an event.
+        from unittest import mock
+        with mock.patch.object(av, "STARTUP_WINDOW_MS", 15000):
+            self.tick()
+            self.tick(after_ms=20000)          # past the window: a new car would open an event
+            av._stop_stream("D")
+            self.tick(self.CAR, after_ms=1000)  # the new stream's first frames
+            self.tick(self.CAR)
+        self.assertEqual(self.sent, [])
+        self.assertTrue(av._motion_state["D"]["tracks"][1].get("stationary_coord"))
+
+    def test_window_does_not_restart_without_a_stream_restart(self):
+        from unittest import mock
+        with mock.patch.object(av, "STARTUP_WINDOW_MS", 15000):
+            self.tick()
+            self.tick(self.CAR, after_ms=20000)
+            self.tick(self.CAR)
+        self.assertEqual(self.events()[0], ("enter", ["vehicle"], []))
+
     def test_still_vehicle_parks_and_closes_event(self):
         self.tick(self.CAR)
         for _ in range(av.STILL_TICKS):

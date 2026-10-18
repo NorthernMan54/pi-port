@@ -323,7 +323,8 @@ pi-port's face events, so its face service accepts SFace embeddings. A track sti
 limit, or a vehicle still for ~30 s (box overlapping its anchor, so detector jitter doesn't
 count), parks: it goes quiet, its snapshot stays in the event's leave, and the event closes
 once nothing else is active. Objects already present in a camera's first 15 s (cars parked
-there when pi-port starts) are parked at once and open no event. Still tracks report
+there when pi-port starts) are parked at once and open no event; the 15 s start again
+whenever a camera's stream restarts. Still tracks report
 `stationary: true` with `idleSinceTimeMs` set to when they stopped. A parked object resumes only when it really moves: its box mostly leaves the parked spot,
 or shifts at about the same size for ~6 s (someone walking past only shrinks it for a moment). Line-crossing events stay per track.
 

@@ -393,6 +393,13 @@ def _stop_stream(device_id):
     _motion_detectors.pop(device_id, None)  # a new stream starts a new background
     _startup_scan.pop(device_id, None)
     _last_parked_check.pop(device_id, None)
+    # The startup window starts again on the new stream's first frame: live 11:47 on
+    # Driveway the RTSP pull dropped 3 s in and the window ran out before frames came back,
+    # so the parked car opened an event instead of parking.
+    with _motion_lock:
+        dev = _motion_state.get(device_id)
+        if dev is not None:
+            dev["started_ms"] = None
 
 
 def _jpeg_end(buf):
@@ -1305,7 +1312,8 @@ STATIONARY_SIZE_RATIO = (0.7, 1.4)
 # A track whose box keeps overlapping its anchor (IoU >= STILL_IOU) for STILL_TICKS ticks
 # (~30 s) is still: its descriptors say stationary, and a still vehicle is parked (its
 # snapshot stays in the event's leave). Objects found within STARTUP_WINDOW_MS of a camera's
-# tracker starting (cars already parked there) are parked at once instead of opening an event.
+# tracker or stream starting (cars already parked there) are parked at once instead of opening
+# an event; a stream restart starts the window again.
 STILL_IOU = 0.7
 STILL_TICKS = _ticks(30)
 STARTUP_WINDOW_MS = 15000
@@ -1765,7 +1773,9 @@ def _motion_tick(ws, device_id):
         event = dev.get("event")
         dev["recent"] = [r for r in dev.get("recent", ())
                          if now_ms - r[2] <= RESUME_S * 1000][-RESUME_MAX:]
-        starting = now_ms - dev.get("started_ms", 0) <= STARTUP_WINDOW_MS  # {"id", "started_ms", "finished": [(tid, tr)]} or None
+        if dev.get("started_ms") is None:  # a new stream: _stop_stream reset it
+            dev["started_ms"] = now_ms
+        starting = now_ms - dev["started_ms"] <= STARTUP_WINDOW_MS  # {"id", "started_ms", "finished": [(tid, tr)]} or None
         unclaimed = list(range(len(detections)))
         joining = []  # tracks that start (or resume) taking part in the event this tick
 

@@ -14,6 +14,7 @@ frames starting with "ubnt_avclient_hello".
 """
 import argparse
 import collections
+import contextlib
 import itertools
 import json
 import logging
@@ -1425,6 +1426,39 @@ def _track_args(tracker_id, tr):
             "still": still, "idle_since_ms": tr.get("still_since_ms") if still else None}
 
 
+# Playback places boxes by clockWall, and a track only shows once it confirms (Protect's
+# eventStartMSec, 1 s): live 17:20 on Driveway a car crossed the road in about a second, so
+# its box appeared as it left. A new event's enter is sent at its tracks' first frame, then a
+# moving update per report interval up to now, each describing its own frame.
+BACKFILL_MAX = 50
+
+
+def _send_backfill(ws, device_id, event_id, active, joining):
+    """Send a new event's enter and moving updates for the frames its joining tracks were
+    seen in before they confirmed, back-dated to each frame. True if the enter was sent."""
+    ids = {tid for tid, _ in joining}
+    history = {tid: tr.pop("history", None) or [] for tid, tr in active if tid in ids}
+    current = _frame_time(device_id)
+    stamps = sorted({h[0] for hs in history.values() for h in hs if h[0][1] < current[1]},
+                    key=lambda stamp: stamp[1])
+    edge, last = "enter", None
+    for stamp in stamps:
+        if last is not None and stamp[1] - last < REPORT_INTERVAL_MS:
+            continue
+        members = []
+        for tid, tr in active:
+            seen = [h for h in history.get(tid, ()) if h[0][1] <= stamp[1]]
+            if seen:
+                _, coord, score = seen[-1]
+                members.append((tid, dict(tr, coord=coord, smooth=None, score=score)))
+        if not members:
+            continue
+        with _at_frame(device_id, stamp):
+            _send_event_message(ws, device_id, edge, event_id, members)
+        edge, last = "moving", stamp[1]
+    return edge == "moving"
+
+
 def _send_event_message(ws, device_id, edge_type, event_id, members, stationary=False):
     """One EventSmartDetect for a camera event carrying every member track
     (faces last, so a leave's Full-FoV comes from a person/vehicle best frame)."""
@@ -1963,6 +1997,14 @@ def _motion_tick(ws, device_id):
                       device_id, tracker_id)
             joining.append((tracker_id, tracks[tracker_id]))
 
+        # 2a. An unconfirmed track keeps each frame's box, sent back-dated when it confirms.
+        stamp = _frame_time(device_id)
+        for tr in tracks.values():
+            if not tr.get("confirmed", True) and tr.get("seen_ms") == now_ms:
+                history = tr.setdefault("history", [])
+                history.append((stamp, list(tr["coord"]), tr["score"]))
+                del history[:-BACKFILL_MAX]
+
         # 2b. A track confirms once it's a true positive (median score) and has been around
         #     for Protect's eventStartMSec -- even on a frame it was missed in, so an object
         #     seen on only its first few frames still makes its event.
@@ -2010,11 +2052,14 @@ def _motion_tick(ws, device_id):
             for _, tr in active:
                 tr["event_id"] = event["id"]
             log.info("smartDetectZone event %s opened for deviceID=%s", event["id"], device_id)
-            _send_event_message(ws, device_id, "enter", event["id"], active)
+            backfilled = _send_backfill(ws, device_id, event["id"], active, joining)
+            _send_event_message(ws, device_id, "moving" if backfilled else "enter", event["id"],
+                                active)
             dev["last_report_ms"] = now_ms
         elif event is not None:
             for _, tr in joining:
                 tr["event_id"] = event["id"]
+                tr.pop("history", None)  # an open event's timeline isn't rewound
             max_ms = _event_max_ms.get(device_id, DEFAULT_EVENT_MAX_MS)
             timed_out = now_ms - event["started_ms"] >= max_ms
             if not active or timed_out:
@@ -2445,12 +2490,29 @@ def _now_ms():
     return int(time.time() * 1000), int(time.monotonic() * 1000)
 
 
+# deviceID -> (wall ms, monotonic ms) a back-filled message describes (_at_frame).
+_frame_time_override = {}
+
+
 def _frame_time(device_id):
     """(wall ms, monotonic ms) when the analysed frame was read from ffmpeg; now if no
     frame has been analysed yet."""
+    override = _frame_time_override.get(device_id)
+    if override is not None:
+        return override
     with _frame_lock:
         stamp = _analysed_frame_time.get(device_id)
     return stamp or _now_ms()
+
+
+@contextlib.contextmanager
+def _at_frame(device_id, stamp):
+    """Messages sent inside describe the frame read at stamp (wall ms, monotonic ms)."""
+    _frame_time_override[device_id] = stamp
+    try:
+        yield
+    finally:
+        _frame_time_override.pop(device_id, None)
 
 
 def _frame_wall_ms(device_id):

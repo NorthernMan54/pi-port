@@ -307,6 +307,13 @@ residual: `"500"` for all cameras, or with per-camera overrides, e.g.
 `"300,AABBCC3344CC=800"` (a proxied camera has an extra hop). Default 0. Tune it by comparing a
 box's time with the video in playback.
 
+A track only joins an event once it confirms (Protect's `eventStartMSec`, 1 s), so a car that
+crosses the road in a second used to get its first box as it left. A track keeps its box from
+every frame until then; when it opens a new event, the `enter` is sent stamped with its first
+frame, followed by a `moving` update per report interval stamped with each later frame, so
+playback draws the box from the first frame. A track joining an event that is already open
+isn't back-filled (that event's timeline never goes back).
+
 **Events.** Protect keeps one smart-detect event per camera, not per track: the first
 `leave` closes it, and a scheduled check force-ends one left open past ~5.5 minutes without
 fetching any snapshots. So tracks share a camera event: `enter` when the first track

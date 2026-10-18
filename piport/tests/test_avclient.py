@@ -410,6 +410,12 @@ class TestCameraEvent(Base):
         self.frames.append(list(objs))
         av._motion_tick(None, "D")
 
+    def assertOpened(self, types):
+        """One enter, then only moving updates (the back-filled boxes and this frame)."""
+        events = self.events()
+        self.assertEqual(events[0], ("enter", types, []))
+        self.assertTrue(all(e[:2] == ("moving", types) for e in events[1:]), events)
+
     def events(self):
         return [(p["edgeType"], sorted(d["objectType"] for d in p["descriptors"]),
                  sorted(x["smartDetectSnapshotType"] for x in p.get("smartDetectSnapshots", [])))
@@ -572,7 +578,7 @@ class TestCameraEvent(Base):
             self.tick(dict(self.CAR, score=0.9))
             self.assertEqual(self.events(), [])
             self.tick(dict(self.CAR, score=0.85))
-        self.assertEqual(self.events(), [("enter", ["vehicle"], [])])
+        self.assertOpened(["vehicle"])
 
     def test_median_reaching_threshold_confirms(self):
         self.tick(dict(self.PERSON, score=0.6))
@@ -618,7 +624,7 @@ class TestCameraEvent(Base):
             clock[0] += 400
         self.assertEqual(self.events(), [])
         self.tick(dict(self.PERSON, coord=[550, 200, 200, 600]))
-        self.assertEqual(self.events(), [("enter", ["person"], [])])
+        self.assertOpened(["person"])
 
     def test_face_confirms_with_its_person(self):
         # Live 13:54:51: a face found once was dropped before it could confirm on its own.
@@ -628,7 +634,7 @@ class TestCameraEvent(Base):
         for _ in range(5):
             clock[0] += 300
             self.tick(self.PERSON)                    # the face isn't re-found every frame
-        self.assertEqual([e[1] for e in self.events()], [["person"]])
+        self.assertOpened(["person"])
         self.tick(self.PERSON, self.FACE)
         tracks = av._motion_state["D"]["tracks"]
         self.assertTrue(all(tr.get("confirmed") for tr in tracks.values()))
@@ -897,9 +903,40 @@ class TestCameraEvent(Base):
         self.assertEqual(self.sent, [])
         first_seen = av._motion_state["D"]["tracks"][1]["first_shown_ms"]
         self.tick(self.PERSON, after_ms=500)
-        self.assertEqual(self.events(), [("enter", ["person"], [])])
+        self.assertOpened(["person"])
         enter = [p for fn, p in self.sent if fn == "EventSmartDetect"][0]
         self.assertEqual(enter["descriptors"][0]["firstShownTimeMs"], first_seen)
+        self.assertEqual(enter["clockWall"], first_seen)  # drawn from the first frame
+
+    def test_confirmed_track_is_drawn_from_its_first_frame(self):
+        # Live 17:20 on Driveway: a car crossed the road in about a second and its box only
+        # appeared, back-dated by the 1 s confirmation, as it left.
+        self.confirm_after(1000)
+        xs = list(range(100, 211, 10))            # 12 frames, 100 ms apart
+        for x in xs:
+            self.tick(dict(self.CAR, coord=[x, 500, 200, 100]), after_ms=100)
+        msgs = [p for fn, p in self.sent if fn == "EventSmartDetect"]
+        first = av._motion_state["D"]["tracks"][1]["first_shown_ms"]
+        self.assertEqual(msgs[0]["edgeType"], "enter")
+        self.assertEqual(msgs[0]["clockWall"], first)
+        walls = [m["clockWall"] for m in msgs]
+        self.assertEqual(walls, sorted(walls))
+        self.assertTrue(all(b - a >= av.REPORT_INTERVAL_MS for a, b in zip(walls, walls[1:-1])))
+        self.assertEqual(walls[-1] - walls[0], 1000)    # up to the frame it confirmed on
+        self.assertTrue(all(m["edgeType"] == "moving" for m in msgs[1:]))
+        # Each message carries the box from its own frame.
+        lefts = [m["descriptors"][0]["coord"][0] for m in msgs]
+        self.assertLess(lefts[0], lefts[-1])
+        self.assertEqual(av._motion_state["D"]["tracks"][1].get("history"), None)
+
+    def test_track_joining_an_open_event_is_not_back_filled(self):
+        self.confirm_after(0)
+        self.tick(self.PERSON)                     # opens the event at once
+        self.confirm_after(1000)
+        for x in (100, 120, 140, 160, 180, 200):
+            self.tick(self.PERSON, dict(self.CAR, coord=[x, 500, 200, 100]), after_ms=200)
+        walls = [p["clockWall"] for fn, p in self.sent if fn == "EventSmartDetect"]
+        self.assertEqual(walls, sorted(walls))       # never back in time within an event
 
     def test_unconfirmed_track_dropped_without_event(self):
         self.confirm_after(5000)
@@ -914,7 +951,7 @@ class TestCameraEvent(Base):
         self.tick(self.PERSON)
         self.tick(after_ms=500)           # one missed frame doesn't reset it
         self.tick(self.PERSON, after_ms=500)
-        self.assertEqual(self.events(), [("enter", ["person"], [])])
+        self.assertOpened(["person"])
 
     def test_confirm_override_env(self):
         from unittest import mock

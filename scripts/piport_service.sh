@@ -76,7 +76,6 @@ trap 'echo "piport_service: stopping"; stop_child; exit 0' INT TERM
 
 exec > >(trap '' INT; tee -a "$LOG") 2>&1   # tee outlives Ctrl-C to log the stop
 [ -n "${PIPORT_SERVICE_TEST:-}" ] || caffeinate -is -w $$ &
-set -m   # each background job gets its own process group, like a terminal's Ctrl-C target
 
 while true; do
     if ! load_settings; then
@@ -87,6 +86,10 @@ while true; do
     echo "piport_service: starting pi-port at $(date '+%F %T') (settings from $ENV_FILE)"
     # A background job may start with SIGINT ignored, and Python then never raises
     # KeyboardInterrupt; restore the default before exec so run_all can shut down cleanly.
+    # Job control only for this launch: pi-port gets its own process group (stop_child signals
+    # all of it), while the loop's sleeps and $(...) don't each get one, which raced and
+    # printed "child setpgid (...): Operation not permitted".
+    set -m
     "$REPO/venv/bin/python" -c 'import os, signal, sys
 signal.signal(signal.SIGINT, signal.SIG_DFL)
 os.execv(sys.argv[1], sys.argv[1:])' "$REPO/venv/bin/python" "$REPO/piport/run_all.py" \
@@ -94,6 +97,7 @@ os.execv(sys.argv[1], sys.argv[1:])' "$REPO/venv/bin/python" "$REPO/piport/run_a
         --device-id "$PIPORT_DEVICE_ID" < /dev/null &   # a background job reading the
     # terminal is stopped (SIGTTIN): ffmpeg and ffprobe read stdin
     child=$!
+    set +m
     while kill -0 "$child" 2>/dev/null; do
         sleep 1
         if [ "$(mtime "$TRIGGER")" != "$seen" ]; then

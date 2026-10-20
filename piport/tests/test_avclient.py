@@ -1583,9 +1583,9 @@ class TestMotionLoopLifecycle(Base):
 
     def test_discard_emits_leave_for_open_tracks(self):
         sent = []
-        self._orig_send = av._send_smart_detect_event
+        orig = av._send_smart_detect_event  # not self._orig_send: Base restores send_msg from it
         av._send_smart_detect_event = lambda ws, dev, **kw: sent.append((dev, kw["edge_type"]))
-        self.addCleanup(lambda: setattr(av, "_send_smart_detect_event", self._orig_send))
+        self.addCleanup(setattr, av, "_send_smart_detect_event", orig)
         av._motion_state["D"] = {"tracks": {7: {"event_id": 42, "objectType": "person",
                                                  "coord": [0, 0, 10, 10], "score": 0.9,
                                                  "first_shown_ms": 1, "miss_count": 0,

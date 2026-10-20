@@ -33,6 +33,8 @@ from urllib.parse import parse_qsl, urlsplit
 
 import requests
 import urllib3
+
+import facedb
 from websockets.sync.client import connect
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -1040,7 +1042,8 @@ def _enrich_detections(device_id, detections):
     if img is None:
         return []
     cached = _enrich_cache.get(device_id)
-    if cached and cached[0] == mtime:
+    fresh = not (cached and cached[0] == mtime)
+    if not fresh:
         extra = cached[1]
     else:
         extra = []
@@ -1055,6 +1058,15 @@ def _enrich_detections(device_id, detections):
                         "frame": _snapshot_bytes.get(device_id)}
                 if f["embedding"] is not None:
                     face["scored"] = {"faceEmbed": (f["embedding"], f["score"])}
+                    db = _get_face_db()
+                    m = db.match(f["embedding"], FACE_DB_THRESH) if db else None
+                    if m:
+                        subject_id, name, sim = m
+                        face["scored"]["match"] = ((subject_id, name), sim)
+                        people[f["parent"]].setdefault("scored", {})["match"] = (
+                            (subject_id, name), sim)
+                        log.info("face DB: face on deviceID=%s matches %r (subject %s, "
+                                 "similarity %.3f)", device_id, name, subject_id, sim)
                 extra.append(face)
                 if f["name"]:
                     people[f["parent"]].setdefault("extra", {}).update(
@@ -1066,7 +1078,11 @@ def _enrich_detections(device_id, detections):
             log.info("enrichment: %s for deviceID=%s (score=%.2f, name=%r, embedding=%s)",
                      e["objectType"], device_id, e["score"], e["extra"]["name"],
                      "faceEmbed" in e.get("scored", {}))
-    return [dict(e, extra=dict(e["extra"])) for e in extra]
+    # A face DB match counts once per snapshot read, not on every tick that reuses it.
+    return [dict(e, extra=dict(e["extra"]),
+                 **({"scored": {k: v for k, v in e["scored"].items() if fresh or k != "match"}}
+                    if "scored" in e else {}))
+            for e in extra]
 
 
 def _size_jump(a, b):
@@ -1185,6 +1201,15 @@ def _merge_extra(tr, d, device_id=None, tracker_id=None):
                          text, tracker_id, device_id, conf, len(reads))
                 tr["plate_logged"] = text
             out[key], scores[key] = text, conf
+        elif key == "match":  # (subject_id, name) from Protect's face DB
+            hits = tr.setdefault("match_hits", collections.Counter())
+            hits[value] += 1
+            best = max(hits, key=lambda k: hits[k])
+            if hits[best] >= FACE_MATCH_HITS and out.get("matchedId") != best[0]:
+                out["matchedId"], out["matchedName"] = best
+                log.info("face DB: %s tracker_id=%s deviceID=%s is %r (subject %s, %d "
+                         "matching read(s))", tr.get("objectType"), tracker_id, device_id,
+                         best[1], best[0], hits[best])
         elif score >= scores.get(key, 0):
             out[key] = value
             scores[key] = score
@@ -1618,6 +1643,8 @@ def _tracker_attrs(tracker_id, tr, faces_by_person):
         entry["faceEmbed"] = extra["faceEmbed"]
     if tr["objectType"] == "person" and tracker_id in faces_by_person:
         entry["associatedFaceTrackerID"] = faces_by_person[tracker_id]
+    if tr["objectType"] in ("face", "person") and extra.get("matchedId") is not None:
+        entry["matchedId"], entry["matchedName"] = extra["matchedId"], extra.get("matchedName")
     if tr["objectType"] == "vehicle":
         for key in ("vehicleType", "color"):
             if key in (extra.get("attributes") or {}):
@@ -2569,6 +2596,29 @@ def _download_face_db(uri, device_info):
         summary = f"unreadable ({e!r})"
     log.info("face DB saved to %s (%d bytes, content-type=%s): %s", path, len(resp.content),
              resp.headers.get("content-type"), summary)
+    _set_face_db(facedb.load(path))
+
+
+# Protect's known faces (docs/protect-face-matching.md): loaded from the saved download at
+# first use and again whenever Protect sends a new one. A face names a subject once it has
+# matched on FACE_MATCH_HITS reads of its track, as the firmware's identity candidates do.
+# Similarity needed against the DB: stricter than SFace's 0.363, which 7 of 322 distinct faces
+# passed against Ian on a day he wasn't there (top 0.429). AIPORT_FACE_DB_THRESH overrides it.
+FACE_MATCH_HITS = 2
+FACE_DB_THRESH = float(os.environ.get("AIPORT_FACE_DB_THRESH") or 0.45)
+_face_db = None
+_face_db_tried = False
+
+
+def _set_face_db(db):
+    global _face_db, _face_db_tried
+    _face_db, _face_db_tried = db, True
+
+
+def _get_face_db():
+    if not _face_db_tried:
+        _set_face_db(facedb.load(os.path.join(STATE_DIR or HERE, "facedb", "known.db")))
+    return _face_db
 
 
 def _parse_box_delay(spec, name="AIPORT_BOX_DELAY_MS", default=0):
@@ -2762,7 +2812,11 @@ def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, statio
     if edge_type == "leave":
         # "leave" carries the final classification in trackerIDAttrMap (likely read by add_smart_detect_types()).
         payload["trackerIDAttrMap"] = {
-            str(t["tracker_id"]): {"objectType": t["object_type"], "zone": [int(SMART_DETECT_ZONE_ID)]}
+            str(t["tracker_id"]): {"objectType": t["object_type"], "zone": [int(SMART_DETECT_ZONE_ID)],
+                                   **{k: (t["descriptor_extra"] or {})[k]
+                                      for k in ("matchedId", "matchedName")
+                                      if (t["descriptor_extra"] or {}).get(k) is not None
+                                      and t["object_type"] in ("face", "person")}}
             for t in tracks
         }
         # Full-FoV dims use the real stream resolution, not the square detection buffer.

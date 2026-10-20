@@ -1,0 +1,124 @@
+# Matching faces against Protect's face DB: plan
+
+Status: implemented 2026-10-20 (`piport/facedb.py`); not yet seen naming anyone live.
+The threshold ended up at 0.45 (`AIPORT_FACE_DB_THRESH`), not SFace's 0.363: on a day Ian
+wasn't there, 7 of 322 distinct faces scored 0.363 to 0.429 against him.
+
+pi-port finds faces and sends their SFace embedding (`faceEmbed`), but never names anyone:
+it only matches against a local photo gallery (`<state-dir>/faces/<Name>/`), which is
+empty. Protect sends its own known-faces DB (`UpdateFaceDBRequest`), which pi-port
+downloads and ignores.
+
+## What we know
+
+### The DB holds pi-port's own embeddings
+
+`known.db` is a tar of `known/uiface.json` and `known/uiface.db`. On 2026-10-20 it held one
+subject, "Ian Vincent" (subject 5, instances 0 and 1):
+
+```json
+{"EnrolledSubjectIds": [5], "EnrolledSubjectRelationMap": [[5, [1, 0]]],
+ "InstanceIdToNameMap": [[1, "Ian Vincent"], [0, "Ian Vincent"]],
+ "InstanceIdToSubjectIdMap": [[1, 5], [0, 5]], "InstanceIdToUniqueIdMap": [[1, 3], [0, 4]],
+ "SubjectIdToNameMap": [[5, "Ian Vincent"]], "VerifiedUniqueIds": [3, 4],
+ "IgnoredSubjectIds": [], "IngnoredInstanceIds": []}
+```
+
+One vector in `uiface.db` is exactly (cosine 1.000) the `faceEmbed` pi-port sent at
+2026-10-18 16:54:38, a minute before Ian was named in Protect. Protect enrols the embedding
+the device sent, so the DB is in SFace's space and pi-port can match against it directly.
+Faces named from another source (Protect's own cameras) don't appear: the user has named
+three people in Protect, and only Ian, named on an AI Port face, is in the DB.
+
+### `uiface.db` layout (partly known)
+
+86 688 bytes. 528-byte records: a 16-byte header, then 128 float32. Records 0 and 1 are
+instances 0 and 1 (the vector at byte 544 is instance 1's, pi-port's 16:54 embedding).
+After the instances come other records (tree or index data) and a 96-byte zero tail. The
+firmware's detector names Annoy, but the file doesn't load as a plain Annoy index (0 items
+after trimming the tail; the second record's header isn't Annoy's), so it's Ubiquiti's own
+store, perhaps with Annoy built from it in memory. The record-to-instance mapping is
+inferred from one subject; a DB with several subjects will confirm it.
+
+### How the AI Port firmware matches (`ubnt_smart_detect`, v5.1.12 strings)
+
+- It loads `uiface.db` and `uiface.json` (`Load FaceDB from path`, `Failed to load
+  EnrollDB (no uiface.db or uiface.json)`), on `updateFaceDB` with a `faceDBPath`.
+- It ranks subjects by **coverage** and similarity: `Rank {} - subject {} (<{}>) -
+  coverage: {} = {} / {}, topSim {}`, then `Selected best match: subj_id={}, name={},
+  coverage={:.3f}, similarity={:.3f}`. Coverage is the share of a subject's instances that
+  pass the threshold.
+- It smooths over a track: `Updated identity candidate for tracker {}: subject_id={},
+  name={}, confidence={:.3f}, hitCount={}`, `Assigned final identity ...`, `Expiring
+  identity candidate ...`.
+- The threshold follows `recognitionAccuracy` (levels include `high` and `medium`; set by
+  `SetRecognitionAccuracy`). The numeric thresholds aren't in the strings.
+- It also checks head pose and crop quality before recognising (`Skip recognition due to
+  large head pose`).
+
+### How a match is reported
+
+The per-object fields the firmware writes include `matchedId` and `matchedName`, next to
+`associatedFaceTrackerID`, `verifyType`, `blurness` and `qualityScore`; `ubnt_streamer`
+also handles `faceEmbed`, `matchedId` and `matchedName`. Protect's detection service logs
+the same attributes on every object (`matchedId`, `matchedName`, `namesTopK`,
+`topKCandidate`, `faceVerifyStatus`). All captured values are null: no capture has a real
+AI Port match, so the value types are a guess. Most likely `matchedId` is the subject id
+(an integer, as in `uiface.json`) and `matchedName` the name.
+
+## Change
+
+### 1. `piport/facedb.py`
+
+- `load(path)`: open the tar, read `uiface.json`, and read the instance vectors from
+  `uiface.db` (record *i* = instance *i*, 128 float32 after a 16-byte header, for every
+  instance id in `InstanceIdToSubjectIdMap`). Return instances as
+  `(instance_id, subject_id, name, vector)`, skipping `IgnoredSubjectIds` and
+  `IngnoredInstanceIds` (sic).
+- Sanity check: every vector finite, with a norm like SFace's (about 5 to 20); otherwise
+  log a warning and load nothing.
+- `match(embedding)`: cosine similarity to every instance. Per subject: coverage (share of
+  its instances at or above the threshold) and top similarity. Best subject by coverage,
+  then top similarity. Returns `(subject_id, name, similarity)` or None. Threshold 0.45
+  (`AIPORT_FACE_DB_THRESH`; see the status note).
+
+### 2. Loading
+
+`_download_face_db()` calls `facedb.load()` after saving, and keeps the result. Also load
+the saved copy at startup, so matching works before Protect re-sends it.
+
+### 3. Matching in `enrich.py`
+
+Where a face embedding is computed, try the Protect DB first, then the local gallery. Keep
+the best match per face track, as the firmware's identity candidate does: the name is set
+once a track has matched on at least 2 reads (`hitCount`), and doesn't flip on one read.
+
+### 4. Reporting
+
+On the face descriptor, and on its person (via `associatedFaceTrackerID`), send
+`matchedId` (subject id) and `matchedName`; also put them in the leave's
+`trackerIDAttrMap`. Keep `name`/`tag` as now for the local gallery.
+
+### 5. Tests
+
+- `facedb.load()` on a synthetic tar built to the layout above, and on the real DB's
+  shape (2 instances, 1 subject); a corrupt or short file loads nothing.
+- `match()`: the exact vector matches; coverage beats a single high-similarity instance;
+  below the threshold gives None; ignored subjects never match.
+- Descriptors carry `matchedId`/`matchedName` once a track has 2 matching reads.
+
+### 6. Checking it live
+
+1. In Protect, name the other two people on faces that came from the AI Port cameras, so
+   the DB has three subjects. Check the downloaded DB: three subjects, and record *i*'s
+   vector equals the `faceEmbed` pi-port sent for instance *i*. That confirms the layout.
+2. One of them walks past a camera. The log shows the match and its similarity; Protect
+   shows the name on the event. If Protect ignores `matchedId`/`matchedName`, try
+   `matchedId` as the instance's unique id, then as a string.
+
+## Open questions
+
+- The value types of `matchedId`/`matchedName`, and whether Protect needs `namesTopK` or
+  `topKCandidate` too.
+- The firmware's thresholds for each `recognitionAccuracy` level.
+- What the records after the instances are (not needed for matching).

@@ -224,10 +224,12 @@ them, holding a few clear face photos; edits are picked up without a restart.
 
 Protect also sends `UpdateFaceDBRequest` with a URL for its known-faces database (named
 groups, for on-device matching). `avclient.py` downloads it to `<state-dir>/facedb/known.db`
-and logs its contents (Protect 7.3 sends a tar of `known/uiface.json`, the subject/name maps,
-and `known/uiface.db`, a binary store), so the embedding layout can
-be compared with SFace's; matching against it (`matchedId`) is not implemented yet. Whether
-Protect's face service accepts SFace embeddings is also unconfirmed.
+and matches faces against it (`facedb.py`, [docs/protect-face-matching.md](../docs/protect-face-matching.md)).
+The tar holds `known/uiface.json` (subject/name maps) and `known/uiface.db`, whose vectors are
+the SFace embeddings pi-port sent for the faces named in Protect. A face track names a subject
+once two snapshot reads match it at `AIPORT_FACE_DB_THRESH` (0.45) or better, and sends
+`matchedId` (subject id) and `matchedName` on the face and its person, as the AI Port firmware
+does; only faces named in Protect on an AI Port face are in the DB.
 
 **Detection and report rates.** Detecting and reporting run at separate rates. Each camera's
 detector analyses up to `AIPORT_DETECT_FPS` frames per second (10 on macOS, where Core ML runs

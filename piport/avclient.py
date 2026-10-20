@@ -915,6 +915,66 @@ def _load_snapshot_bgr(device_id):
     return img, mtime
 
 
+# Each confirmed face track's best crop is saved to <state-dir>/faces-seen/ when it closes, to
+# pick reference photos from: move a person's into <state-dir>/faces/<Name>/ (the gallery
+# enrich.py names faces from). The folders are world-writable because pi-port runs as root.
+FACES_SEEN_MAX = 500
+FACE_CROP_MARGIN = 0.5  # of the face box on each side, so the gallery's detector finds it
+
+
+def _faces_dirs():
+    base = STATE_DIR or HERE
+    return (os.environ.get("AIPORT_FACES_SEEN_DIR") or os.path.join(base, "faces-seen"),
+            os.environ.get("AIPORT_FACES_DIR") or os.path.join(base, "faces"))
+
+
+def _open_dir(path):
+    os.makedirs(path, exist_ok=True)
+    try:
+        os.chmod(path, 0o777)
+    except OSError:
+        pass
+
+
+def _save_face_crop(device_id, tracker_id, tr):
+    """Write a closing face track's best moment, cropped around the face, to faces-seen/."""
+    best = tr.get("best")
+    if tr.get("objectType") != "face" or not best or not best.get("jpeg"):
+        return
+    try:
+        import cv2
+        import numpy as np
+        img = cv2.imdecode(np.frombuffer(best["jpeg"], np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            return
+        h, w = img.shape[:2]
+        x, y, bw, bh = best["coord"]
+        s = CAMERA_COORD_END
+        mx, my = bw * FACE_CROP_MARGIN, bh * FACE_CROP_MARGIN
+        x1, y1 = max(0, int((x - mx) * w / s)), max(0, int((y - my) * h / s))
+        x2, y2 = min(w, int((x + bw + mx) * w / s)), min(h, int((y + bh + my) * h / s))
+        if x2 - x1 < 8 or y2 - y1 < 8:
+            return
+        ok, jpg = cv2.imencode(".jpg", img[y1:y2, x1:x2], [cv2.IMWRITE_JPEG_QUALITY, 95])
+        if not ok:
+            return
+        seen_dir, faces_dir = _faces_dirs()
+        _open_dir(seen_dir)
+        _open_dir(faces_dir)
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime((best.get("wall") or 0) / 1000))
+        path = os.path.join(seen_dir, f"{stamp}_{device_id}_t{tracker_id}_{best['score']:.2f}.jpg")
+        with open(path, "wb") as f:
+            f.write(jpg.tobytes())
+        os.chmod(path, 0o666)
+        names = sorted(n for n in os.listdir(seen_dir) if n.endswith(".jpg"))
+        for old in names[:-FACES_SEEN_MAX]:
+            os.remove(os.path.join(seen_dir, old))
+        log.info("face crop saved for deviceID=%s tracker_id=%s: %s", device_id, tracker_id, path)
+    except Exception:
+        log.exception("saving face crop failed for deviceID=%s tracker_id=%s", device_id,
+                      tracker_id)
+
+
 def _capture_best(device_id, tr, d):
     """Keep the track's best-scoring moment: the full-res JPEG, the box and the
     time. On leave the thumbnails come from it, not from the frame several seconds after
@@ -1982,6 +2042,7 @@ def _motion_tick(ws, device_id):
             if event is not None and not tr.get("stationary_coord"):
                 event["finished"].append((tracker_id, tr))  # its snapshot goes in the leave
             _close_line_events(ws, device_id, tracker_id, tr)
+            _save_face_crop(device_id, tracker_id, tr)
             del tracks[tracker_id]
             dev["recent"].append((tracker_id, tr, now_ms))
 

@@ -385,68 +385,6 @@ def send_msg(ws, functionName, payload, to="ubnt_avclient", in_response_to=None,
     # Controller sends/expects plain JSON as BINARY frames (opcode 0x2), not text.
     ws.send(json.dumps(msg).encode())
     log.info(">>> sent %s (id=%s) payload=%s", functionName, msg["messageId"], payload)
-    return msg["messageId"]
-
-
-# Time sync (docs/protect-timesync.md), log only for now: AIPORT_TIMESYNC=log runs the batch a
-# real device sends before its hello (10 ubnt_avclient_timeSync requests, each after the
-# previous reply) and logs Protect's replies and the measured offset; no clock is changed.
-TIMESYNC = (os.environ.get("AIPORT_TIMESYNC") or "off").lower()
-TIMESYNC_FN = "ubnt_avclient_timeSync"
-TIMESYNC_ROUNDS = 10
-TIMESYNC_TIMEOUT_S = 2.0
-
-
-def _time_sync_batch(ws, rounds=TIMESYNC_ROUNDS, timeout=TIMESYNC_TIMEOUT_S):
-    """Run one timeSync batch. Returns (offset ms of the smallest-RTT round or None, other
-    messages that arrived meanwhile, to be handled after the hello)."""
-    other, samples, prev = [], [], 0
-    for i in range(rounds):
-        t0 = time.time() * 1000
-        mid = send_msg(ws, TIMESYNC_FN, {"timeDelta": 0}, to="UniFiVideo", from_="ubnt_avclient",
-                       in_response_to=prev, response_expected=True)
-        reply, deadline = None, time.monotonic() + timeout
-        while reply is None:
-            left = deadline - time.monotonic()
-            if left <= 0:
-                break
-            try:
-                raw = ws.recv(timeout=left)
-            except TimeoutError:
-                break
-            text = raw.decode() if isinstance(raw, (bytes, bytearray)) else raw
-            try:
-                msg = json.loads(text)
-            except json.JSONDecodeError:
-                continue
-            if msg.get("functionName") == TIMESYNC_FN and msg.get("inResponseTo") == mid:
-                reply = msg
-            else:
-                other.append(msg)
-        t3 = time.time() * 1000
-        if reply is None:
-            log.warning("timeSync round %d/%d: no reply from Protect within %.0f s", i + 1,
-                        rounds, timeout)
-            break
-        payload = reply.get("payload") or {}
-        t1, t2 = payload.get("t1"), payload.get("t2")
-        if not all(isinstance(v, (int, float)) for v in (t1, t2)):
-            log.warning("timeSync round %d/%d: reply without t1/t2: %s", i + 1, rounds, reply)
-            break
-        offset, rtt = ((t1 - t0) + (t2 - t3)) / 2, (t3 - t0) - (t2 - t1)
-        samples.append((rtt, offset))
-        prev = reply.get("messageId") or 0
-        log.info("timeSync round %d/%d: Protect t1=%s t2=%s, offset %+.1f ms, rtt %.1f ms",
-                 i + 1, rounds, t1, t2, offset, rtt)
-    if not samples:
-        log.warning("timeSync: Protect answered no requests; going on to the hello")
-        return None, other
-    rtt, offset = min(samples)
-    log.info("timeSync batch: %d/%d replies; Protect's clock minus ours %+.1f ms (smallest rtt "
-             "%.1f ms, offsets %+.1f to %+.1f ms); not applied (AIPORT_TIMESYNC=%s)",
-             len(samples), rounds, offset, rtt, min(o for _, o in samples),
-             max(o for _, o in samples), TIMESYNC)
-    return offset, other
 
 
 def _stop_stream(device_id):
@@ -3274,12 +3212,6 @@ def run(host, port, device_info, token=None):
     with connect(url, subprotocols=["secure_transfer"], additional_headers=headers,
                  ssl=ctx, open_timeout=15) as ws:
         log.info("CLASSIC AVCLIENT WSS CONNECTED (subprotocol=%s)", ws.subprotocol)
-        pending = []
-        if TIMESYNC != "off":
-            try:
-                _, pending = _time_sync_batch(ws)
-            except Exception:
-                log.exception("timeSync batch failed; going on to the hello")
         # hwrev must be non-null or hardwareRevision stays empty; 1 is a placeholder.
         now_ms = int(time.time() * 1000)
         send_msg(ws, "ubnt_avclient_hello", {
@@ -3311,8 +3243,6 @@ def run(host, port, device_info, token=None):
             },
         }, response_expected=True)
 
-        for msg in pending:  # arrived during the timeSync batch
-            _dispatch(ws, msg, device_info)
         for raw in ws:
             # Controller sends JSON as BINARY frames; decode bytes as UTF-8 JSON.
             text = raw.decode() if isinstance(raw, (bytes, bytearray)) else raw
@@ -3321,15 +3251,11 @@ def run(host, port, device_info, token=None):
             except json.JSONDecodeError:
                 log.warning("non-JSON frame (%d bytes): %r", len(text), text[:200])
                 continue
-            _dispatch(ws, msg, device_info)
-
-
-def _dispatch(ws, msg, device_info):
-    if msg.get("inResponseTo"):
-        log.info("<<< response to our msg id=%s payload=%s",
-                 msg.get("inResponseTo"), msg.get("payload"))
-        return
-    handle_function(ws, msg, device_info)
+            if msg.get("inResponseTo"):
+                log.info("<<< response to our msg id=%s payload=%s",
+                          msg.get("inResponseTo"), msg.get("payload"))
+                continue
+            handle_function(ws, msg, device_info)
 
 
 def main():

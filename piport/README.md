@@ -255,7 +255,8 @@ was missed in. A tree stump on Backyard (median ~0.55) and a pot by the doorbell
 and, as in Frigate's Norfair tracker (`detect.min_initialized`), a track only counts once it
 is initialised: a counter starts at 1 on its first detection, goes up 1 per detection and down
 1 per miss, and must pass `AIPORT_MIN_INITIALIZED` (default half the detection rate, 5 frames
-or ~0.5 s at 10 fps). Four flickering night-time boxes in a Backyard corner each made a person
+or ~0.5 s at 10 fps; per camera like the box delay, e.g. `5,AABBCC3344CC=3` for Driveway, whose
+road strip is in view for only ~0.7 s). Four flickering night-time boxes in a Backyard corner each made a person
 event before this; a sedan seen on only two frames (0.85, 0.78) no longer makes one either, as
 in Frigate. A track that never passes is dropped silently; the debug log gives its
 median, for tuning the threshold per type. A face or plate confirms as soon as a confirmed

@@ -633,6 +633,34 @@ class TestCameraEvent(Base):
             self.tick(box if seen else None, after_ms=100) if seen else self.tick(after_ms=100)
         self.assertEqual(self.events(), [])
 
+    def test_min_initialized_per_camera(self):
+        self.assertEqual(av._parse_min_initialized("5,aabbcc3344cc=3"), (5, {"AABBCC3344CC": 3}))
+        self.assertEqual(av._parse_min_initialized("AABBCC3344CC=3")[1], {"AABBCC3344CC": 3})
+        self.assertEqual(av._parse_min_initialized("x,D=y")[1], {})
+
+    def test_driveway_car_crossing_in_under_a_second_counts(self):
+        # Live 08:48 on Driveway: a car on the road strip for ~0.7 s never initialised at 5
+        # (counter 1, 2, 3, 2, 3, 4 with one miss); at 3 it does.
+        self._live_init()
+        av._event_start_ms["D"] = 0
+        with mock.patch.object(av, "_MIN_INITIALIZED_PER", {"D": 3}):
+            for x in (260, 230, 200, None, 170, 140):   # 6 frames, one missed
+                if x is None:
+                    self.tick(after_ms=100)
+                else:
+                    self.tick(dict(self.CAR, coord=[x, 40, 90, 80]), after_ms=100)
+        self.assertEqual(self.events()[0][0], "enter")
+
+    def test_same_crossing_does_not_count_at_the_default(self):
+        self._live_init()
+        av._event_start_ms["D"] = 0
+        for x in (260, 230, 200, None, 170, 140):
+            if x is None:
+                self.tick(after_ms=100)
+            else:
+                self.tick(dict(self.CAR, coord=[x, 40, 90, 80]), after_ms=100)
+        self.assertEqual(self.events(), [])
+
     def test_steady_object_initializes_after_half_a_second(self):
         self._live_init()
         av._event_start_ms["D"] = 0

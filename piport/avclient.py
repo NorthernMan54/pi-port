@@ -225,8 +225,37 @@ MIN_HITS = 2
 # default half the detection rate, ~0.5 s): a counter starts at 1 on the first detection, goes
 # up 1 per detection and down 1 per miss, and the track counts once it is above
 # MIN_INITIALIZED. Live 19:17 on Backyard four flickering night-time boxes in one corner each
-# became a person event. AIPORT_MIN_INITIALIZED overrides it, in frames.
-MIN_INITIALIZED = int(os.environ.get("AIPORT_MIN_INITIALIZED") or max(int(DETECT_FPS / 2), 2))
+# became a person event. AIPORT_MIN_INITIALIZED overrides it in frames, per camera like the box
+# delay ("5,AABBCC3344CC=3"): Driveway's road strip is in view for ~0.7 s (7 frames), so a
+# passing car with a miss or two never initialised (live 08:48).
+_MIN_INIT_DEFAULT = max(int(DETECT_FPS / 2), 2)
+_MIN_INIT_SPEC = os.environ.get("AIPORT_MIN_INITIALIZED")
+
+
+def _parse_min_initialized(spec):
+    """(default frames, {deviceID: frames}) from AIPORT_MIN_INITIALIZED."""
+    per = {}
+    default = _MIN_INIT_DEFAULT
+    for part in (spec or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            if "=" in part:
+                dev, n = part.split("=", 1)
+                per[dev.strip().upper()] = int(n)
+            else:
+                default = int(part)
+        except ValueError:
+            log.warning("ignoring bad AIPORT_MIN_INITIALIZED entry %r", part)
+    return default, per
+
+
+MIN_INITIALIZED, _MIN_INITIALIZED_PER = _parse_min_initialized(_MIN_INIT_SPEC)
+
+
+def _min_initialized(device_id):
+    return _MIN_INITIALIZED_PER.get(str(device_id).upper(), MIN_INITIALIZED)
 
 
 def _parse_true_thresh(spec):
@@ -254,7 +283,7 @@ def _true_thresh(object_type):
     return _TRUE_THRESH.get(object_type, _TRUE_THRESH_DEFAULT)
 
 
-def _record_score(tr, score):
+def _record_score(tr, score, device_id=None):
     """Add this frame's score (0.0 if missed) and latch true_positive once the median of the
     last SCORE_HISTORY passes the type's threshold."""
     history = tr.setdefault("score_history", [])
@@ -263,7 +292,7 @@ def _record_score(tr, score):
     if score > 0:
         tr["hits"] = tr.get("hits", 0) + 1
     tr["init_count"] = max(0, tr.get("init_count", 0) + (1 if score > 0 else -1))
-    if tr["init_count"] > MIN_INITIALIZED:
+    if tr["init_count"] > _min_initialized(device_id):
         tr["initialized"] = True
     if (not tr.get("true_positive") and tr.get("hits", 0) >= MIN_HITS
             and tr.get("initialized")):
@@ -1888,7 +1917,7 @@ def _motion_tick(ws, device_id):
                 tr["miss_count"] = 0
                 if _center_moved(tr.get("first_coord") or d["coord"], d["coord"]):
                     tr["moved"] = True
-                _record_score(tr, d["score"])
+                _record_score(tr, d["score"], device_id)
                 _update_still(tr, now_ms)
                 if (tr.get("stationary_coord") and not d.get("seeded")
                         and _iou(d["coord"], tr["stationary_coord"]) >= STILL_IOU
@@ -1929,7 +1958,7 @@ def _motion_tick(ws, device_id):
                 continue
             # No matching detection this frame for this track.
             tr["miss_count"] += 1
-            _record_score(tr, 0.0)
+            _record_score(tr, 0.0, device_id)
             tolerance = (PARKED_MISS_TOLERANCE_TICKS if tr.get("stationary_coord")
                          else MOTION_MISS_TOLERANCE_TICKS)
             if not tr.get("confirmed", True) and tr["miss_count"] >= tolerance:
@@ -2000,7 +2029,7 @@ def _motion_tick(ws, device_id):
                                   "first_coord": list(d["coord"]),
                                   "prev_center": _protect_center(device_id, d["coord"]),
                                   "crossed_lines": {}}
-            _record_score(tracks[tracker_id], d["score"])
+            _record_score(tracks[tracker_id], d["score"], device_id)
             tracks[tracker_id]["confirmed"] = starting or (
                 confirm_ms <= 0 and tracks[tracker_id].get("true_positive")
                 and d["objectType"] not in CONFIRM_WITH)

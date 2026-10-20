@@ -5,6 +5,8 @@ Facts read from Ubiquiti's public AI Port firmware image (v5.1.12, see
 pi-port's behaviour. Nothing here is copied code: only file names, setting names,
 default values and log-message wording, read with `strings` and `debugfs` without
 running anything. The image and the extracted binaries stay outside this repo.
+For the firmware actually running (adopted by Protect), see
+[aiport-firmware-lab.md](aiport-firmware-lab.md).
 
 ## Image layout
 

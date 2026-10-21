@@ -181,7 +181,7 @@ class TestEnrichDetections(unittest.TestCase):
             return [{"coord": [10, 10, 5, 5], "text": "ABC123", "confidence": 0.9, "parent": 0}]
 
         def faces(self, img, coords):
-            return [{"coord": [20, 20, 5, 5], "score": 0.85, "name": "", "embedding": [0.1, 0.2],
+            return [{"coord": [20, 20, 5, 5], "score": 0.85, "name": "", "embedding": [8.0, 6.0],
                      "parent": 0}]
 
     def setUp(self):
@@ -250,7 +250,7 @@ class TestEnrichDetections(unittest.TestCase):
         extra = avclient._enrich_detections("DEV", [vehicle, person])
         self.assertEqual(vehicle["scored"]["name"], ("ABC123", 0.9))
         self.assertEqual([e["objectType"] for e in extra], ["face"])
-        self.assertEqual(extra[0]["scored"]["faceEmbed"], ([0.1, 0.2], 0.85))
+        self.assertEqual(extra[0]["scored"]["faceEmbed"], ([8.0, 6.0], 0.85))
 
 
 @unittest.skipIf(avclient is None, f"avclient unavailable ({_AV_ERR})")

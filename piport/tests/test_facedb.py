@@ -223,5 +223,37 @@ class TestAvclientMatching(unittest.TestCase):
         self.assertNotIn("match", faces[0].get("scored", {}))
 
 
+    def _enrich_one(self, embedding, db):
+        class Enricher:
+            lpr, face = False, True
+            def plates(self, img, coords):
+                return []
+            def faces(self, img, coords):
+                return [{"coord": [10, 10, 20, 20], "score": 0.9, "name": "", "similarity": 0.0,
+                         "embedding": list(embedding), "parent": 0, "size_px": 60}]
+        person = {"objectType": "person", "score": 0.9, "coord": [0, 0, 100, 300]}
+        with mock.patch.object(av, "_get_enricher", lambda: Enricher()), \
+                mock.patch.object(av, "_get_face_db", lambda: db), \
+                mock.patch.object(av, "_load_snapshot_bgr", lambda dev: (np.zeros((9, 9, 3)), 3.0)):
+            av._enrich_cache.pop("D", None)
+            return av._enrich_detections("D", [dict(person)])
+
+    def test_weak_face_is_reported_without_embedding_or_match(self):
+        # Live 14:33 on Driveway: a stranger looking down (vector length 6.0) went to Protect,
+        # which named her after a person whose weak reference was close to many faces.
+        sean = vec()
+        db = facedb.parse(build({5: ("Sean", [sean])}))
+        faces = self._enrich_one(sean / np.linalg.norm(sean) * 6.0, db)   # same direction, short
+        self.assertEqual(faces[0]["objectType"], "face")
+        self.assertNotIn("faceEmbed", faces[0].get("scored", {}))
+        self.assertNotIn("match", faces[0].get("scored", {}))
+
+    def test_strong_face_keeps_its_embedding_and_match(self):
+        sean = vec()
+        db = facedb.parse(build({5: ("Sean", [sean])}))
+        faces = self._enrich_one(sean / np.linalg.norm(sean) * 8.0, db)
+        self.assertIn("faceEmbed", faces[0]["scored"])
+        self.assertIn("match", faces[0]["scored"])
+
 if __name__ == "__main__":
     unittest.main()

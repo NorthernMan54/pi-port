@@ -1111,8 +1111,9 @@ def _enrich_detections(device_id, detections):
                 # A face under FACE_MATCH_MIN_PX is reported without its embedding: Protect
                 # enrols the embedding it's sent, and one from an 18 px face made a reference
                 # the same person later scored 0.299 against. It isn't matched either.
+                # Nor is one whose SFace vector is short (enrich.FACE_EMBED_MIN_NORM): a poor face.
                 small = f.get("size_px", enrich.FACE_MATCH_MIN_PX) < enrich.FACE_MATCH_MIN_PX
-                if f["embedding"] is not None and not small:
+                if f["embedding"] is not None and not small and not enrich.weak_embedding(f["embedding"]):
                     face["scored"] = {"faceEmbed": (f["embedding"], f["score"])}
                     db = _get_face_db()
                     m = db.match(f["embedding"], FACE_DB_THRESH) if db else None

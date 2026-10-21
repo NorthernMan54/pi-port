@@ -55,6 +55,16 @@ FACE_MATCH_THRESH = float(os.environ.get("AIPORT_FACE_MATCH_THRESH", "0.363"))
 # a 112 x 112 face, and an 18 x 23 px face on Backyard scored 0.13 to 1.0 against the same
 # person. The AI Port firmware checks crop quality before recognising too.
 FACE_MATCH_MIN_PX = int(os.environ.get("AIPORT_FACE_MATCH_MIN_PX") or 40)
+# ...nor are faces whose SFace vector is shorter than this: its length falls with a face's
+# quality (blur, looking down or away). Live 14:33 on Driveway a 40 px read of a stranger looking
+# down (length 6.0) went to Protect, which named her after the person whose weak reference
+# (length 3.9) sits 0.3-0.4 from many faces; good reads of him are 8.5-11.6.
+FACE_EMBED_MIN_NORM = float(os.environ.get("AIPORT_FACE_EMBED_MIN_NORM") or 7.0)
+
+
+def weak_embedding(embedding):
+    """True if an SFace vector is too short (a poor face) to send or match."""
+    return embedding is None or float(np.linalg.norm(np.asarray(embedding, dtype=np.float64))) < FACE_EMBED_MIN_NORM
 PLATE_SCORE_THRESH = float(os.environ.get("AIPORT_LPR_THRESH", "0.5"))
 # Plate/face crops are expanded by this factor around the parent box: the
 # full-res snapshot can lag the 640 detection frame by up to a second.
@@ -302,7 +312,8 @@ class Enricher:
                     fx, fy, fw, fh = [float(v) for v in f[:4]]
                     emb = sface.feature(sface.alignCrop(crop, f)) if sface is not None else None
                     size_px = int(min(fw, fh))
-                    name, sim = (self._match(sface, emb) if size_px >= FACE_MATCH_MIN_PX
+                    name, sim = (self._match(sface, emb)
+                                 if size_px >= FACE_MATCH_MIN_PX and not weak_embedding(emb)
                                  else ("", 0.0))
                     out.append({"coord": _to_norm(x1 + fx, y1 + fy, x1 + fx + fw, y1 + fy + fh, iw, ih),
                                 "score": float(f[14]), "name": name, "similarity": sim,

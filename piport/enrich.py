@@ -52,11 +52,11 @@ FACE_SCORE_THRESH = float(os.environ.get("AIPORT_FACE_THRESH", "0.8"))
 # SFace's published cosine threshold for "same person".
 FACE_MATCH_THRESH = float(os.environ.get("AIPORT_FACE_MATCH_THRESH", "0.363"))
 # Faces smaller than this (the shorter side, in snapshot pixels) aren't matched: SFace works on
-# a 112 x 112 face, and an 18 x 23 px face on Backyard scored 0.13 to 1.0 against the same
+# a 112 x 112 face, and an 18 x 23 px face on Camera C scored 0.13 to 1.0 against the same
 # person. The AI Port firmware checks crop quality before recognising too.
 FACE_MATCH_MIN_PX = int(os.environ.get("AIPORT_FACE_MATCH_MIN_PX") or 40)
 # ...nor are faces whose SFace vector is shorter than this: its length falls with a face's
-# quality (blur, looking down or away). Live 14:33 on Driveway a 40 px read of a stranger looking
+# quality (blur, looking down or away). Live 14:33 on Camera B a 40 px read of a stranger looking
 # down (length 6.0) went to Protect, which named her after the person whose weak reference
 # (length 3.9) sits 0.3-0.4 from many faces; good reads of him are 8.5-11.6.
 FACE_EMBED_MIN_NORM = float(os.environ.get("AIPORT_FACE_EMBED_MIN_NORM") or 7.0)

@@ -37,7 +37,7 @@ import numpy as np
 
 MIN_REGION = 320
 # Per COCO label, as in Frigate's const.py.
-# person 0.75, not Frigate's 0.9: live 11:33 at the doorbell an upper-body box 89% inside the
+# person 0.75, not Frigate's 0.9: live 11:33 at Camera A an upper-body box 89% inside the
 # full-body box of the same person, standing close, became a second person.
 LABEL_CONSOLIDATION = {"car": 0.8, "face": 0.5, "person": 0.75}
 LABEL_CONSOLIDATION_DEFAULT = 0.9

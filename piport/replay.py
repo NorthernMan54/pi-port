@@ -6,7 +6,7 @@ avclient's motion tick with a clock taken from the frame timestamps (so it runs 
 the detector allows), and prints the EventSmartDetect messages pi-port would have sent:
 which events open, which objects join them, and when they leave.
 
-    venv/bin/python piport/replay.py ~/piport-clips/backyard-walk.mp4
+    venv/bin/python piport/replay.py ~/piport-clips/camera-walk.mp4
     venv/bin/python piport/replay.py CLIP --moves          # every moving update too
     venv/bin/python piport/replay.py CLIP --json           # machine-readable summary
     venv/bin/python piport/replay.py CLIP --faces          # read faces as the live snapshot does
@@ -22,7 +22,7 @@ as live they're read from the camera's once-a-second snapshot; no face DB or gal
 
 --check replays every clip whose sidecar has an "expect" block, each in its own process with
 the sidecar's "env" (AIPORT_* settings, read at import) and "args" (e.g. ["--startup",
-"--device", "AABBCC3344CC"]), and prints PASS or FAIL per clip. "expect" may hold:
+"--device", "02000000000B"]), and prints PASS or FAIL per clip. "expect" may hold:
     "events": 1 or [min, max]                 how many events
     "objects": {"vehicle": 1, "person": [2, 3]}  tracks of each type, over all events
     "distinct_face_snapshots": true           no two face tracks have the same face thumbnail

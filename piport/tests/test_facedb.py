@@ -201,7 +201,7 @@ class TestAvclientMatching(unittest.TestCase):
         self.assertIn("faceEmbed", again[0]["scored"])
 
     def test_small_face_is_reported_without_embedding_or_match(self):
-        # Live 09:21 on Backyard: an 18 x 23 px face scored 0.299 against the same person.
+        # Live 09:21 on Camera C: an 18 x 23 px face scored 0.299 against the same person.
         ian = vec()
         db = facedb.parse(build({5: ("Ian", [ian])}))
 
@@ -239,19 +239,19 @@ class TestAvclientMatching(unittest.TestCase):
             return av._enrich_detections("D", [dict(person)])
 
     def test_weak_face_is_reported_without_embedding_or_match(self):
-        # Live 14:33 on Driveway: a stranger looking down (vector length 6.0) went to Protect,
+        # Live 14:33 on Camera B: a stranger looking down (vector length 6.0) went to Protect,
         # which named her after a person whose weak reference was close to many faces.
-        sean = vec()
-        db = facedb.parse(build({5: ("Sean", [sean])}))
-        faces = self._enrich_one(sean / np.linalg.norm(sean) * 6.0, db)   # same direction, short
+        alex = vec()
+        db = facedb.parse(build({5: ("Alex", [alex])}))
+        faces = self._enrich_one(alex / np.linalg.norm(alex) * 6.0, db)   # same direction, short
         self.assertEqual(faces[0]["objectType"], "face")
         self.assertNotIn("faceEmbed", faces[0].get("scored", {}))
         self.assertNotIn("match", faces[0].get("scored", {}))
 
     def test_strong_face_keeps_its_embedding_and_match(self):
-        sean = vec()
-        db = facedb.parse(build({5: ("Sean", [sean])}))
-        faces = self._enrich_one(sean / np.linalg.norm(sean) * 8.0, db)
+        alex = vec()
+        db = facedb.parse(build({5: ("Alex", [alex])}))
+        faces = self._enrich_one(alex / np.linalg.norm(alex) * 8.0, db)
         self.assertIn("faceEmbed", faces[0]["scored"])
         self.assertIn("match", faces[0]["scored"])
 

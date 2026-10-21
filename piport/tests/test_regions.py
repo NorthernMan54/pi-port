@@ -62,7 +62,7 @@ class TestRegions(unittest.TestCase):
         self.assertEqual(regions.reduce_detections(SHAPE, [car, half]), [car])
 
     def test_upper_body_inside_the_same_persons_full_box_is_dropped(self):
-        # Live 11:33 at the doorbell: the upper-body box was 89% inside the full-body box (its
+        # Live 11:33 at Camera A: the upper-body box was 89% inside the full-body box (its
         # top above it) and became a second person at Frigate's 0.9.
         full = {"label": "person", "score": 0.9, "box": (349, 229, 670, 970), "region": (0, 0, 720, 720)}
         upper = {"label": "person", "score": 0.95, "box": (441, 203, 553, 432), "region": (0, 0, 720, 720)}
@@ -131,7 +131,7 @@ class TestRegionDetection(unittest.TestCase):
         self.assertAlmostEqual(y, 150 / 720 * 1000, delta=3)
 
     def test_box_cut_off_by_its_crop_is_looked_at_again(self):
-        # Live 12:59 on Driveway: a crop placed for a road car cut through a large object at
+        # Live 12:59 on Camera B: a crop placed for a road car cut through a large object at
         # the top, and its cut-off box took over the car's track.
         f = np.full(SHAPE, 90, np.uint8)
         f[100:400, 300:700] = 255                      # a large object
@@ -165,7 +165,7 @@ class TestRegionDetection(unittest.TestCase):
         self.assertTrue(all(c == (720, 720) for c in self.det.calls))
 
     def test_startup_look_repeats_through_the_startup_window(self):
-        # One coarse look missed a parked car at the doorbell; keep looking for 15 s.
+        # One coarse look missed a parked car at Camera A; keep looking for 15 s.
         av._startup_scan.pop("R", None)
         self.frame()
         av._motion_boxes["R"] = []

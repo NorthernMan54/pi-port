@@ -146,7 +146,7 @@ The idea: Protect's RTSP relay sends RTCP sender reports, which pair an NTP wall
 an RTP timestamp. Mapping each frame's RTP time through them would give the time Protect
 assigned to that frame, with no pipeline delay, and so no `AIPORT_BOX_DELAY_MS`.
 
-**Tested 2026-10-20** with a small RTSP client (RTP over TCP) on camera `AABBCC3344BB`
+**Tested 2026-10-20** with a small RTSP client (RTP over TCP) on camera `02000000000D`
 through `rtsp://<console>:7447/<alias>`, 60 s, 1201 frames, 13 sender reports, on a
 Mac within 2 ms of NTP:
 

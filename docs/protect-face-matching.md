@@ -134,9 +134,9 @@ On the face descriptor, and on its person (via `associatedFaceTrackerID`), send
 
 ## What Protect does with it (2026-10-21, Protect's `ds.log`)
 
-A walk-by at 09:43 on Backyard showed the protocol works: when a face track carries
+A walk-by at 09:43 on Camera C showed the protocol works: when a face track carries
 `matchedId`, Protect logs `using camera matchedId=178 (no ai-feature-console call)` and
-`Face recognition → unifi-protect: group_id=178 name="Sean Gracey"`, and labels the event
+`Face recognition → unifi-protect: group_id=178 name="Alex Example"`, and labels the event
 `group:face_178`, `groupType:known`. A face with only `faceEmbed` makes Protect run its own
 search (`ai-feature-console search_group`), which may attach an unknown face group.
 
@@ -155,7 +155,7 @@ Two things stopped that event showing the name, both fixed:
 ### The leave replaced the name (2026-10-21 11:18)
 
 With one face track and the embedding held until named, Protect's `ds.log` showed
-`using camera matchedId=186` and `group_id=186 name="Sean Gracey"` for the whole live phase.
+`using camera matchedId=186` and `group_id=186 name="Alex Example"` for the whole live phase.
 When the event closed, its object recognition clustered the leave's `faceEmbed` itself into a
 new unknown group (`group:face_189`, `groupType:unknown`), which replaced the name. A named
 face's leave now carries `matchedId`/`matchedName` and no `faceEmbed`; an unnamed face's leave

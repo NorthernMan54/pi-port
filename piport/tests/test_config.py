@@ -72,7 +72,7 @@ class TestBsdFallbacks(unittest.TestCase):
     IFCONFIG = ("en0: flags=8863<UP,BROADCAST,RUNNING> mtu 1500\n"
                 "\tether c8:89:f3:d4:c3:cd\n"
                 "\tinet6 fe80::1%en0 prefixlen 64 scopeid 0xe\n"
-                "\tinet 192.168.1.227 netmask 0xffffff00 broadcast 192.168.1.255\n")
+                "\tinet 192.0.2.10 netmask 0xffffff00 broadcast 192.0.2.255\n")
 
     def _outputs(self, **by_cmd):
         return lambda cmd: by_cmd.get(cmd[0], "")
@@ -103,7 +103,7 @@ class TestBsdFallbacks(unittest.TestCase):
     def test_ip_from_ifconfig(self):
         with mock.patch("config.subprocess.run", side_effect=OSError), \
                 mock.patch("config._run", self._outputs(ifconfig=self.IFCONFIG)):
-            self.assertEqual(config._iface_ip("en0"), "192.168.1.227")
+            self.assertEqual(config._iface_ip("en0"), "192.0.2.10")
 
     def test_busybox_inet_addr_rejected(self):
         busybox = "eth0  Link encap:Ethernet\n  inet addr:10.0.0.5  Bcast:10.0.0.255\n"

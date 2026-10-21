@@ -183,14 +183,14 @@ BOX_SMOOTHING = 0.6
 # re-created as a new track every tick. The radius is capped at NN_DIST_MAX and widens only
 # by NN_MISS_GROWTH per missed tick, to at most NN_MISS_GROWTH_MAX x: it used to multiply by
 # every missed tick, so a track missed for a second took any same-type box in the frame (live
-# 09:56 on Driveway: one vehicle track hopped between four cars over 24 s).
+# 09:56 on Camera B: one vehicle track hopped between four cars over 24 s).
 NN_DIST_FACTOR = 3.0
 NN_DIST_MARGIN = 30
 NN_DIST_MAX = 150
 NN_MISS_GROWTH = 0.25
 NN_MISS_GROWTH_MAX = 1.5
 # A moving track never takes a box more than this many times wider or taller (or narrower or
-# shorter) than its own, from Norfair or the nearest rule: live 10:20 on Driveway a bicycle's
+# shorter) than its own, from Norfair or the nearest rule: live 10:20 on Camera B a bicycle's
 # track (40x57) took a 49x136 box beside it, then a 107x253 one, and held the event 16 s.
 NN_SIZE_RATIO_MAX = 2.0
 SIZE_JUMP_INSIDE = 0.8
@@ -215,8 +215,8 @@ if TRACKER in ("", "norfair"):
 # A track is a true positive once the median of its last SCORE_HISTORY scores (0.0 for each
 # analysed frame it was missed in) reaches AIPORT_TRUE_THRESH -- Frigate's false-positive
 # filter (frigate/track/tracked_object.py, MIT). Every detection already needs
-# AIPORT_OBJ_THRESH (detector.py). Seen 2026-10-17: a tree stump on Backyard and a pot by
-# the doorbell scored "animal" ~0.5-0.6 for a minute at a time; a passing sedan scored
+# AIPORT_OBJ_THRESH (detector.py). Seen 2026-10-17: a tree stump on Camera C and a pot by
+# Camera A scored "animal" ~0.5-0.6 for a minute at a time; a passing sedan scored
 # 0.85 and 0.78 on its only two frames.
 SCORE_HISTORY = 10
 DEFAULT_TRUE_THRESH = 0.7
@@ -227,9 +227,9 @@ MIN_HITS = 2
 # ...and once it is initialised as Frigate's Norfair tracker does (detect.min_initialized,
 # default half the detection rate, ~0.5 s): a counter starts at 1 on the first detection, goes
 # up 1 per detection and down 1 per miss, and the track counts once it is above
-# MIN_INITIALIZED. Live 19:17 on Backyard four flickering night-time boxes in one corner each
+# MIN_INITIALIZED. Live 19:17 on Camera C four flickering night-time boxes in one corner each
 # became a person event. AIPORT_MIN_INITIALIZED overrides it in frames, per camera like the box
-# delay ("5,AABBCC3344CC=3"): Driveway's road strip is in view for ~0.7 s (7 frames), so a
+# delay ("5,02000000000B=3"): Camera B's road strip is in view for ~0.7 s (7 frames), so a
 # passing car with a miss or two never initialised (live 08:48).
 _MIN_INIT_DEFAULT = max(int(DETECT_FPS / 2), 2)
 _MIN_INIT_SPEC = os.environ.get("AIPORT_MIN_INITIALIZED")
@@ -316,7 +316,7 @@ CONFIRM_WITH = {"face": "person", "licensePlate": "vehicle"}
 INSIDE_PARKED_FRACTION = 0.7
 # Motion/scene gate: skip the classifier on a near-static frame with no open track.
 # The gate asks motion.py (Frigate's motion detector) for motion boxes against a running
-# background, so a person walking through Backyard's background (~0.5% of the frame) counts;
+# background, so a person walking through Camera C's background (~0.5% of the frame) counts;
 # the old whole-frame average diff missed them. AIPORT_MOTION_GATE=0 disables the gate.
 # Protect's motion sensitivity and motion zones set its pixel threshold and mask;
 # AIPORT_MOTION_THRESHOLD (1-255) overrides the threshold. Without OpenCV the old average
@@ -439,7 +439,7 @@ def _stop_stream(device_id):
     _startup_scan.pop(device_id, None)
     _last_parked_check.pop(device_id, None)
     # The startup window starts again on the new stream's first frame: live 11:47 on
-    # Driveway the RTSP pull dropped 3 s in and the window ran out before frames came back,
+    # Camera B the RTSP pull dropped 3 s in and the window ran out before frames came back,
     # so the parked car opened an event instead of parking.
     with _motion_lock:
         dev = _motion_state.get(device_id)
@@ -721,7 +721,7 @@ def _protect_center(device_id, coord):
 def _protect_foot(device_id, coord):
     """Bottom-centre of the box in Protect's canvas space: where the object stands, which
     zones are tested against (as in Frigate). Line crossing keeps using the centre. Seen
-    live: a person walking along Backyard's hedge had their box centre near the edge of
+    live: a person walking along Camera C's hedge had their box centre near the edge of
     zone 2 while their feet were well inside it."""
     x, y, w, h = _to_protect(device_id, coord)
     return x + w / 2.0, y + h
@@ -748,7 +748,7 @@ def _zone_allows(types, object_type):
 
 def _is_outside_detect_zones(device_id, coord, object_type=None):
     """True if the detection's bottom-centre is outside every configured `zones` polygon
-    that lists its objectType (no zones means no restriction): live 16:47 on Driveway two
+    that lists its objectType (no zones means no restriction): live 16:47 on Camera B two
     vehicles were reported from a zone set to person/animal/face."""
     polygons = _detect_zones.get(device_id)
     if not polygons:
@@ -793,7 +793,7 @@ def _detect_regions(device_id, detector, frame):
     found = regions.regions_for(shape, object_boxes)
     found += regions.regions_for(shape, [b for b in motion if not regions.inside_any(b, found)])
     # A full look about once a second through the startup window, not just on the first
-    # frame: on one coarse look a parked car at the doorbell scored too low, so it wasn't
+    # frame: on one coarse look a parked car at Camera A scored too low, so it wasn't
     # parked at start and later opened an event as an arrival.
     scan = _startup_scan.setdefault(device_id, {"first": now, "last": None})
     if (now - scan["first"] <= STARTUP_WINDOW_MS / 1000.0
@@ -814,7 +814,7 @@ def _detect_regions(device_id, detector, frame):
     for region in found:
         dets += run(region)
     # A box cut off by its crop's edge (not the picture's) is looked at again on a crop twice
-    # its size, as older Frigate did: live 12:59 on Driveway a crop placed for a road car cut
+    # its size, as older Frigate did: live 12:59 on Camera B a crop placed for a road car cut
     # through a large object at the top, and its cut-off box took over the car's track.
     # A box still cut off after that gets another look (up to CLIPPED_REDETECT_MAX a frame).
     redone = []
@@ -1007,7 +1007,7 @@ def _save_face_crop(device_id, tracker_id, tr):
 
 # Thumbnail choice, as Frigate's is_better_thumbnail (frigate/util/image.py, MIT): a frame cut
 # off by the picture's edge never replaces one that isn't; otherwise a frame wins with a score
-# over 5% higher or a box over 10% larger. Live 12:00 at the doorbell the top-scoring frame was a
+# over 5% higher or a box over 10% larger. Live 12:00 at Camera A the top-scoring frame was a
 # shoulder at the lens's edge. Unlike Frigate, a whole frame always replaces a cut-off one.
 EDGE_MARGIN = 3  # of 1000
 
@@ -1059,7 +1059,7 @@ def _parked_scan_over(tr):
 def _plate_settled(device_id, coord):
     """True if this vehicle box belongs to a track that is parked, still, or already has a
     confident plate -- re-reading it is wasted work. A partial box mostly inside a parked
-    car's box is that car (live 10:14 on Driveway: a parked car's plate was re-read and logged
+    car's box is that car (live 10:14 on Camera B: a parked car's plate was re-read and logged
     on every snapshot from boxes on part of it)."""
     with _motion_lock:
         by_id = dict(_motion_state.get(device_id, {}).get("tracks", {}))
@@ -1146,7 +1146,7 @@ def _size_jump(a, b):
     """True if box b ([x, y, w, h]) is over NN_SIZE_RATIO_MAX x wider or taller than a, or
     under 1/NN_SIZE_RATIO_MAX x: a different object, not this one moving. Not when the
     smaller box lies mostly (SIZE_JUMP_INSIDE) inside the larger: the same object seen whole
-    or in part (live 11:33 a person up close to the doorbell went from a 79- to a 226-wide box
+    or in part (live 11:33 a person up close to Camera A went from a 79- to a 226-wide box
     holding the old one, and became a new person track)."""
     small, large = sorted((a, b), key=lambda c: c[2] * c[3])
     iw = min(small[0] + small[2], large[0] + large[2]) - max(small[0], large[0])
@@ -1225,7 +1225,7 @@ def _jaro_winkler(a, b):
 # similarity is >= PLATE_CLUSTER_SIMILARITY and takes the largest group (ties: the group with
 # the most confident read). Unlike Frigate, which reports that group's most confident read,
 # the reading seen most often in it wins (ties: the most confident), so one confident misread
-# ('DEBM782' among 'DEPM782's) can't replace the plate.
+# ('ABED123' among 'ABCD123's) can't replace the plate.
 PLATE_READS_KEEP = 25
 PLATE_CLUSTER_SIMILARITY = 0.85
 
@@ -1576,7 +1576,7 @@ def _center_moved(a, b, frac=RESUME_MOVE_FRACTION):
 
 def _inside_parked(tracks, d, frac=INSIDE_PARKED_FRACTION):
     """tracker_id of a parked same-type track whose box holds >= frac of d's box, or None:
-    a second box on part of a parked car (the doorbell saw one on its lower half) is the
+    a second box on part of a parked car (Camera A saw one on its lower half) is the
     same car, not a new vehicle."""
     x, y, w, h = d["coord"]
     area = max(1.0, w * h)
@@ -1637,7 +1637,7 @@ def _park(tr):
 
 
 # A face that has matched someone once keeps its embedding back until it's named, or for this
-# many fresh reads: live 11:13 on Backyard the second read was the first match, the embedding
+# many fresh reads: live 11:13 on Camera C the second read was the first match, the embedding
 # went out unnamed a second before the name, and Protect showed one unknown face.
 FACE_EMBED_HOLD_READS = 4
 
@@ -1672,7 +1672,7 @@ def _track_args(tracker_id, tr, hold_embed=True):
 
 
 # Playback places boxes by clockWall, and a track only shows once it confirms (Protect's
-# eventStartMSec, 1 s): live 17:20 on Driveway a car crossed the road in about a second, so
+# eventStartMSec, 1 s): live 17:20 on Camera B a car crossed the road in about a second, so
 # its box appeared as it left. A new event's enter is sent at its tracks' first frame, then a
 # moving update per report interval up to now, each describing its own frame.
 BACKFILL_MAX = 50
@@ -1740,7 +1740,7 @@ def _center_inside(inner, outer):
     return x <= cx <= x + w and y <= cy <= y + h
 
 
-# One face track per person (live 09:43 on Backyard: a face read once a second moved and grew
+# One face track per person (live 09:43 on Camera C: a face read once a second moved and grew
 # from 56 to 92 px between reads as its person walked up, and became face tracks 5, 7 and 8).
 # A face belongs to the person whose box holds its centre; it always continues that person's
 # face track (`face_tid`), however far it moved, and a named person's match carries over to it.
@@ -1764,8 +1764,8 @@ def _face_owner(tracks, coord, boxes=None, parent_coord=None):
     coord's centre nearest its top (the smallest such box when the face is at more than one
     person's head); failing that, the only moving person in view (faces come from the
     once-a-second snapshot, so a face can trail a fast-moving person's live box: live 10:40 on
-    Backyard a face fell just outside its person's box and opened a second face track); else
-    None. Live 13:33 on Driveway two people crossed: a face found in her crop sat low in my
+    Camera C a face fell just outside its person's box and opened a second face track); else
+    None. Live 13:33 on Camera B two people crossed: a face found in her crop sat low in my
     smaller box, went to me as the smallest box holding it, and its crop became my thumbnail."""
     boxes = boxes or {}
     people = [(tid, boxes.get(tid) or tr["coord"]) for tid, tr in tracks.items()
@@ -1884,7 +1884,7 @@ def _tracker_attrs(tracker_id, tr, faces_by_person):
     entry = {"objectType": tr["objectType"], "zone": [int(SMART_DETECT_ZONE_ID)]}
     extra = tr.get("extra") or {}
     # A named face's leave carries its match, not its embedding: live 11:18 Protect kept
-    # group:face_186 (Sean) through the event, then clustered the leave's faceEmbed itself into
+    # group:face_186 (Alex) through the event, then clustered the leave's faceEmbed itself into
     # a new unknown group 189, which replaced the name.
     if (tr["objectType"] == "face" and extra.get("faceEmbed")
             and extra.get("matchedId") is None):
@@ -2169,7 +2169,7 @@ _empty_motion = {}  # deviceID -> [monotonic s of the last log line, frames sinc
 
 def _log_empty_motion(device_id):
     """"Scene changed but nothing found", at most once a minute per camera with the count:
-    leaves and shadows on Backyard moved on ~40 frames a minute."""
+    leaves and shadows on Camera C moved on ~40 frames a minute."""
     now = time.monotonic()
     entry = _empty_motion.setdefault(device_id, [None, 0])
     entry[1] += 1
@@ -2185,7 +2185,7 @@ _dropped = {}  # (deviceID, objectType, reason) -> [monotonic s of the last log 
 
 def _log_dropped(device_id, r, reason):
     """A detection dropped by the zones, at most once a minute per camera, type and reason
-    with the count: live 18:10 the doorbell's parked cars (its zone is person/animal only)
+    with the count: live 18:10 Camera A's parked cars (its zone is person/animal only)
     logged a line several times a second."""
     now = time.monotonic()
     entry = _dropped.setdefault((device_id, r["objectType"], reason), [None, 0])
@@ -2208,7 +2208,7 @@ def _motion_tick(ws, device_id):
         if device_id in _latest_frame_time:
             _analysed_frame_time[device_id] = _latest_frame_time[device_id]
     changed = _scene_changed(device_id)
-    # The startup look runs on a still scene too: live 17:05 the doorbell saw no motion for
+    # The startup look runs on a still scene too: live 17:05 Camera A saw no motion for
     # 27 s at dusk, so its parked cars were first detected after the window and opened an event.
     in_startup = started is None or _frame_wall_ms(device_id) - started <= STARTUP_WINDOW_MS
     gated = MOTION_GATE and not has_tracks and not changed and not in_startup
@@ -2231,7 +2231,7 @@ def _motion_tick(ws, device_id):
         dev["recent"] = [r for r in dev.get("recent", ())
                          if now_ms - r[2] <= RESUME_S * 1000][-RESUME_MAX:]
         # The startup window starts on the stream's first analysed frame, not on a tick with
-        # no frame yet (live 17:02 on Driveway ticks ran through a 10 s reconnect and used it up).
+        # no frame yet (live 17:02 on Camera B ticks ran through a 10 s reconnect and used it up).
         if dev.get("started_ms") is None and device_id in _analysed_frame_time:
             dev["started_ms"] = now_ms
         starting = dev.get("started_ms") is None or now_ms - dev["started_ms"] <= STARTUP_WINDOW_MS  # {"id", "started_ms", "finished": [(tid, tr)]} or None
@@ -2239,9 +2239,9 @@ def _motion_tick(ws, device_id):
         joining = []  # tracks that start (or resume) taking part in the event this tick
         # Zones decide what's reported, not what's tracked (as Frigate): every detection is
         # tracked; a track joins the event only once its feet have been in a zone listing its
-        # type, and stays in it until it's gone. Live 11:38 on Driveway a walk to the front door
+        # type, and stays in it until it's gone. Live 11:38 on Camera B a walk to the front door
         # crossed a gap between zones; dropping the detections there starved the person's track,
-        # named Sean, and it never made the event.
+        # named Alex, and it never made the event.
         for d in detections:
             if "in_zone" not in d:
                 d["in_zone"] = bool(d.get("seeded")) or not _is_outside_detect_zones(
@@ -2326,7 +2326,7 @@ def _motion_tick(ws, device_id):
                 continue
             if (tr["objectType"] == "face" and tr.get("person_tid") in tracks
                     and not tracks[tr["person_tid"]].get("stationary_coord")):
-                # A face isn't gone while its person is still tracked: live 11:06 on Backyard a
+                # A face isn't gone while its person is still tracked: live 11:06 on Camera C a
                 # person looked away for 5 s, the face track closed, and their face came back
                 # as a second face track.
                 continue
@@ -2429,7 +2429,7 @@ def _motion_tick(ws, device_id):
         #     for Protect's eventStartMSec -- even on a frame it was missed in, so an object
         #     seen on only its first few frames still makes its event.
         #     A vehicle still on the box it was first seen on waits: the yolov5n model misses
-        #     the red car parked on Driveway, and a crop zoomed in on a passing road car found
+        #     the red car parked on Camera B, and a crop zoomed in on a passing road car found
         #     its side mirror as a small "vehicle" that joined the car's event (live 12:59 and
         #     the 17:20 clip). A car that is arriving or passing leaves its first box at once.
         for tid, tr in tracks.items():

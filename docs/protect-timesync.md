@@ -13,7 +13,7 @@ pi-port host's clock drifts from the console's, every box moves by the differenc
 
 ## What real devices do
 
-Sources: WebSocket captures of a real camera (`F4E2C60D4B4C`, three connections) and a
+Sources: WebSocket captures of a real camera (`02000000000C`, three connections) and a
 second camera in `~/Desktop/protect/ds.json` and
 `~/Desktop/protect/protect_camALL3_port7442_wss_public.ndjson`; the AI Port firmware
 v5.1.12 in the aiport-fw lab (`ubnt_avclient`: `CONNECTED_TO_CONTROLLER_WS ->

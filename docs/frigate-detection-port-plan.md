@@ -11,11 +11,11 @@ What pi-port got wrong on 2026-10-16/17, and the Frigate piece that avoids it:
 
 | Seen live | pi-port today | Frigate |
 | --- | --- | --- |
-| Person walking through Backyard's background never detected (13:54:03) | whole-frame mean-diff gate; person ~0.5% of the frame | motion **boxes** from a background model |
-| Tree stump "animal" 3x, doorbell pot "animal" | open at 0.5; my must-move and keep-at-0.3 rules | true positive only when the **median of the last 10 scores >= 0.7** |
-| Parked car woken by box jitter (doorbell 12:25) | box-geometry `_moved_since` | **pixel** comparison of the parked spot |
+| Person walking through Camera C's background never detected (13:54:03) | whole-frame mean-diff gate; person ~0.5% of the frame | motion **boxes** from a background model |
+| Tree stump "animal" 3x, Camera A's pot "animal" | open at 0.5; my must-move and keep-at-0.3 rules | true positive only when the **median of the last 10 scores >= 0.7** |
+| Parked car woken by box jitter (Camera A 12:25) | box-geometry `_moved_since` | **pixel** comparison of the parked spot |
 | Sedan on the far road: 2 of ~6 frames detected; cut-off bus dropped | whole frame squeezed to 640x640, then 320x320 | **square crops** at native resolution around motion and tracks |
-| Zone edge along the Backyard hedge | box centre in zone | box **bottom-centre** |
+| Zone edge along the Camera C hedge | box centre in zone | box **bottom-centre** |
 | Unloading car re-detected as new vehicles | IoU + nearest-neighbour, home-grown resume | Kalman-predicted **Norfair** tracker, 5 s hit counter, appearance re-ID |
 
 ## Order of work
@@ -37,8 +37,8 @@ Every change so far was judged on live events after a restart. Instead:
   graph on the file, feeds frames through `_motion_tick` with a fake websocket and a fake
   clock driven by frame timestamps, and prints the timeline of enter/moving/leave per tracker,
   plus a summary (events, objects, false events).
-- Golden clips to record first: Backyard walker (left-to-right and back), Backyard stump in
-  sun, doorbell parked car with weak boxes, Driveway sedan on the far road, Driveway car
+- Golden clips to record first: Camera C walker (left-to-right and back), Camera C stump in
+  sun, Camera A parked car with weak boxes, Camera B sedan on the far road, Camera B car
   unloading, a bus.
 - Each later step states its expected effect on these clips; `tests/test_replay.py` runs the
   harness on tiny synthetic clips (lavfi) in CI so the harness itself can't rot.
@@ -56,7 +56,7 @@ Done: `_protect_foot` in `avclient.py`; the three recorded clips still replay to
   later firmware read shows otherwise, make it `AIPORT_ZONE_POINT=center|bottom`.
 
 Size: tiny. Risk: a zone drawn tight around feet-level ground behaves differently; check the
-Backyard zones in Protect afterwards.
+Camera C zones in Protect afterwards.
 
 ### Step 2. True-positive gating by median score (item 1)
 
@@ -101,7 +101,7 @@ Port `frigate/motion/improved_motion.py` (`ImprovedMotionDetector`) as `piport/m
   macOS**, since it no longer hides small movers.
 - Protect's `ChangeSmartMotionSettings` (`zones`, `level` 0-100) map onto the motion mask and
   threshold (level 50 -> 30; scale linearly), so Protect's motion sensitivity slider works.
-- The 5 s keyframe "pops" on Backyard should stay under the per-pixel threshold after blurring;
+- The 5 s keyframe "pops" on Camera C should stay under the per-pixel threshold after blurring;
   check on the replay clips.
 - Motion boxes are also what step 5 crops around.
 
@@ -121,7 +121,7 @@ Port `frigate/track/stationary_classifier.py` (`StationaryMotionClassifier`):
   moved only if the picture there changed (low NCC or a real shift), not when the box changed.
 - Needs a luma frame: today's 640x640 RGB is enough (convert the crop); after step 5, the Y
   plane at detect resolution.
-- Expected: the doorbell 12:25 case (weak boxes walking the box onto half the car) stays
+- Expected: Camera A 12:25 case (weak boxes walking the box onto half the car) stays
   parked even without step 2's removal of weak boxes; a car driving off still wakes.
 
 Size: medium. Risk: lighting changes across a parked car (sun, headlights) lower NCC; Frigate
@@ -130,16 +130,16 @@ blends its thresholds for that, and they're copied as they are.
 ### Step 5. Region crops at native aspect (item 5): the pipeline change
 
 Done, with RGB frames rather than YUV (simpler; the pipe carries 2.8 MB a frame at 1280x720).
-Found on the recorded Driveway clip and fixed: a single high-scoring crop became an event
+Found on the recorded Camera B clip and fixed: a single high-scoring crop became an event
 (now 2 hits needed, as Frigate's tracker requires); a parked object repeated a recheck's box
 until it counted as moved (it now repeats its parked box); and a parked camper's pixel anchor
 went stale in moving sun (refreshed at each recheck that finds it in place). Parked-car scores
-on startup crops: doorbell 0.77 and 0.65, Driveway red car 0.63, so `vehicle=0.6` stays for now.
+on startup crops: Camera A 0.77 and 0.65, Camera B red car 0.63, so `vehicle=0.6` stays for now.
 
 **Frames.** ffmpeg's detection output changes from 640x640 stretched RGB to **YUV420 at a
 detect resolution that keeps the camera's aspect ratio**: the long side is 1280 by default
-(`AIPORT_DETECT_SIZE`), so 1280x720 for Driveway/Backyard and 960x1280 for the portrait
-doorbell. That's 1.4-1.8 MB per frame, against 1.2 MB now. The full-res JPEG pipe and its
+(`AIPORT_DETECT_SIZE`), so 1280x720 for Camera B/Camera C and 960x1280 for portrait
+Camera A. That's 1.4-1.8 MB per frame, against 1.2 MB now. The full-res JPEG pipe and its
 frame numbering stay as they are.
 
 **Per frame** (after Frigate's `process_frames`):
@@ -173,8 +173,8 @@ cropping is small (320x320 crops).
 **Pi / RK3588.** The NPU model is fixed at 640x640 and slow per call, so keep today's
 whole-frame path there: `AIPORT_REGIONS=0` (default off on Linux, on on macOS).
 
-**Expected on the golden clips:** the Backyard background walker detected for most of the
-walk; the Driveway sedan on most frames; the cut-off bus kept to the frame edge.
+**Expected on the golden clips:** the Camera C background walker detected for most of the
+walk; the Camera B sedan on most frames; the cut-off bus kept to the frame edge.
 
 Size: large. Risk: medium; timing, coordinates and the JPEG pairing all touch this path.
 Done behind `AIPORT_REGIONS` so it can be switched off live.

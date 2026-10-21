@@ -187,7 +187,7 @@ output: xywh and class scores, no objectness), e.g. Frigate's `yolov9-s-320.onnx
 size comes from the graph: frames (640x640) are resized to it and boxes scaled back, so nothing
 else changes. Select one with `AIPORT_MODEL_PATH`; the startup log shows `layout=anchor_free,
 input=320x320`. The score is the class confidence (no objectness to multiply), gated by the same
-`AIPORT_OBJ_THRESH`. On the M2's doorbell frame YOLOv9-s at 320 left out two flower pots YOLOv5s
+`AIPORT_OBJ_THRESH`. On a portrait doorbell frame YOLOv9-s at 320 left out two flower pots YOLOv5s
 called birds (0.55/0.54) and named an RV a truck where YOLOv5s said train; it is 3.4 ms per
 frame vs ~8 ms. Small, distant objects at 320 are not yet compared.
 
@@ -267,12 +267,12 @@ It must also be a **true positive**, Frigate's rule (`frigate/track/tracked_obje
 median of its last 10 scores, counting 0.0 for each analysed frame it was missed in, must
 reach `AIPORT_TRUE_THRESH` (default 0.7; per type as `0.7,animal=0.75`). Once reached it
 stays reached, and the track confirms as soon as it is also old enough, even on a frame it
-was missed in. A tree stump on Backyard (median ~0.55) and a pot by the doorbell never pass;
+was missed in. A tree stump on Camera C (median ~0.55) and a pot by Camera A never pass;
 and, as in Frigate's Norfair tracker (`detect.min_initialized`), a track only counts once it
 is initialised: a counter starts at 1 on its first detection, goes up 1 per detection and down
 1 per miss, and must pass `AIPORT_MIN_INITIALIZED` (default half the detection rate, 5 frames
-or ~0.5 s at 10 fps; per camera like the box delay, e.g. `5,AABBCC3344CC=3` for Driveway, whose
-road strip is in view for only ~0.7 s). Four flickering night-time boxes in a Backyard corner each made a person
+or ~0.5 s at 10 fps; per camera like the box delay, e.g. `5,02000000000B=3` for Camera B, whose
+road strip is in view for only ~0.7 s). Four flickering night-time boxes in a Camera C corner each made a person
 event before this; a sedan seen on only two frames (0.85, 0.78) no longer makes one either, as
 in Frigate. A track that never passes is dropped silently; the debug log gives its
 median, for tuning the threshold per type. A face or plate confirms as soon as a confirmed
@@ -285,7 +285,7 @@ its event if that is still open, and a vehicle that never moved (centre within a
 its size) or was parked comes back quietly as parked. Seen live: a car backed in with its
 hatch open and two people unloading it was re-detected as a "new" vehicle in three
 successive events. A person or a car that moved and left is still new next time. A box mostly (70%) inside a
-parked car's box is part of that car, not a new vehicle: on the doorbell a second box on a
+parked car's box is part of that car, not a new vehicle: on Camera A a second box on a
 parked car's lower half opened "vehicle" events while nothing moved.
 
 **Parked objects move by their pixels, not their boxes** (`stationary.py`, adapted from
@@ -293,7 +293,7 @@ Frigate's `stationary_classifier.py`, MIT). When a track parks, a crop of its sp
 anchor. When its boxes later say it moved, the same spot is compared with the anchor
 (normalised cross-correlation and phase-correlation shift): only if the picture there has
 changed on two checks in a row, or drifted, does it rejoin as moving. Otherwise its box snaps
-back to where it parked. On the doorbell, boxes on a parked car shrinking onto its lower half
+back to where it parked. On Camera A, boxes on a parked car shrinking onto its lower half
 had counted as the car moving.
 
 **Matching with Norfair** (`norfair_match.py`, after Frigate's `norfair_tracker.py`, MIT;
@@ -325,7 +325,7 @@ smoothed (0.6 weight on the newest detection); matching and crops use the raw bo
 analysed frame's stamp, so the tick wait and inference time don't delay boxes. What's left is
 Protect's relay and our decode. `AIPORT_BOX_DELAY_MS` back-dates every such time by that
 residual: `"500"` for all cameras, or with per-camera overrides, e.g.
-`"300,AABBCC3344CC=800"` (a proxied camera has an extra hop). Default 0. Tune it by comparing a
+`"300,02000000000B=800"` (a proxied camera has an extra hop). Default 0. Tune it by comparing a
 box's time with the video in playback.
 
 A track only joins an event once it confirms (Protect's `eventStartMSec`, 1 s), so a car that
@@ -362,7 +362,7 @@ in it (a 1920x2560 doorbell fills the middle 42%). Boxes are converted to that c
 sent, and zone/line checks run in it; crops and plate/face reads stay in image space.
 A detection is in a zone (or an exclusion zone) when its box's **bottom-centre** is, where the
 object stands, as in Frigate; line crossing still follows the box centre. A person walking
-along Backyard's hedge had their box centre on the edge of zone 2 while their feet were well
+along Camera C's hedge had their box centre on the edge of zone 2 while their feet were well
 inside it. Zones decide what's reported, not what's tracked (as in Frigate): every detection outside an
 exclusion zone is tracked, and a track joins an event only once its feet have been in a zone
 listing its type (a face: once its person's feet are in a zone listing faces), then stays in the
@@ -402,12 +402,12 @@ blurred and compared with a running-average background; pixels differing by more
 threshold form motion boxes, and a frame where most of the picture changes (lightning, IR
 switching) recalibrates instead. A frame with no motion box and no open track skips
 inference. Unlike the old whole-frame average diff, this finds a person walking through
-Backyard's background (~0.5% of the frame). Protect's motion sensitivity (`level`, 50 by
+Camera C's background (~0.5% of the frame). Protect's motion sensitivity (`level`, 50 by
 default) sets the pixel threshold (50 -> 30, Frigate's default; 100 -> 5) and its motion zones
 mask the rest of the frame; `AIPORT_MOTION_THRESHOLD` overrides the threshold and
 `AIPORT_MOTION_GATE=0` disables the gate. `AIPORT_MOTION_CONTOUR_AREA` sets the smallest
 motion blob, in pixels of the 100-row motion frame (Frigate's `motion.contour_area`), per
-camera like the box delay: `10,AABBCC3344CC=100` (10 by default, as in Frigate). It costs ~0.4 ms a frame on the M2. Without OpenCV
+camera like the box delay: `10,02000000000B=100` (10 by default, as in Frigate). It costs ~0.4 ms a frame on the M2. Without OpenCV
 the old average diff (`AIPORT_MOTION_GATE_THRESH`) is the fallback. Tracks that are already
 open always classify, so a stationary object keeps its track and can close normally.
 
@@ -462,23 +462,23 @@ Record what a paired camera sends while pi-port is running (it finds the stream 
 camera's Protect settings in `~/piport.log`):
 
 ```bash
-scripts/record_clip.py F4E2C60D4B4C 60 backyard-walk
+scripts/record_clip.py 02000000000C 60 camera-walk
 ```
 
-That writes `~/piport-clips/backyard-walk.mp4` (video copied, not re-encoded) and
-`backyard-walk.json` (stream size, zones, exclusion zones, lines, `eventStartMSec`, event
+That writes `~/piport-clips/camera-walk.mp4` (video copied, not re-encoded) and
+`camera-walk.json` (stream size, zones, exclusion zones, lines, `eventStartMSec`, event
 time limit, start time). Clips stay outside git. Then replay it through the live detector and
 tracker, with the same env vars as the live command:
 
 ```bash
 AIPORT_TICK_S=0.2 AIPORT_MODEL_PATH=$HOME/Code/pi-port/piport/models/yolov9-s-320.onnx \
-  venv/bin/python piport/replay.py ~/piport-clips/backyard-walk.mp4 [--moves] [--json] [-v]
+  venv/bin/python piport/replay.py ~/piport-clips/camera-walk.mp4 [--moves] [--json] [-v]
 ```
 
 It prints each `enter`/`leave` (with `--moves`, every update) at clip time, then one line per
 event with its objects and their best confidence; `-v` adds avclient's log. The clip runs
 through the same ffmpeg filter graph as a live camera at `AIPORT_DETECT_FPS`, with the clock
-taken from frame timestamps (20 s of Backyard replays in ~5 s on the M2); 5 s of empty frames
+taken from frame timestamps (20 s of Camera C replays in ~5 s on the M2); 5 s of empty frames
 after the clip let open tracks close (`--settle`). The live 15 s startup window, in which
 objects already in view are parked, is off unless `--startup` (`--startup-window-ms` shortens
 it for short clips). `--device <deviceID>` makes per-camera `AIPORT_*` entries apply. With
@@ -492,8 +492,8 @@ Each clip that captured a live problem keeps, in its sidecar, the settings it mu
 and what it should give:
 
 ```json
-"env": {"AIPORT_MODEL_PATH": ".../yolov9-s-320.onnx", "AIPORT_MOTION_CONTOUR_AREA": "10,AABBCC3344CC=100"},
-"args": ["--device", "AABBCC3344CC", "--startup", "--startup-window-ms", "4000", "--faces"],
+"env": {"AIPORT_MODEL_PATH": ".../yolov9-s-320.onnx", "AIPORT_MOTION_CONTOUR_AREA": "10,02000000000B=100"},
+"args": ["--device", "02000000000B", "--startup", "--startup-window-ms", "4000", "--faces"],
 "expect": {"events": 1, "objects": {"person": [2, 3]}, "distinct_face_snapshots": true},
 "why": "Two people crossing: a face must not jump to the other person (2026-10-21 13:33)."
 ```

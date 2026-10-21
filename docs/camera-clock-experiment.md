@@ -5,8 +5,8 @@ Can Protect place boxes from the camera's own clock instead of a fixed `AIPORT_B
 ## What we know
 
 - Protect's RTSP relay passes on a native UniFi camera's RTCP sender reports. Their clock is
-  the camera's uptime: 339676 s on the doorbell and 843376 s on Backyard, steady to about 2 ms.
-  Driveway, which isn't a UniFi camera, gets a relay clock (413 s, 0.2 s of jitter).
+  the camera's uptime: 339676 s on Camera A and 843376 s on Camera C, steady to about 2 ms.
+  Camera B, which isn't a UniFi camera, gets a relay clock (413 s, 0.2 s of jitter).
 - A native camera's `EventSmartDetect` carries `clockMonotonic`/`clockStream` in ms on that
   clock (seen: `clockStream 69938862`, `clockMonotonic 69964728`).
 - No wall-clock capture time anywhere else: no RTP header extensions, no SEI, and only a
@@ -21,8 +21,8 @@ RTSP session to the relay, reading sender reports and keeping
 `frame stamp - offset` (off by the frame's decode time, fine for this test).
 `AIPORT_CLOCK_WALL_SKEW_MS` (`"<ms>[,<deviceID>=<ms>]"`) shifts `clockWall`.
 
-- **Variant A:** camera clock on, no skew. Walk past the doorbell; check playback.
-- **Variant B:** camera clock on, `AIPORT_CLOCK_WALL_SKEW_MS=8CEDE172C456=5000`. Walk again.
+- **Variant A:** camera clock on, no skew. Walk past Camera A; check playback.
+- **Variant B:** camera clock on, `AIPORT_CLOCK_WALL_SKEW_MS=02000000000A=5000`. Walk again.
   If the boxes are still about right, Protect places them by the camera clock: go to Phase 2.
   If they are 5 s late, Protect uses `clockWall`: stop, the fixed delay stays.
 
@@ -40,7 +40,7 @@ cameras. To handle:
 
 Tests replay a clip recorded with its sender reports.
 
-## Result (2026-10-18, doorbell)
+## Result (2026-10-18, Camera A)
 
 - **Variant A** (camera clock, no skew), walk at 19:29: boxes early in playback, as with the
   normal clocks; not the ~1.5 s late that placement by the camera clock would have given.
@@ -50,6 +50,6 @@ Protect places boxes by `clockWall`; the camera's clock in `clockMonotonic`/`clo
 change where they're drawn. Phase 2 is not worth doing. The experiment is off (neither setting
 in `~/.piport.env`); the code stays, unused, for a later look.
 
-Walk A also measured the doorbell's real delay: the event's first box was at 19:29:54.007 in
+Walk A also measured Camera A's real delay: the event's first box was at 19:29:54.007 in
 playback, and the person appears at 19:29:55.307, 1.3 s early with the 1500 ms default. The
-doorbell's residual is about 0.2 s, so its delay is now 200 ms (`8CEDE172C456=200`).
+Camera A's residual is about 0.2 s, so its delay is now 200 ms (`02000000000A=200`).

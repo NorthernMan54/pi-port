@@ -27,7 +27,7 @@ def sender_report(ntp_s, rtp):
 
 class TestParse(unittest.TestCase):
     def test_sender_report(self):
-        # Seen live from the doorbell: ntp 339676.832, rtp 506143830.
+        # Seen live from Camera A: ntp 339676.832, rtp 506143830.
         (ntp, rtp), = camera_clock.parse_sender_reports(sender_report(339676.832, 506143830))
         self.assertAlmostEqual(ntp, 339676.832, places=3)
         self.assertEqual(rtp, 506143830)

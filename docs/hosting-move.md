@@ -1,6 +1,6 @@
-# Hosting move: AI Port from Saul (M1 Pro) to Flynn (M2)
+# Hosting move: AI Port from Mac A (M1 Pro) to Mac B (M2)
 
-This moves the running pi-port AI Port from **Saul** (Apple M1 Pro) to **Flynn** (Apple M2) as
+This moves the running pi-port AI Port from **Mac A** (Apple M1 Pro) to **Mac B** (Apple M2) as
 the **same device**: Protect keeps the adopted "AI Port", its paired cameras and settings. Only
 the host changes.
 
@@ -8,48 +8,48 @@ the host changes.
 
 | Item | Value / where | How it moves |
 | --- | --- | --- |
-| Advertised MAC | `FCECDAD4C3CD` (derived from Saul's `en0`) | recorded in the bundle, **pinned with `--mac`** on Flynn |
+| Advertised MAC | `020000000001` (derived from Mac A's `en0`) | recorded in the bundle, **pinned with `--mac`** on Mac B |
 | Device ID | `fe6488e7-7042-5bcb-ab86-6f0ad1a5baed` (`piport/aiport.cfg` default) | same repo file, also passed as `--device-id` |
 | Adoption + mTLS certificate | `~/.piport-state` (`adopt_state.json`, `server.crt`, `server.key`, owned by root) | in the bundle |
 | Protect face DB copy | `~/.piport-state/facedb/` | in the bundle (Protect re-sends it on connect anyway) |
 | Models (not in git) | `piport/models/yolov5s.onnx`, `yolov5n.onnx`, YuNet/SFace face models | in the bundle |
 | Plate models | `~/.cache` (fast-alpr) | downloaded again on the first plate read |
-| IP address | Saul `192.168.1.227` | Flynn's own IP; reported to Protect on connect |
+| IP address | Mac A `192.0.2.10` | Mac B's own IP; reported to Protect on connect |
 
 The bundle holds the device's private key and adoption token: copy it securely and delete it
-once Flynn is running.
+once Mac B is running.
 
 ## Settings in use
 
 | Setting | Value | Why |
 | --- | --- | --- |
-| Console | `AIPORT_CONSOLE_HOST=192.168.1.1` | the Protect console (Cottage GW) |
+| Console | `AIPORT_CONSOLE_HOST=192.0.2.1` | the Protect console |
 | Detector model | `AIPORT_MODEL_PATH=…/piport/models/yolov5s.onnx` | YOLOv5s on Core ML (~8 ms/frame on M1 Pro): better on small/distant objects than YOLOv5n. To try YOLOv9: `AIPORT_MODEL_PATH=…/piport/models/yolov9-s-320.onnx` (copied from Frigate's `model_cache`, 3.4 ms/frame on M2; see `piport/README.md`) |
-| Box delay | `AIPORT_BOX_DELAY_MS=1500,AABBCC3344CC=1800` | back-dates boxes to their frame time. 2.2-3.1 s was measured on Driveway **before** frames were stamped on read; 1800 ms was estimated from a passing sedan on 2026-10-16, also before. Event times now come from each frame's stamp, so re-measure: the residual should be smaller. 1500 ms for the other cameras is a starting point after Backyard boxes came ~2 s early |
+| Box delay | `AIPORT_BOX_DELAY_MS=1500,02000000000B=1800` | back-dates boxes to their frame time. 2.2-3.1 s was measured on Camera B **before** frames were stamped on read; 1800 ms was estimated from a passing sedan on 2026-10-16, also before. Event times now come from each frame's stamp, so re-measure: the residual should be smaller. 1500 ms for the other cameras is a starting point after Camera C boxes came ~2 s early |
 | Tick rate | default 0.33 s on macOS (`AIPORT_TICK_S`) | how often `moving` updates go out; matches a G5 Bullet's ~330 ms update rate |
 | Detection rate | default 10 frames/s per camera on macOS (`AIPORT_DETECT_FPS`) | frames analysed per second; lower it if the Mac struggles with many cameras |
 | Event end | default 3 s with no detection (`AIPORT_MISS_S`) | a G5 Bullet sends `leave` ~2 s after the object leaves |
 | Tracks | confirm on a median score of 0.7 over the last 10 frames (`AIPORT_TRUE_THRESH`), resume within 60 s (`AIPORT_RESUME_S`) | a tree stump and a pot scored "animal" ~0.5-0.6; a parked car behind people unloading it kept coming back as a new vehicle |
 | Log | `2>&1 \| tee -a ~/piport.log` | the terminal keeps only a few minutes |
-| Video decode | VideoToolbox for HEVC cameras, the default on macOS (`AIPORT_HWDEC`) | ~4x less CPU per camera; H.264 (Driveway) stays software |
+| Video decode | VideoToolbox for HEVC cameras, the default on macOS (`AIPORT_HWDEC`) | ~4x less CPU per camera; H.264 (Camera B) stays software |
 | Sleep | `caffeinate -is` | a sleeping Mac drops off the console |
 
 ## Steps
 
-### On Saul
+### On Mac A
 
 1. Stop pi-port (Ctrl-C in its terminal). The export refuses to run while it is up: two hosts
    with one identity fight over the adoption.
 2. Export:
 
    ```bash
-   cd /Users/sgracey/Code/pi-port && sudo scripts/macos_move_host.sh export ~/piport-move.tgz
+   cd ~/Code/pi-port && sudo scripts/macos_move_host.sh export ~/piport-move.tgz
    ```
 
-   It prints the identity (`PIPORT_MAC=FCECDAD4C3CD`, the device ID).
-3. Copy `~/piport-move.tgz` to Flynn (AirDrop or `scp`).
+   It prints the identity (`PIPORT_MAC=020000000001`, the device ID).
+3. Copy `~/piport-move.tgz` to Mac B (AirDrop or `scp`).
 
-### On Flynn
+### On Mac B
 
 4. Install ffmpeg and pi-port (`macos-detectors-v2`):
 
@@ -87,28 +87,28 @@ once Flynn is running.
 
 ## Checking it worked
 
-In Flynn's terminal output, within about 15 s:
+In Mac B's terminal output, within about 15 s:
 
 - `WSS CONNECTED` and `CLASSIC AVCLIENT WSS CONNECTED`, with **no** repeating
   `connection ended ... reconnecting` (that loop means the identity didn't match: check `--mac`).
 - `Detector initialized (backend=onnx, provider=CoreMLExecutionProvider, model=.../yolov5s.onnx, layout=ultralytics, input=640x640)`.
-- `starting merged RTSP pull` for the paired cameras: doorbell `8CEDE172C456`, Driveway
-  `AABBCC3344CC`, Backyard `F4E2C60D4B4C`.
+- `starting merged RTSP pull` for the paired cameras: Camera A `02000000000A`, Camera B
+  `02000000000B`, Camera C `02000000000C`.
 - `vehicle already present at start, parked` for the parked cars (no events opened for them).
 
-In Protect, the AI Port should show online at Flynn's IP with its cameras still paired.
+In Protect, the AI Port should show online at Mac B's IP with its cameras still paired.
 
 ## If something goes wrong
 
 - **Protect offers the AI Port for adoption, or the connection loops:** the identity didn't
-  carry over. Stop Flynn, confirm `--mac FCECDAD4C3CD` and `--device-id` are on the command and
+  carry over. Stop Mac B, confirm `--mac 020000000001` and `--device-id` are on the command and
   that `~/.piport-state/adopt_state.json` exists. Adopting again in Protect also works (cameras
   then need re-pairing).
-- **Going back to Saul:** stop Flynn first, then start Saul with its usual command; its
+- **Going back to Mac A:** stop Mac B first, then start Mac A with its usual command; its
   `~/.piport-state` is unchanged.
 
 ## Not covered
 
-- Running Saul and Flynn as **two** AI Ports at once: that needs a second identity (fresh
-  `--device-id`, the MAC derived from Flynn's interface, a new adoption), not this move.
-- Keeping pi-port running across reboots (a launchd job) on Flynn.
+- Running Mac A and Mac B as **two** AI Ports at once: that needs a second identity (fresh
+  `--device-id`, the MAC derived from Mac B's interface, a new adoption), not this move.
+- Keeping pi-port running across reboots (a launchd job) on Mac B.

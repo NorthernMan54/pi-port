@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The camera's own clock, from the RTCP sender reports on its RTSP stream.
 
-A native UniFi camera's sender reports carry its uptime clock (seen: 339676 s on the doorbell,
-843376 s on Backyard, steady to 2 ms), the clock its own EventSmartDetect `clockMonotonic`
+A native UniFi camera's sender reports carry its uptime clock (seen: 339676 s on Camera A,
+843376 s on Camera C, steady to 2 ms), the clock its own EventSmartDetect `clockMonotonic`
 uses. A Reader holds its own RTSP session to the relay, reads the reports and keeps
 `offset_ms`: local wall-clock ms minus camera ms when a report arrives. A frame stamped at
 local wall time W was captured at about camera time W - offset_ms (an experiment: the

@@ -17,7 +17,7 @@ The firmware's rootfs runs unchanged in Docker (arm64, native on Apple Silicon),
 its own systemd as PID 1. Lab files stand in for the missing MT8390 hardware: board
 info, U-Boot environment, reset button, DHCP lease, and software V4L2 video elements.
 In LAN mode it can reach only the console. A relay on the Mac answers Protect's
-discovery for `192.168.1.16`, an alias on the Mac's Wi-Fi. The aiport-fw repo has
+discovery for `192.0.2.16`, an alias on the Mac's Wi-Fi. The aiport-fw repo has
 the details.
 
 ## What works
@@ -25,7 +25,7 @@ the details.
 | Step | Result |
 |------|--------|
 | Boot | systemd `running`; every enabled `ubnt_*` daemon up with no restarts |
-| Discovery | Protect lists it as an AI Port at 192.168.1.16 |
+| Discovery | Protect lists it as an AI Port at 192.0.2.16 |
 | Adoption | Adopted from the Protect UI; `ubnt_avclient` reaches "Connected to UniFi Video Completely"; survives restarts |
 | Camera assignment | Protect assigned two cameras within 20 s of adoption |
 | Per-camera ingest | Pulls RTSP from the console, decodes in software, writes frames into the firmware's YUV shared memory, reports "streaming status 1" and starts the dependent per-camera modules |

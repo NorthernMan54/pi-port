@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Record a paired camera's stream for piport/replay.py.
 
-    scripts/record_clip.py 8CEDE172C456 60 doorbell-parked-car
-    scripts/record_clip.py rtsp://192.168.1.1:7447/xyz 30 test --device F4E2C60D4B4C
+    scripts/record_clip.py 02000000000A 60 parked-car
+    scripts/record_clip.py rtsp://192.0.2.1:7447/xyz 30 test --device 02000000000C
 
 Copies the video as it comes from Protect (no re-encode) to ~/piport-clips/NAME.mp4 and
 writes NAME.json beside it with what the replay needs from the running pi-port's log: the

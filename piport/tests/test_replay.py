@@ -188,31 +188,31 @@ class TestCheck(unittest.TestCase):
 
 class TestRecordClipLogScan(unittest.TestCase):
     LOG = [
-        "2026-10-17 15:09:59,455 INFO starting merged RTSP pull for deviceID=8CEDE172C456: "
-        "rtsp://192.168.1.1:7447/old (codec=hevc)\n",
+        "2026-10-17 15:09:59,455 INFO starting merged RTSP pull for deviceID=02000000000A: "
+        "rtsp://192.0.2.1:7447/old (codec=hevc)\n",
         "2026-10-17 15:10:01,607 INFO <<< received functionName='UiStreamControl' "
         "messageId=1 from='UniFiVideo' to='ubnt_avclient' payload={'streaming': True, "
-        "'ip': '192.168.1.1', 'port': '7447', 'uri': 'x', 'deviceID': '8CEDE172C456', "
+        "'ip': '192.0.2.1', 'port': '7447', 'uri': 'x', 'deviceID': '02000000000A', "
         "'width': 1920, 'height': 2560, 'fps': 24}\n",
         "2026-10-17 15:10:02,000 INFO <<< received functionName='ChangeSmartDetectSettings' "
         "messageId=2 from='UniFiVideo' to='ubnt_avclient' payload={'enableSmartDetect': "
         "['person'], 'eventStartMSec': 1000, 'zones': {'1': {'coord': [0, 0, 1000, 0, 1000, "
-        "1000, 0, 1000]}}, 'excludeZones': {}, 'deviceID': '8CEDE172C456'}\n",
+        "1000, 0, 1000]}}, 'excludeZones': {}, 'deviceID': '02000000000A'}\n",
         "2026-10-17 15:10:02,100 INFO <<< received functionName='ChangeSmartDetectSettings' "
         "messageId=3 from='UniFiVideo' to='ubnt_avclient' payload={'isLprCamera': 0, "
-        "'deviceID': '8CEDE172C456'}\n",
+        "'deviceID': '02000000000A'}\n",
         "2026-10-17 15:10:02,200 INFO <<< received functionName='ChangeSmartMotionSettings' "
         "messageId=4 from='UniFiVideo' to='ubnt_avclient' payload={'eventMaxDurationMSec': "
-        "300000, 'deviceID': '8CEDE172C456'}\n",
-        "2026-10-17 15:20:00,000 INFO starting merged RTSP pull for deviceID=8CEDE172C456: "
-        "rtsp://192.168.1.1:7447/new (codec=hevc)\n",
-        "2026-10-17 15:20:00,000 INFO starting merged RTSP pull for deviceID=F4E2C60D4B4C: "
-        "rtsp://192.168.1.1:7447/other (codec=hevc)\n",
+        "300000, 'deviceID': '02000000000A'}\n",
+        "2026-10-17 15:20:00,000 INFO starting merged RTSP pull for deviceID=02000000000A: "
+        "rtsp://192.0.2.1:7447/new (codec=hevc)\n",
+        "2026-10-17 15:20:00,000 INFO starting merged RTSP pull for deviceID=02000000000C: "
+        "rtsp://192.0.2.1:7447/other (codec=hevc)\n",
     ]
 
     def test_latest_values_for_the_camera(self):
-        info = record_clip.scan_log(self.LOG, "8cede172c456")
-        self.assertEqual(info["url"], "rtsp://192.168.1.1:7447/new")
+        info = record_clip.scan_log(self.LOG, "02000000000A")
+        self.assertEqual(info["url"], "rtsp://192.0.2.1:7447/new")
         self.assertEqual((info["width"], info["height"], info["fps"]), (1920, 2560, 24))
         self.assertEqual(info["smartDetect"]["eventStartMSec"], 1000)  # not the partial one
         self.assertEqual(info["smartMotion"]["eventMaxDurationMSec"], 300000)

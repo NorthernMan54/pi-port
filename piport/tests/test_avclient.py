@@ -131,7 +131,7 @@ class TestZoneFiltering(Base):
         self.assertFalse(av._is_outside_detect_zones("M3", [40, 40, 2, 2]))  # unset -> no restriction
 
     def test_zone_object_types(self):
-        # Live 16:47 on Driveway: vehicles were reported from the plants zone, which Protect
+        # Live 16:47 on Camera B: vehicles were reported from the plants zone, which Protect
         # has set to person/animal/face only.
         other = [(100, 0), (200, 0), (200, 100), (100, 100)]
         av._detect_zones["Z"] = [SQUARE, other]
@@ -311,7 +311,7 @@ class TestProtectCanvas(Base):
         self.assertEqual((y, h), (244, 747))
 
     def test_zones_use_the_bottom_centre(self):
-        # Backyard's zone 2 (2026-10-17): its top edge runs from (781, 262) to (1000, 356).
+        # Camera C's zone 2 (2026-10-17): its top edge runs from (781, 262) to (1000, 356).
         # A person by the hedge: box centre above that edge, feet below it.
         av._stream_dims["B"] = (2688, 1512)
         av._detect_zones["B"] = [[(22, 353), (781, 262), (1000, 356), (1000, 1000), (38, 1000)]]
@@ -369,7 +369,7 @@ class TestBestFrame(Base):
         self.assertEqual(tr["best"]["jpeg"], b"b")            # 32% larger, score about the same
 
     def test_capture_avoids_a_box_cut_off_by_the_edge(self):
-        # Live 12:00 at the doorbell: the top-scoring frame was a shoulder at the lens's edge.
+        # Live 12:00 at Camera A: the top-scoring frame was a shoulder at the lens's edge.
         tr = {}
         av._capture_best("D", tr, {"score": 0.80, "coord": [300, 230, 240, 740], "frame": (1, b"whole")})
         av._capture_best("D", tr, {"score": 0.95, "coord": [2, 219, 637, 741], "frame": (2, b"shoulder")})
@@ -443,7 +443,7 @@ class TestCameraEvent(Base):
                 if tr["objectType"] == "face"}
 
     def test_walking_up_face_stays_one_face_track(self):
-        # Live 09:43 on Backyard: a face read once a second grew from 56 to 92 px and moved
+        # Live 09:43 on Camera C: a face read once a second grew from 56 to 92 px and moved
         # down and across between reads, and became face tracks 5, 7 and 8.
         # face 20 -> 28 -> 36 units wide, its centre ~200 units further each read: past the
         # nearest-match radius (3x its size + 30), as live
@@ -459,7 +459,7 @@ class TestCameraEvent(Base):
         self.assertEqual(av._motion_state["D"]["tracks"][person_tid]["face_tid"], fid)
 
     def test_face_trailing_its_person_keeps_its_track(self):
-        # Live 10:40 on Backyard: the snapshot's face lagged a fast-moving person's live box,
+        # Live 10:40 on Camera C: the snapshot's face lagged a fast-moving person's live box,
         # fell outside it, and opened a second face track.
         self.tick(dict(self.PERSON, coord=[700, 400, 180, 500]), dict(self.FACE, coord=[750, 420, 50, 50]))
         self.tick(dict(self.PERSON, coord=[150, 400, 180, 500]), dict(self.FACE, coord=[600, 430, 50, 50]))
@@ -472,7 +472,7 @@ class TestCameraEvent(Base):
         self.assertEqual(len(self.face_tracks()), 1)
 
     def test_face_stays_open_while_its_person_looks_away(self):
-        # Live 11:06 on Backyard: a person looked away for 5 s; the face track closed and their
+        # Live 11:06 on Camera C: a person looked away for 5 s; the face track closed and their
         # face came back as a second face track.
         self.tick(self.PERSON, self.FACE)
         (first, _), = self.face_tracks().items()
@@ -505,7 +505,7 @@ class TestCameraEvent(Base):
         self.assertEqual(len(av._motion_state["D"]["tracks"]), 1)   # the same track
 
     def test_person_stays_in_its_event_across_a_gap(self):
-        # Live 11:38 on Driveway: the walk to the front door crossed a gap between zones.
+        # Live 11:38 on Camera B: the walk to the front door crossed a gap between zones.
         self.zone_left_half()
         self.tick(self.person_at(380))
         self.sent.clear()
@@ -543,7 +543,7 @@ class TestCameraEvent(Base):
         self.assertEqual(len(faces), 2)
         self.assertEqual(len({f["person_tid"] for f in faces.values()}), 2)
 
-    # Live 13:33:38 on Driveway: two people crossing; her face sat low in my smaller box.
+    # Live 13:33:38 on Camera B: two people crossing; her face sat low in my smaller box.
     ME = {"objectType": "person", "score": 0.9, "coord": [517, 235, 91, 414]}
     HER = {"objectType": "person", "score": 0.9, "coord": [447, 511, 136, 467]}
     HER_FACE = {"objectType": "face", "score": 0.9, "coord": [528, 512, 35, 86]}
@@ -582,10 +582,10 @@ class TestCameraEvent(Base):
         self.tick(self.PERSON, self.FACE)
         tracks = av._motion_state["D"]["tracks"]
         pid = next(t for t, tr in tracks.items() if tr["objectType"] == "person")
-        tracks[pid].setdefault("extra", {}).update({"matchedId": 178, "matchedName": "Sean"})
+        tracks[pid].setdefault("extra", {}).update({"matchedId": 178, "matchedName": "Alex"})
         self.tick(self.PERSON, self.FACE)
         (_, face), = self.face_tracks().items()
-        self.assertEqual((face["extra"]["matchedId"], face["extra"]["matchedName"]), (178, "Sean"))
+        self.assertEqual((face["extra"]["matchedId"], face["extra"]["matchedName"]), (178, "Alex"))
 
     def test_face_embedding_held_until_decided(self):
         emb = [0.1] * 128
@@ -612,7 +612,7 @@ class TestCameraEvent(Base):
         tr = {"objectType": "face", "score": 0.9, "coord": [0, 0, 1, 1], "first_shown_ms": 0,
               "extra": {"faceEmbed": [0.1]}, "embed_reads": 2}
         self.assertIn("faceEmbed", av._track_args(1, tr)["descriptor_extra"])   # never matched
-        tr["match_hits"] = {(186, "Sean"): 1}
+        tr["match_hits"] = {(186, "Alex"): 1}
         self.assertNotIn("faceEmbed", av._track_args(1, tr)["descriptor_extra"])
         tr["embed_reads"] = av.FACE_EMBED_HOLD_READS
         self.assertIn("faceEmbed", av._track_args(1, tr)["descriptor_extra"])   # waited long enough
@@ -629,15 +629,15 @@ class TestCameraEvent(Base):
 
     def test_named_face_leave_carries_match_not_embedding(self):
         # Live 11:18: Protect clustered the leave's faceEmbed into unknown group 189, which
-        # replaced Sean's group 186.
+        # replaced Alex's group 186.
         named = {"objectType": "face", "score": 0.9, "coord": [0, 0, 1, 1], "first_shown_ms": 0,
-                 "extra": {"faceEmbed": [0.1], "matchedId": 186, "matchedName": "Sean"}}
+                 "extra": {"faceEmbed": [0.1], "matchedId": 186, "matchedName": "Alex"}}
         leave = av._track_args(3, named, hold_embed=False)["descriptor_extra"]
         self.assertNotIn("faceEmbed", leave)
         self.assertEqual(leave["matchedId"], 186)
         entry = av._tracker_attrs(3, named, {})
         self.assertNotIn("faceEmbed", entry)
-        self.assertEqual((entry["matchedId"], entry["matchedName"]), (186, "Sean"))
+        self.assertEqual((entry["matchedId"], entry["matchedName"]), (186, "Alex"))
         stranger = {"objectType": "face", "extra": {"faceEmbed": [0.1]}}
         self.assertIn("faceEmbed", av._tracker_attrs(4, stranger, {}))
 
@@ -736,7 +736,7 @@ class TestCameraEvent(Base):
         self.addCleanup(av._latest_frame.pop, "D", None)
 
     def test_jittering_boxes_dont_move_a_parked_car_its_pixels_stay(self):
-        # Live 2026-10-17 12:25 (doorbell): boxes on a parked car shrank onto its lower half.
+        # Live 2026-10-17 12:25 (Camera A): boxes on a parked car shrank onto its lower half.
         self._scene(car_at=388)
         car = dict(self.CAR, coord=[388, 437, 144, 171])
         self._park_car(car)
@@ -772,7 +772,7 @@ class TestCameraEvent(Base):
         self.assertEqual(self.events(), [("enter", ["vehicle"], [])])
 
     def test_stump_scoring_about_half_never_opens_an_event(self):
-        # Live 2026-10-17 13:33, 13:54, 14:31 (Backyard): a tree stump scored "animal"
+        # Live 2026-10-17 13:33, 13:54, 14:31 (Camera C): a tree stump scored "animal"
         # 0.30-0.73, median ~0.55.
         stump = {"objectType": "animal", "coord": [788, 571, 98, 203]}
         for score in [0.5, 0.55, 0.73, 0.52, 0.6, 0.51, 0.58, 0.5, 0.64, 0.55] * 5:
@@ -792,7 +792,7 @@ class TestCameraEvent(Base):
         self.assertEqual(self.events(), [("enter", ["person"], [])])
 
     def test_one_frame_detection_never_opens_an_event(self):
-        # Live (Driveway replay): a car scoring 0.9 on a single region crop became an event.
+        # Live (Camera B replay): a car scoring 0.9 on a single region crop became an event.
         with mock.patch.object(av, "MIN_HITS", 2):
             self.tick(dict(self.CAR, score=0.9))
             for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
@@ -826,7 +826,7 @@ class TestCameraEvent(Base):
         self.assertEqual(av._parse_true_thresh("x,person=0.75"), (0.7, {"person": 0.75}))
 
     def test_sedan_seen_twice_makes_no_event_under_min_initialized(self):
-        # Live 14:51 (Driveway): a sedan crossing the far road was detected on 2 frames
+        # Live 14:51 (Camera B): a sedan crossing the far road was detected on 2 frames
         # (0.85, 0.78). With Frigate's min_initialized (0.5 s of detections) that is too few,
         # as in Frigate; region crops now see far-road cars on more frames (9 at 17:20).
         for name, value in (("MIN_HITS", 2), ("MIN_INITIALIZED", 5)):   # the live rules
@@ -851,7 +851,7 @@ class TestCameraEvent(Base):
             self.addCleanup(patcher.stop)
 
     def test_flicker_never_initializes(self):
-        # Live 19:17 on Backyard: a corner box at night, seen on and off, made 4 person events.
+        # Live 19:17 on Camera C: a corner box at night, seen on and off, made 4 person events.
         self._live_init()
         av._event_start_ms["D"] = 0
         box = dict(self.PERSON, coord=[884, 667, 115, 331], score=0.8)
@@ -860,12 +860,12 @@ class TestCameraEvent(Base):
         self.assertEqual(self.events(), [])
 
     def test_min_initialized_per_camera(self):
-        self.assertEqual(av._parse_min_initialized("5,aabbcc3344cc=3"), (5, {"AABBCC3344CC": 3}))
-        self.assertEqual(av._parse_min_initialized("AABBCC3344CC=3")[1], {"AABBCC3344CC": 3})
+        self.assertEqual(av._parse_min_initialized("5,02000000000B=3"), (5, {"02000000000B": 3}))
+        self.assertEqual(av._parse_min_initialized("02000000000B=3")[1], {"02000000000B": 3})
         self.assertEqual(av._parse_min_initialized("x,D=y")[1], {})
 
-    def test_driveway_car_crossing_in_under_a_second_counts(self):
-        # Live 08:48 on Driveway: a car on the road strip for ~0.7 s never initialised at 5
+    def test_road_car_crossing_in_under_a_second_counts(self):
+        # Live 08:48 on Camera B: a car on the road strip for ~0.7 s never initialised at 5
         # (counter 1, 2, 3, 2, 3, 4 with one miss); at 3 it does.
         self._live_init()
         av._event_start_ms["D"] = 0
@@ -907,7 +907,7 @@ class TestCameraEvent(Base):
         self.assertOpened(["person"])
 
     def test_vehicle_on_its_first_box_waits_to_confirm(self):
-        # Live 12:59 on Driveway: a parked car's mirror, found on a zoomed-in crop, joined
+        # Live 12:59 on Camera B: a parked car's mirror, found on a zoomed-in crop, joined
         # the passing car's event as a second vehicle.
         clock = self._clock()
         av._event_start_ms["D"] = 1000
@@ -948,7 +948,7 @@ class TestCameraEvent(Base):
         self.assertEqual(self.events(), [])
 
     def test_empty_motion_logged_once_a_minute(self):
-        # Live 2026-10-17 (Backyard): leaves and shadows logged this ~40 times a minute.
+        # Live 2026-10-17 (Camera C): leaves and shadows logged this ~40 times a minute.
         av._empty_motion.pop("D", None)
         self.addCleanup(av._empty_motion.pop, "D", None)
         clock = [500.0]
@@ -962,7 +962,7 @@ class TestCameraEvent(Base):
         self.assertIn("4 such frame(s)", lines[1])   # 10, 20, 59 and 61
 
     def test_dropped_detection_logged_once_a_minute(self):
-        # Live 18:10: the doorbell's parked cars, outside its person/animal zone, logged a
+        # Live 18:10: Camera A's parked cars, outside its person/animal zone, logged a
         # line several times a second.
         for key in [k for k in av._dropped if k[0] == "D"]:
             av._dropped.pop(key)
@@ -1094,7 +1094,7 @@ class TestCameraEvent(Base):
         self.assertEqual(self.events(), [("enter", ["vehicle"], [])])
 
     def test_stream_restart_starts_the_startup_window_again(self):
-        # Live 11:47 on Driveway: the stream dropped just after start and the parked car,
+        # Live 11:47 on Camera B: the stream dropped just after start and the parked car,
         # first seen once frames came back, opened an event.
         from unittest import mock
         with mock.patch.object(av, "STARTUP_WINDOW_MS", 15000):
@@ -1107,7 +1107,7 @@ class TestCameraEvent(Base):
         self.assertTrue(av._motion_state["D"]["tracks"][1].get("stationary_coord"))
 
     def test_ticks_without_frames_do_not_use_up_the_window(self):
-        # Live 17:02 on Driveway: ticks ran through a 10 s reconnect with no frame.
+        # Live 17:02 on Camera B: ticks ran through a 10 s reconnect with no frame.
         from unittest import mock
         with mock.patch.object(av, "STARTUP_WINDOW_MS", 15000):
             self.tick()
@@ -1125,7 +1125,7 @@ class TestCameraEvent(Base):
         self.assertTrue(av._motion_state["D"]["tracks"][1].get("stationary_coord"))
 
     def test_startup_look_runs_on_a_still_scene(self):
-        # Live 17:05 on the doorbell: no motion at dusk, so the gate skipped the startup look.
+        # Live 17:05 on Camera A: no motion at dusk, so the gate skipped the startup look.
         from unittest import mock
         with mock.patch.object(av, "STARTUP_WINDOW_MS", 15000), \
                 mock.patch.object(av, "MOTION_GATE", True), \
@@ -1227,7 +1227,7 @@ class TestCameraEvent(Base):
         self.assertEqual(enter["clockWall"], first_seen)  # drawn from the first frame
 
     def test_confirmed_track_is_drawn_from_its_first_frame(self):
-        # Live 17:20 on Driveway: a car crossed the road in about a second and its box only
+        # Live 17:20 on Camera B: a car crossed the road in about a second and its box only
         # appeared, back-dated by the 1 s confirmation, as it left.
         self.confirm_after(1000)
         xs = list(range(100, 211, 10))            # 12 frames, 100 ms apart
@@ -1281,7 +1281,7 @@ class TestCameraEvent(Base):
             self.assertEqual(av._confirm_ms("D"), 5000)  # bad value ignored
 
     def test_fast_small_walker_stays_one_track(self):
-        # Live 17:28 on Driveway: a 22-wide person moving 75 then 26 units per tick
+        # Live 17:28 on Camera B: a 22-wide person moving 75 then 26 units per tick
         # (no box overlap) became a new track every tick.
         for coord in ([143, 54, 22, 75], [218, 31, 22, 80], [244, 32, 22, 57]):
             self.tick(dict(self.PERSON, coord=coord))
@@ -1298,7 +1298,7 @@ class TestCameraEvent(Base):
         self.assertEqual(len(tracks), 2)
 
     def test_missed_track_does_not_jump_across_the_frame(self):
-        # Live 09:56 on Driveway: a far-road car's track, missed for a second, took a car
+        # Live 09:56 on Camera B: a far-road car's track, missed for a second, took a car
         # 180 units away, then another, then another (one track for four cars).
         car = dict(self.CAR, coord=[631, 54, 66, 117])
         self.tick(car)
@@ -1322,7 +1322,7 @@ class TestCameraEvent(Base):
         self.assertEqual(tracks[1]["coord"], [710, 54, 66, 117])
 
     def test_track_does_not_take_a_box_of_another_size(self):
-        # Live 10:20 on Driveway: a bicycle's track took a 49x136 box beside it, then a
+        # Live 10:20 on Camera B: a bicycle's track took a 49x136 box beside it, then a
         # 107x253 one, and held the event open 16 s after the bicycle left.
         bike = dict(self.CAR)
         for coord in ([139, 85, 46, 57], [165, 76, 45, 57], [212, 61, 43, 57], [239, 54, 40, 57]):
@@ -1481,9 +1481,9 @@ class TestMotionContourArea(Base):
         self.assertEqual(self.area(None, "DEV"), 10)
 
     def test_per_camera(self):
-        self.assertEqual(self.area("10,aabbcc3344cc=100", "AABBCC3344CC"), 100)
-        self.assertEqual(self.area("10,AABBCC3344CC=100", "8CEDE172C456"), 10)
-        self.assertEqual(self.area("AABBCC3344CC=100", "OTHER"), 10)  # no default given
+        self.assertEqual(self.area("10,02000000000B=100", "02000000000B"), 100)
+        self.assertEqual(self.area("10,02000000000B=100", "02000000000A"), 10)
+        self.assertEqual(self.area("02000000000B=100", "OTHER"), 10)  # no default given
         self.assertEqual(self.area("50", "OTHER"), 50)
 
     def test_detector_uses_it(self):
@@ -1643,8 +1643,8 @@ class TestBoxDelay(Base):
             self.addCleanup(patcher.stop)
 
     def test_parse(self):
-        self.assertEqual(av._parse_box_delay("2500, aabbcc3344cc=3000 ,8CEDE172C456=1500"),
-                         (2500, {"AABBCC3344CC": 3000, "8CEDE172C456": 1500}))
+        self.assertEqual(av._parse_box_delay("2500, 02000000000B=3000 ,02000000000A=1500"),
+                         (2500, {"02000000000B": 3000, "02000000000A": 1500}))
         self.assertEqual(av._parse_box_delay(""), (0, {}))
         self.assertEqual(av._parse_box_delay("x,DEV=y,500"), (500, {}))
 
@@ -2331,7 +2331,7 @@ class MotionGate(unittest.TestCase):
             self.assertFalse(self.frame())
 
     def test_small_mover_is_motion(self):
-        # ~0.5% of the frame, like a person walking through Backyard's background.
+        # ~0.5% of the frame, like a person walking through Camera C's background.
         for _ in range(20):
             self.frame()
         self.assertTrue(self.frame(square=(500, 100, 45)))

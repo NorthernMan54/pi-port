@@ -528,6 +528,20 @@ class TestCameraEvent(Base):
         self.assertNotIn("faceEmbed", av._track_args(1, tr)["descriptor_extra"])
         self.assertIn("faceEmbed", av._track_args(1, tr, hold_embed=False)["descriptor_extra"])
 
+    def test_named_face_leave_carries_match_not_embedding(self):
+        # Live 11:18: Protect clustered the leave's faceEmbed into unknown group 189, which
+        # replaced Sean's group 186.
+        named = {"objectType": "face", "score": 0.9, "coord": [0, 0, 1, 1], "first_shown_ms": 0,
+                 "extra": {"faceEmbed": [0.1], "matchedId": 186, "matchedName": "Sean"}}
+        leave = av._track_args(3, named, hold_embed=False)["descriptor_extra"]
+        self.assertNotIn("faceEmbed", leave)
+        self.assertEqual(leave["matchedId"], 186)
+        entry = av._tracker_attrs(3, named, {})
+        self.assertNotIn("faceEmbed", entry)
+        self.assertEqual((entry["matchedId"], entry["matchedName"]), (186, "Sean"))
+        stranger = {"objectType": "face", "extra": {"faceEmbed": [0.1]}}
+        self.assertIn("faceEmbed", av._tracker_attrs(4, stranger, {}))
+
     def test_person_points_at_its_own_face_track(self):
         person = {"objectType": "person", "coord": [0, 0, 500, 1000], "face_tid": 8}
         old = {"objectType": "face", "coord": [100, 100, 50, 50]}

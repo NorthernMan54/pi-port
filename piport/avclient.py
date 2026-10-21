@@ -1570,8 +1570,10 @@ def _track_args(tracker_id, tr, hold_embed=True):
     leave always carries it."""
     still = bool(tr.get("still"))
     extra = tr.get("extra")
-    if hold_embed and tr["objectType"] == "face" and extra and "faceEmbed" in extra \
-            and not _face_decided(tr):
+    if tr["objectType"] == "face" and extra and "faceEmbed" in extra and (
+            (hold_embed and not _face_decided(tr))
+            or (not hold_embed and extra.get("matchedId") is not None)):
+        # held until decided; and a named face's leave carries its match, not its embedding
         extra = {k: v for k, v in extra.items() if k != "faceEmbed"}
     return {"tracker_id": tracker_id, "object_type": tr["objectType"],
             "coord": tr.get("smooth") or tr["coord"],
@@ -1751,7 +1753,11 @@ def _tracker_attrs(tracker_id, tr, faces_by_person):
     """trackerIDAttrMap entry for one participant (attributeSchema keys)."""
     entry = {"objectType": tr["objectType"], "zone": [int(SMART_DETECT_ZONE_ID)]}
     extra = tr.get("extra") or {}
-    if tr["objectType"] == "face" and extra.get("faceEmbed"):
+    # A named face's leave carries its match, not its embedding: live 11:18 Protect kept
+    # group:face_186 (Sean) through the event, then clustered the leave's faceEmbed itself into
+    # a new unknown group 189, which replaced the name.
+    if (tr["objectType"] == "face" and extra.get("faceEmbed")
+            and extra.get("matchedId") is None):
         entry["faceEmbed"] = extra["faceEmbed"]
     if tr["objectType"] == "person" and tracker_id in faces_by_person:
         entry["associatedFaceTrackerID"] = faces_by_person[tracker_id]

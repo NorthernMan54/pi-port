@@ -151,3 +151,12 @@ Two things stopped that event showing the name, both fixed:
   unknown face group 50 a second before pi-port's match arrived. A face's `faceEmbed` is now
   held out of enter/moving updates until the face is named or has had 2 fresh reads without a
   match; the leave always carries it.
+
+### The leave replaced the name (2026-10-21 11:18)
+
+With one face track and the embedding held until named, Protect's `ds.log` showed
+`using camera matchedId=186` and `group_id=186 name="Sean Gracey"` for the whole live phase.
+When the event closed, its object recognition clustered the leave's `faceEmbed` itself into a
+new unknown group (`group:face_189`, `groupType:unknown`), which replaced the name. A named
+face's leave now carries `matchedId`/`matchedName` and no `faceEmbed`; an unnamed face's leave
+still carries its embedding, so Protect clusters strangers.

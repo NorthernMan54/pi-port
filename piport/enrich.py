@@ -51,6 +51,10 @@ COLOR_ALIASES = {"silver": "gray"}
 FACE_SCORE_THRESH = float(os.environ.get("AIPORT_FACE_THRESH", "0.8"))
 # SFace's published cosine threshold for "same person".
 FACE_MATCH_THRESH = float(os.environ.get("AIPORT_FACE_MATCH_THRESH", "0.363"))
+# Faces smaller than this (the shorter side, in snapshot pixels) aren't matched: SFace works on
+# a 112 x 112 face, and an 18 x 23 px face on Backyard scored 0.13 to 1.0 against the same
+# person. The AI Port firmware checks crop quality before recognising too.
+FACE_MATCH_MIN_PX = int(os.environ.get("AIPORT_FACE_MATCH_MIN_PX") or 40)
 PLATE_SCORE_THRESH = float(os.environ.get("AIPORT_LPR_THRESH", "0.5"))
 # Plate/face crops are expanded by this factor around the parent box: the
 # full-res snapshot can lag the 640 detection frame by up to a second.
@@ -270,7 +274,9 @@ class Enricher:
 
     def faces(self, img_bgr, person_coords):
         """Faces inside each person box: [{coord, score, embedding, name, similarity,
-        parent}]. embedding is SFace's 128-float vector (None without the SFace model)."""
+        parent, size_px}]. embedding is SFace's 128-float vector (None without the SFace
+        model); size_px is the face's shorter side in pixels. Faces under FACE_MATCH_MIN_PX
+        aren't matched against the gallery."""
         if not self.face or img_bgr is None:
             return []
         ih, iw = img_bgr.shape[:2]
@@ -295,10 +301,13 @@ class Enricher:
                 for f in found:
                     fx, fy, fw, fh = [float(v) for v in f[:4]]
                     emb = sface.feature(sface.alignCrop(crop, f)) if sface is not None else None
-                    name, sim = self._match(sface, emb)
+                    size_px = int(min(fw, fh))
+                    name, sim = (self._match(sface, emb) if size_px >= FACE_MATCH_MIN_PX
+                                 else ("", 0.0))
                     out.append({"coord": _to_norm(x1 + fx, y1 + fy, x1 + fx + fw, y1 + fy + fh, iw, ih),
                                 "score": float(f[14]), "name": name, "similarity": sim,
-                                "embedding": _embedding_list(emb), "parent": parent})
+                                "embedding": _embedding_list(emb), "parent": parent,
+                                "size_px": size_px})
         return out
 
     def _match(self, sface, emb):

@@ -1055,11 +1055,15 @@ def _enrich_detections(device_id, detections):
             for f in enricher.faces(img, [p["coord"] for p in people]):
                 face = {"objectType": "face", "score": f["score"], "coord": f["coord"],
                         "extra": {"name": f["name"], "tag": f["name"]},
-                        "frame": _snapshot_bytes.get(device_id)}
+                        "frame": _snapshot_bytes.get(device_id), "size_px": f.get("size_px")}
                 if f["embedding"] is not None:
                     face["scored"] = {"faceEmbed": (f["embedding"], f["score"])}
                     db = _get_face_db()
-                    m = db.match(f["embedding"], FACE_DB_THRESH) if db else None
+                    small = f.get("size_px", enrich.FACE_MATCH_MIN_PX) < enrich.FACE_MATCH_MIN_PX
+                    m = db.match(f["embedding"], FACE_DB_THRESH) if db and not small else None
+                    if db and small:
+                        log.debug("face DB: face on deviceID=%s is %d px, under %d px: not matched",
+                                  device_id, f["size_px"], enrich.FACE_MATCH_MIN_PX)
                     if m:
                         subject_id, name, sim = m
                         face["scored"]["match"] = ((subject_id, name), sim)
@@ -1075,9 +1079,9 @@ def _enrich_detections(device_id, detections):
             log.exception("plate/face enrichment failed for deviceID=%s", device_id)
         _enrich_cache[device_id] = (mtime, extra)
         for e in extra:
-            log.info("enrichment: %s for deviceID=%s (score=%.2f, name=%r, embedding=%s)",
+            log.info("enrichment: %s for deviceID=%s (score=%.2f, name=%r, embedding=%s, %s px)",
                      e["objectType"], device_id, e["score"], e["extra"]["name"],
-                     "faceEmbed" in e.get("scored", {}))
+                     "faceEmbed" in e.get("scored", {}), e.get("size_px"))
     # A face DB match counts once per snapshot read, not on every tick that reuses it.
     return [dict(e, extra=dict(e["extra"]),
                  **({"scored": {k: v for k, v in e["scored"].items() if fresh or k != "match"}}

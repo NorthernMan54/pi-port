@@ -180,6 +180,22 @@ class TestLoadConfig(unittest.TestCase):
             os.environ.pop("AIPORT_HOSTNAME", None)
             os.unlink(path)
 
+    def test_env_overrides_model_identity(self):
+        # sysid, type, discovery platform and guid from the env.
+        env = {"AIPORT_SYSID": "0x1234", "AIPORT_PLATFORM": "Test Type",
+               "AIPORT_DISCOVERY_PLATFORM": "Test SKU",
+               "AIPORT_GUID": "11111111-2222-3333-4444-555555555555"}
+        for k in env:
+            saved = os.environ.get(k)
+            self.addCleanup(lambda k=k, saved=saved: os.environ.__setitem__(k, saved)
+                            if saved is not None else os.environ.pop(k, None))
+        os.environ.update(env)
+        cfg = config.load_config("/nonexistent/aiport.cfg")
+        self.assertEqual(config.sysid_int(cfg), 0x1234)
+        self.assertEqual(cfg["platform"], "Test Type")
+        self.assertEqual(cfg["discovery_platform"], "Test SKU")
+        self.assertEqual(cfg["guid"], env["AIPORT_GUID"])
+
 
 class TestFirmwarePin(unittest.TestCase):
     """A simulated update pins a version; every stage reports it over the configured one."""

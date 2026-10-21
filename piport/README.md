@@ -107,8 +107,9 @@ debug = false
 
 Env vars override the same keys after the file is read (`config.ENV_OVERRIDES`) --
 handy in containers: `AIPORT_CONSOLE_HOST`/`AIPORT_CONSOLE_PORT`, `AIPORT_MAC`,
-`AIPORT_HOSTNAME`, `AIPORT_NAME`, `AIPORT_DEVICE_ID`, `AIPORT_IFACE`,
-`AIPORT_PARENT_IFACE`, `AIPORT_NETWORK_MODE`/`IP`/`GATEWAY`, `AIPORT_DEBUG`. A blank
+`AIPORT_HOSTNAME`, `AIPORT_NAME`, `AIPORT_DEVICE_ID`, `AIPORT_GUID`, `AIPORT_IFACE`,
+`AIPORT_PARENT_IFACE`, `AIPORT_NETWORK_MODE`/`IP`/`GATEWAY`, `AIPORT_DEBUG`, and the
+model identity `AIPORT_SYSID`/`AIPORT_PLATFORM`/`AIPORT_DISCOVERY_PLATFORM`. A blank
 env var is ignored (the file value survives).
 
 ## Install and run

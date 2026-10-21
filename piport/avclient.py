@@ -2158,6 +2158,12 @@ def _motion_tick(ws, device_id):
                           statistics.median(tr.get("score_history") or [0.0]), device_id)
                 del tracks[tracker_id]
                 continue
+            if (tr["objectType"] == "face" and tr.get("person_tid") in tracks
+                    and not tracks[tr["person_tid"]].get("stationary_coord")):
+                # A face isn't gone while its person is still tracked: live 11:06 on Backyard a
+                # person looked away for 5 s, the face track closed, and their face came back
+                # as a second face track.
+                continue
             if tr["miss_count"] < tolerance:
                 # Within the tolerance window -- send nothing, keep the track.
                 log.debug("real motion tick: no match (miss %d/%d) for tracker_id=%s deviceID=%s -- "

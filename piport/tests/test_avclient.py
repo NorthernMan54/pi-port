@@ -454,6 +454,22 @@ class TestCameraEvent(Base):
         self.tick(self.PERSON, face, dict(face, score=0.85))
         self.assertEqual(len(self.face_tracks()), 1)
 
+    def test_face_stays_open_while_its_person_looks_away(self):
+        # Live 11:06 on Backyard: a person looked away for 5 s; the face track closed and their
+        # face came back as a second face track.
+        self.tick(self.PERSON, self.FACE)
+        (first, _), = self.face_tracks().items()
+        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS + 5):
+            self.tick(self.PERSON)
+        self.tick(self.PERSON, dict(self.FACE, coord=[520, 320, 60, 60]))   # back elsewhere
+        self.assertEqual(list(self.face_tracks()), [first])
+
+    def test_face_closes_once_its_person_is_gone(self):
+        self.tick(self.PERSON, self.FACE)
+        for _ in range(2 * av.MOTION_MISS_TOLERANCE_TICKS + 2):
+            self.tick()
+        self.assertEqual(self.face_tracks(), {})
+
     def test_two_people_keep_their_own_faces(self):
         a, b = dict(self.PERSON, coord=[100, 200, 200, 600]), dict(self.PERSON, coord=[600, 200, 200, 600])
         fa, fb = dict(self.FACE, coord=[150, 220, 60, 60]), dict(self.FACE, coord=[650, 220, 60, 60])

@@ -233,6 +233,11 @@ once two snapshot reads match it at `AIPORT_FACE_DB_THRESH` (0.45) or better, an
 `matchedId` (subject id) and `matchedName` on the face and its person, as the AI Port firmware
 does; only faces named in Protect on an AI Port face are in the DB.
 
+**Keeping up.** Once a minute per camera the log gives frames delivered by ffmpeg, frames
+analysed, frames skipped (replaced by a newer one before a pass picked them up), passes that ran
+the detector, and the average pass time; it's a WARNING when a camera analyses under 90% of the
+detection rate.
+
 **Detection and report rates.** Detecting and reporting run at separate rates. Each camera's
 detector analyses up to `AIPORT_DETECT_FPS` frames per second (10 on macOS, where Core ML runs
 a frame in ~8 ms; elsewhere one frame per tick), each frame once, and tracking runs on every

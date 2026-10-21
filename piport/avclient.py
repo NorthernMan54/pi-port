@@ -2145,6 +2145,8 @@ def _motion_tick(ws, device_id):
     # 27 s at dusk, so its parked cars were first detected after the window and opened an event.
     in_startup = started is None or _frame_wall_ms(device_id) - started <= STARTUP_WINDOW_MS
     gated = MOTION_GATE and not has_tracks and not changed and not in_startup
+    if not gated:
+        _inferred[device_id] += 1
     if gated:
         log.debug("motion gate: static scene, skipping inference for deviceID=%s", device_id)
         detections = []
@@ -2495,6 +2497,46 @@ def _stop_motion_detector(device_id, preserve_tracks=False):
         t.join(timeout=MOTION_POLL_INTERVAL_S + 5.0)
 
 
+# Per-camera frame accounting, logged once a minute: frames ffmpeg delivered (from its frame
+# numbers), frames analysed, frames skipped (replaced by a newer one before a pass picked them
+# up), inference runs (the rest were gated off as static) and the average pass time. A camera
+# analysing under FRAME_RATE_WARN of DETECT_FPS is falling behind.
+FRAME_STATS_S = 60.0
+FRAME_RATE_WARN = 0.9
+_frame_stats = {}     # deviceID -> {"t0", "first_seq", "last_seq", "analysed", "busy_s"}
+_inferred = collections.Counter()   # deviceID -> passes that ran the detector
+
+
+def _note_frame(device_id, seq, busy_s, now=None):
+    """Count one analysed frame; log the camera's minute when it's up."""
+    now = time.monotonic() if now is None else now
+    st = _frame_stats.get(device_id)
+    if st is None or seq is None or (st["last_seq"] is not None and seq < st["last_seq"]):
+        # first frame, or a new stream (its frame numbers start again)
+        _frame_stats[device_id] = {"t0": now, "first_seq": seq, "last_seq": seq, "analysed": 0,
+                                   "busy_s": 0.0, "inferred0": _inferred[device_id]}
+        return
+    st["analysed"] += 1
+    st["busy_s"] += busy_s
+    st["last_seq"] = seq
+    elapsed = now - st["t0"]
+    if elapsed < FRAME_STATS_S:
+        return
+    delivered = seq - st["first_seq"]
+    analysed = st["analysed"]
+    inferred = _inferred[device_id] - st["inferred0"]
+    fps_in, fps_done = delivered / elapsed, analysed / elapsed
+    behind = fps_done < FRAME_RATE_WARN * DETECT_FPS
+    (log.warning if behind else log.info)(
+        "frames for deviceID=%s over %.0f s: %d delivered (%.1f/s), %d analysed (%.1f/s), %d "
+        "skipped, %d with inference, %.0f ms a pass%s", device_id, elapsed, delivered, fps_in,
+        analysed, fps_done, max(0, delivered - analysed), inferred,
+        1000 * st["busy_s"] / max(analysed, 1),
+        " -- falling behind the %d fps detection rate" % DETECT_FPS if behind else "")
+    _frame_stats[device_id] = {"t0": now, "first_seq": seq, "last_seq": seq, "analysed": 0,
+                               "busy_s": 0.0, "inferred0": _inferred[device_id]}
+
+
 def _start_motion_detector(ws, device_id, ip, port, uri, preserve_tracks=False):
     # Runs the classifier periodically on the latest frame; no scene-diff pre-filter
     # (unreliable, and NPU inference is cheap).
@@ -2515,10 +2557,14 @@ def _start_motion_detector(ws, device_id, ip, port, uri, preserve_tracks=False):
             if stamp is not None and stamp == last_stamp:
                 continue
             last_stamp = stamp
+            with _frame_lock:
+                seq = _latest_frame_seq.get(device_id)
+            started = time.monotonic()
             try:
                 _motion_tick(ws, device_id)
             except Exception:
                 log.exception("motion poll tick crashed for deviceID=%s", device_id)
+            _note_frame(device_id, seq, time.monotonic() - started)
 
     log.info("starting real motion detector (up to %.0f frames/s, reports every %.2fs) for "
              "deviceID=%s", 1 / DETECT_INTERVAL_S, MOTION_POLL_INTERVAL_S, device_id)

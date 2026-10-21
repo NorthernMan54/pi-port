@@ -1428,6 +1428,46 @@ class TestMotionContourArea(Base):
         self.assertEqual(det.contour_area, 100)
 
 
+class TestFrameStats(Base):
+    """Once a minute per camera: frames delivered, analysed, skipped; a warning if behind."""
+
+    def setUp(self):
+        super().setUp()
+        av._frame_stats.pop("FS", None)
+        av._inferred.pop("FS", None)
+        self.addCleanup(av._frame_stats.pop, "FS", None)
+
+    def run_minute(self, every_seq, passes):
+        t = 1000.0
+        av._note_frame("FS", 1, 0.02, now=t)
+        seq = 1
+        for i in range(passes):
+            seq += every_seq
+            av._inferred["FS"] += 1
+            av._note_frame("FS", seq, 0.02, now=t + 60.0 * (i + 1) / passes)
+
+    def test_keeping_up_is_info(self):
+        with self.assertLogs(av.log, level="INFO") as logs:
+            self.run_minute(1, 600)                 # every frame, 10 a second
+        line = [m for m in logs.output if "frames for deviceID=FS" in m][0]
+        self.assertTrue(line.startswith("INFO"))
+        self.assertIn("600 delivered (10.0/s), 600 analysed (10.0/s), 0 skipped, 600 with inference", line)
+
+    def test_falling_behind_warns(self):
+        with self.assertLogs(av.log, level="INFO") as logs:
+            self.run_minute(2, 300)                 # every other frame: 5 a second
+        line = [m for m in logs.output if "frames for deviceID=FS" in m][0]
+        self.assertTrue(line.startswith("WARNING"))
+        self.assertIn("600 delivered (10.0/s), 300 analysed (5.0/s), 300 skipped", line)
+        self.assertIn("falling behind", line)
+
+    def test_new_stream_starts_counting_again(self):
+        av._note_frame("FS", 500, 0.02, now=1000.0)
+        av._note_frame("FS", 1, 0.02, now=1001.0)   # frame numbers restarted: a new pull
+        self.assertEqual(av._frame_stats["FS"]["first_seq"], 1)
+        self.assertEqual(av._frame_stats["FS"]["analysed"], 0)
+
+
 class TestBoxDelay(Base):
     """AIPORT_BOX_DELAY_MS back-dates frame-describing timestamps per camera."""
 

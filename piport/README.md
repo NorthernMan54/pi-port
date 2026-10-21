@@ -1,10 +1,12 @@
-# Pi Port -- a DIY UniFi Protect "AI Port" on Orange Pi 5 Plus / RK3588
+# Pi Port -- the AI Port emulator (RK3588 · Raspberry Pi · x86 · macOS)
 
-`piport` emulates a **UniFi Protect AI Port** on an RK3588 board (Orange Pi 5 Plus): sysid
-`0xa5f1`, catalog platform string `"UVC AI Port"`. It answers the real discovery, adoption, and
-camera protocols well enough for a Protect console to adopt it and pair real cameras to it, and
-runs real object detection on the RK3588 NPU. It is an interoperability proof of concept, **not a
-product** and **not affiliated with or endorsed by Ubiquiti**. See "Scope and legal" below.
+`piport` emulates a **UniFi Protect AI Port**: sysid `0xa5f1`, catalog platform
+string `"UVC AI Port"` for adoption, discovery SKU `"UP-AI-Port"`. It runs on the
+RK3588 NPU, a Coral Edge TPU, CPU onnxruntime, or Core ML on Apple silicon. It
+answers the real discovery, adoption, and camera protocols well enough for a
+Protect console to adopt it and pair real cameras to it, and runs real object
+detection. It is an interoperability proof of concept, **not a product** and
+**not affiliated with or endorsed by Ubiquiti**. See "Scope and legal" below.
 
 ## Wire protocol (confirmed)
 
@@ -12,8 +14,10 @@ The AI Port shares firmware middleware with real UniFi cameras (`ubnt_ctlserver`
 `ubnt_avclient`), so its protocol is the known camera/chime protocol plus AI-Port-specific
 additions. All of the following was confirmed live against a real console.
 
-1. **UDP/10001 discovery** -- classic UBNT L2 discovery. The `platform` TLV (`0x0C`) must
-   equal the controller's catalog string `"UVC AI Port"`; sysid is `0xa5f1`.
+1. **UDP/10001 discovery** -- classic UBNT L2 discovery. The discovery platform TLV
+   (`0x0C`) advertises the SKU `"UP-AI-Port"` by default (`[identity]
+   discovery_platform`); the canonical `"UVC AI Port"` is the adoption/catalog
+   type. sysid is `0xa5f1`.
 2. **HTTPS control API on the device, port 443** (the shared camera firmware's
    `ubnt_ctlserver`, not AI Key's bespoke 8080):
 
@@ -53,7 +57,7 @@ additions. All of the following was confirmed live against a real console.
 | File | Role |
 |------|------|
 | `config.py` + `aiport.cfg` | Shared configuration and device-identity loader. All stages read the same file; CLI flags override cfg. |
-| `discovery.py` | UDP/10001 discovery responder, `platform="UVC AI Port"`, `sysid=0xa5f1`. |
+| `discovery.py` | UDP/10001 discovery responder, discovery platform `"UP-AI-Port"` (TLV `0x0C`), `sysid=0xa5f1`. |
 | `http_api.py` | HTTPS `:443`: `/api/1.2/manage`, `/api/1.2/login`, `/api/1.2/status`, `/api/1.2/snapshot`. |
 | `ucp4_client.py` | Generic `ucp4` device-management WebSocket client (adoption, `getInfo`). |
 | `avclient.py` | Classic per-camera avclient client: pairing, detection/classification, `EventSmartDetect` / `EventFeatureFlagsUpdated` pushes, snapshot upload. Most real behavior lives here. |
@@ -74,6 +78,7 @@ to its children. Only full-line `#` comments are supported (`configparser` ignor
 mac =
 hostname = piport
 platform = UVC AI Port
+discovery_platform = UP-AI-Port
 sysid = 0xa5f1
 fw_version = 5.1.12.67
 discovery_fw_version = aiport4G.mt8390.v5.1.12.67.emu.260904.0000
@@ -102,6 +107,7 @@ debug = false
 | `[console] host` | IP of the Protect console **you own**; the avclient dials it when not yet adopted. Blank by default. `port` default 7442. |
 | `[identity] mac` | Empty derives a Ubiquiti-OUI MAC `FC:EC:DA:<iface last 3 octets>`. |
 | `[identity] platform` | Must match the controller's catalog string. |
+| `[identity] discovery_platform` | Discovery TLV `0x0C` SKU (`UP-AI-Port`); blank falls back to `platform`. |
 | `[identity] device_id` | Must be unique per emulated instance. |
 | `[identity] fw_version` / `discovery_fw_version` | Short version over ucp4/avclient/http / longer L2 discovery string. |
 | `[network] mode` | `dhcp` reads the live lease; `static` uses `ip`/`netmask`/`gateway`. `create --ip X.Y.Z.W` or `mode=static` makes `instance_manager.py` use `ip addr add` instead of `dhclient`. |
@@ -170,7 +176,7 @@ needs; see the root README.
 on a **Raspberry Pi 4 only** (BCM2711; the bcm2835-codec decoder at `/dev/video10`,
 which also needs `/dev/vchiq`), else software. The **Pi 5 has no H.264 hardware
 decoder** (HEVC only), so it always software-decodes H.264 -- and its CPU does that
-faster than the Pi 4's hardware block. See `docker/README.md` and `implementation.md`
+faster than the Pi 4's hardware block. See `docker/README.md` and the root README
 for the measured numbers and the known Pi 4 decoder limits.
 
 The CPU detector disables onnxruntime's thread **spin-wait** (it burned ~3 extra cores
@@ -247,8 +253,8 @@ Each channel is `ffmpeg -c:v copy` (plus AAC audio) into FLV, rewritten by
 `rewrite_flv()` and sent over TCP:
 
 - FLV header flags byte `7`; after every tag a 16-byte trailer: `0`, a 24-bit
-  timescale (90000 video, 11025 otherwise), and the elapsed time **in that
-  timescale** (64-bit).
+  timescale (90000 video, 11025 otherwise), four reserved zero bytes, and the
+  elapsed time **in that timescale** (64-bit).
 - `onClockSync` (`streamClock`, `wallClock`) and `onMpma` script tags every 5 s,
   the first only after 5 s -- Protect closes a push whose clock sync precedes the
   first frames.

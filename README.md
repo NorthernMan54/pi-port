@@ -113,8 +113,9 @@ as `extendedFlv`, while the AI Port also pulls the camera's RTSP for detection.
 
 The detector is pluggable (`piport/detectors/`, `[hardware] detector` in
 `aiport.cfg`): `rknn`, `edgetpu`, `cpu`, or `auto`, which takes the first one
-whose runtime, hardware and model are present. A new accelerator is one
-`base.Detector` subclass.
+whose runtime, hardware and model are present. A new accelerator is a
+`base.Detector` subclass registered in `BACKENDS` (and `AUTO_ORDER` for `auto`)
+in `piport/detectors/__init__.py`.
 
 ## Features
 
@@ -130,8 +131,9 @@ whose runtime, hardware and model are present. A new accelerator is one
 - **Detection events with thumbnails** — `EventSmartDetect` with per-object
   snapshots and Full-FoV images, plus the overview/timeline thumbnails.
 - **Multi-instance** — one reboot-surviving systemd unit and macvlan interface
-  per instance on the board, or one container per host; each a distinct L2
-  device, with a small web UI.
+  per instance on the board, or one container per host. Board/macvlan instances
+  are distinct L2 devices; a host-network container shares the host's IP. A
+  small web UI manages the board's instances.
 - **Honest state handling** — reflects real adopted state and clears local state
   on the console's reset.
 
@@ -263,10 +265,11 @@ $EDITOR piport/aiport.cfg                        # set [console] host (+ identit
 sudo venv/bin/python piport/run_all.py --iface <iface> [--state-dir <dir>]
 ```
 
-`detectors/cpu.py` selects onnxruntime automatically. On a **Pi 4** it also
-enables `h264_v4l2m2m` hardware decode; on a **Pi 5** it does not (no H.264
-hardware decoder — it software-decodes, which the faster CPU handles). For reboot
-survival, wrap `run_all.py` in a systemd unit with `KillMode=control-group`:
+`detectors/__init__.py` selects onnxruntime automatically. On a **Pi 4**,
+`avclient.py` also enables `h264_v4l2m2m` hardware decode; on a **Pi 5** it does
+not (no H.264 hardware decoder — it software-decodes, which the faster CPU
+handles). For reboot survival, wrap `run_all.py` in a systemd unit with
+`KillMode=control-group`:
 
 ```ini
 [Unit]
@@ -401,7 +404,9 @@ python3 scripts/fetch_models.py --convert
 
 `scripts/install.sh` resolves the prebuilt `.rknn` in order: `--rknn <path>`, a
 local `models-rknn/` (submodule) or `rknn_convert/` copy, then a download from
-`--rknn-url` / `PIPORT_RKNN_URL` / `DEFAULT_RKNN_URL` (always sha256-verified).
+`--rknn-url` / `PIPORT_RKNN_URL` / `DEFAULT_RKNN_URL`. The digest is verified
+when you pass `--rknn-sha256`, or always for the default URL; a custom URL or
+local copy without the flag is installed unverified and logged as such.
 The default source is the separate AGPL-3.0 model repo
 [`hutchx86/pi-port-models`](https://github.com/hutchx86/pi-port-models) (tag
 `v1`); the model is never committed here.
@@ -421,8 +426,9 @@ Device identity, network mode, the console address and the detector live in
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `[identity] mac` | derived | Device MAC (12 hex chars). Blank derives one from the interface's OUI |
+| `[identity] mac` | derived | Device MAC (12 hex chars). Blank derives `FC:EC:DA:<interface's last 3 octets>` |
 | `[identity] platform` | `UVC AI Port` | Catalog model string the console matches (must be exact) |
+| `[identity] discovery_platform` | `UP-AI-Port` | Discovery TLV `0x0C` SKU string (blank falls back to `platform`) |
 | `[identity] sysid` | `0xa5f1` | Hardware/model id |
 | `[identity] device_id` | per-instance | Persistent device UUID (must be unique per instance) |
 | `[network] iface` / `mode` / `ip` | auto / `dhcp` / — | Interface to bind, and `dhcp` or `static` addressing |
@@ -466,10 +472,10 @@ CPU); `cpu` forces CPU and `coreml` requests Core ML (CPU with a warning if abse
   its own host, so it only suits a console running on that host.
 - **Known:** on the Raspberry Pi 4 the H.264 hardware decoder is instance-limited
   and known-flaky; the Pi 5 has no H.264 hardware decoder at all. See
-  `implementation.md` and `docker/README.md`.
+  `docker/README.md` and `piport/README.md`.
 - **Known:** the Pi 5 `install.sh` path is untested against a console (the Docker
-  path is verified); the CPU container's live-camera path has only been
-  smoke-tested on x86 (macOS bare metal is verified live).
+  path is verified); the CPU container has been verified live on a Pi 4 and the
+  smoke test covers x86_64 (macOS bare metal is verified live).
 - **Known:** macOS is verified on Apple silicon only, bare metal; Intel Macs are
   untested. Docker Desktop can't provide the L2 device the console expects.
 - **Planned:** stress-testing beyond the four-camera live setup.
@@ -503,7 +509,7 @@ orphaned ffmpeg children too:
 
 ```bash
 pkill -9 -f '[r]un_all.py'
-pkill -9 -f '[f]fmpeg.*rtsp://<console-ip>:7447'
+pkill -9 -f '[f]fmpeg.*rtsp://'
 ```
 
 **Starting detached over SSH hangs.** Use
@@ -534,6 +540,7 @@ Protocol work was informed by the open-source UniFi community; the detection
 models and conversion recipe come from Rockchip's model zoo and Google Coral.
 Third-party components and licenses are listed in [CREDITS.md](CREDITS.md).
 
+<a id="legal"></a>
 <details>
 <summary><b>Legal</b></summary>
 
@@ -547,6 +554,7 @@ Third-party components and licenses are listed in [CREDITS.md](CREDITS.md).
 
 </details>
 
+<a id="disclaimer"></a>
 <details>
 <summary><b>Disclaimer</b></summary>
 

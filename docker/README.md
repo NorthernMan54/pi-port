@@ -35,7 +35,7 @@ AIPORT_CONSOLE_HOST=<console-ip> docker compose up -d --build
 ```
 
 For a dedicated LAN IP per container (or several instances on one host), use
-`compose.macvlan.yaml` instead — see [Networking](#networking).
+`compose.macvlan.yaml` instead — see [Networking](#networking-lan-stack).
 
 Then adopt "AI Port" in Protect and pair a camera to it, exactly as on a board.
 
@@ -186,8 +186,10 @@ The bridge stack keeps everything persistent in the `aiport-data` volume
   Docker gives each container start a new random interface MAC, so the MAC is
   pinned here instead of being derived from the interface.
 - `aiport.cfg`: seeded from the image template; `AIPORT_CONSOLE` /
-  `AIPORT_HOSTNAME` are written into it on every start. Edit other keys with
-  `docker compose exec aiport vi /data/aiport.cfg` (or mount your own).
+  `AIPORT_HOSTNAME` are written into it on every start. Edit other keys by
+  copying it out and back (`docker compose cp aiport:/data/aiport.cfg .`,
+  edit, `docker compose cp aiport.cfg aiport:/data/aiport.cfg`), or mount your
+  own file. The image has no editor.
 - `adopt_state.json`, `server.crt`/`server.key`: adoption survives restarts and
   image rebuilds.
 
@@ -241,15 +243,16 @@ Untested:
   pulls the Pi 4 ran at load ~3.75 on 4 cores. It works, but the Cortex-A72 has
   little margin; the RK3588 board avoids this (decode and inference on separate
   hardware blocks).
-- The known RTSP restart loop (`todo.md` #5) still occurs (~`Failed reading RTSP
-  data: End of file` then auto-restart) — pre-existing, not container-specific.
+- The known RTSP restart loop still occurs (~`Failed reading RTSP data: End of
+  file` then auto-restart) — pre-existing, not container-specific.
 
 ## Raspberry Pi hardware decode (not in the container yet)
 
-The Pi 4/5 exposes an H.264/HEVC decoder via V4L2 M2M (`bcm2835-codec`,
+The Pi 4 exposes an H.264/HEVC decoder via V4L2 M2M (`bcm2835-codec`,
 `/dev/video10`, driven through `/dev/vchiq`); `avclient.py` selects it
 automatically on bare metal (`AIPORT_HWDEC=v4l2m2m`), which cuts ffmpeg's decode
-CPU ~4-5x. Two caveats we found on the Pi 4:
+CPU ~4-5x. The Pi 5 exposes HEVC only (no H.264 hardware decoder), so
+`avclient.py` does not select `v4l2m2m` there. Two caveats we found on the Pi 4:
 
 - **In a container it stalls.** Passing `/dev/video10` + `/dev/vchiq` lets the
   *decoder* open (a file decodes), but the live RTSP + filter-graph pipeline then

@@ -111,11 +111,13 @@ Usage: sudo scripts/install.sh --console <UNVR-IP> [options]
   --console HOST[:PORT]   UniFi Protect console address (written to aiport.cfg)
   --parent-iface IFACE    NIC the macvlan instance is built on (alias --iface)
   --name NAME             instance name (default: main)
+  --accel BACKEND         detector backend: auto|rknn|edgetpu|cpu|none
+                          (auto: rknn on RK3588, edgetpu with a Coral, else cpu)
   --rknn PATH             prebuilt yolov5s_relu.rknn to install
   --rknn-url URL          download the .rknn from URL (overrides PIPORT_RKNN_URL)
   --rknn-sha256 HEX       verify a downloaded/supplied .rknn
   --webui-port N          web UI listen port (default: 8090)
-  --no-npu                skip rknn-toolkit-lite2, librknnrt upgrade and the .rknn
+  --no-npu                same as --accel none: no detector runtime or model
   -h, --help
 EOF
 }

@@ -2072,6 +2072,24 @@ class TestStreamPoints(Base):
         self.assertEqual(self.stream("CAM2K", w=2560, h=1440)["usedPoints"], 2.5)
         self.assertEqual(self.stream("CAM2K-B", w=2560, h=1440)["usedPoints"], 5)
 
+    def test_points_scale_doubles_the_room(self):
+        with mock.patch.object(av, "POINTS_SCALE", 0.5):
+            self.assertEqual(self.stream("CAM2K", w=2560, h=1440)["usedPoints"], 1.2)
+            self.assertEqual(self.stream("CAM2K-B", w=2560, h=1440)["usedPoints"], 2.5)
+            self.assertEqual(self.stream("CAM4K", w=3840, h=2160)["usedPoints"], 5)
+            self.assertEqual(self.call("GetStreamList", {})[0][1]["list"][0],
+                             {"deviceID": "CAM2K", "points": 1.2})
+            sent = self.call("GetUiStreamPoints", {"list": [
+                {"deviceID": "A", "width": 3840, "height": 2160, "fps": 30}]})
+            self.assertEqual(sent[0][1], {"list": [{"deviceID": "A", "points": 2.5}]})
+
+    def test_points_scale_setting(self):
+        self.assertEqual(av._parse_points_scale(None), 1.0)
+        self.assertEqual(av._parse_points_scale("0.5"), 0.5)
+        for bad in ("0", "-1", "half"):
+            with self.subTest(bad=bad):
+                self.assertEqual(av._parse_points_scale(bad), 1.0)
+
     def test_failed_start_not_counted(self):
         def boom(*a, **kw):
             raise RuntimeError("no rtsp")

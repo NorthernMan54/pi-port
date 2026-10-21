@@ -3427,6 +3427,27 @@ STREAM_POINT_TIERS = ((62208000, 2), (121927680, 2.5), (248832000, 5))
 STREAM_POINTS_MAX = 10
 
 
+def _parse_points_scale(spec):
+    """AIPORT_POINTS_SCALE: a factor > 0 on every stream's points (default 1)."""
+    if not spec:
+        return 1.0
+    try:
+        scale = float(spec)
+    except ValueError:
+        scale = 0
+    if scale <= 0:
+        log.warning("ignoring bad AIPORT_POINTS_SCALE %r", spec)
+        return 1.0
+    return scale
+
+
+# Protect allows an AI Port 10 points (it divides usedPoints by 10 and caps the total at 1.0,
+# a fixed limit in its controller). AIPORT_POINTS_SCALE reports each stream at a fraction of
+# the real device's points, so more cameras pair: 0.5 doubles the room. Protect still adds
+# its own full estimate for the camera being paired, and may show capacity as "inconsistent".
+POINTS_SCALE = _parse_points_scale(os.environ.get("AIPORT_POINTS_SCALE"))
+
+
 def _points_value(points):
     """2.0 -> 2, 2.5 stays: the real device sends whole points as integers."""
     points = round(points, 1)
@@ -3443,8 +3464,8 @@ def _stream_points_for(width, height, fps):
         return None
     for limit, points in STREAM_POINT_TIERS:
         if rate <= limit:
-            return points
-    return STREAM_POINTS_MAX
+            return points * POINTS_SCALE
+    return STREAM_POINTS_MAX * POINTS_SCALE
 
 
 def _used_points():
@@ -3561,7 +3582,7 @@ def handle_function(ws, msg, device_info):
                 continue
             points = _stream_points_for(item.get("width"), item.get("height"), item.get("fps"))
             if points is not None:
-                result.append({"deviceID": item.get("deviceID"), "points": points})
+                result.append({"deviceID": item.get("deviceID"), "points": _points_value(points)})
         send_msg(ws, fn, {"list": result}, in_response_to=msg_id)
         return
     if fn == "ResetAIPortStreams":

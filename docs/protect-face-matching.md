@@ -30,15 +30,23 @@ the device sent, so the DB is in SFace's space and pi-port can match against it 
 Faces named from another source (Protect's own cameras) don't appear: the user has named
 three people in Protect, and only Ian, named on an AI Port face, is in the DB.
 
-### `uiface.db` layout (partly known)
+### `uiface.db` layout
 
-86 688 bytes. 528-byte records: a 16-byte header, then 128 float32. Records 0 and 1 are
-instances 0 and 1 (the vector at byte 544 is instance 1's, pi-port's 16:54 embedding).
-After the instances come other records (tree or index data) and a 96-byte zero tail. The
-firmware's detector names Annoy, but the file doesn't load as a plain Annoy index (0 items
-after trimming the tail; the second record's header isn't Annoy's), so it's Ubiquiti's own
-store, perhaps with Annoy built from it in memory. The record-to-instance mapping is
-inferred from one subject; a DB with several subjects will confirm it.
+An **Annoy index** (the firmware's `EnrollDB::LoadEmbeddingData` in `enroll_db.cpp` calls
+Annoy's `load(path, prefault, error)`; decompiled with Ghidra, `ubnt_smart_detect` v5.1.12) of
+512-float items with the dot-product metric:
+
+- Nodes are 2 064 bytes: a 16-byte header (`n_descendants`, `children[2]`, dot factor), then
+  512 float32. Item *i* is instance *i* of `uiface.json`, at byte *i* x 2064; its floats start at
+  byte 16. Split and root nodes follow the items (an empty DB is 82 560 bytes; each instance adds
+  2 064).
+- An item holds up to three 128-float embeddings, at floats 0, 132 and 264 (Ian's instance 0
+  had two). The rest of the 512 floats is unused memory: NaNs, huge values, text fragments.
+  The firmware logs `Successfully load database with {} subjects, {} instances and {}
+  embeddings.`
+- Every embedding found in three real DBs (2026-10-18 and 2026-10-21) was an exact copy of one
+  pi-port sent, though not always from the event the user named: naming a face group on
+  Protect's faces page enrols that group's older faces (an Oct 17 and an Oct 18 face).
 
 ### How the AI Port firmware matches (`ubnt_smart_detect`, v5.1.12 strings)
 
@@ -70,9 +78,9 @@ AI Port match, so the value types are a guess. Most likely `matchedId` is the su
 
 ### 1. `piport/facedb.py`
 
-- `load(path)`: open the tar, read `uiface.json`, and read the instance vectors from
-  `uiface.db` (record *i* = instance *i*, 128 float32 after a 16-byte header, for every
-  instance id in `InstanceIdToSubjectIdMap`). Return instances as
+- `load(path)`: open the tar, read `uiface.json`, and read each instance's embeddings from
+  `uiface.db` (item *i* at byte *i* x 2064 + 16, embeddings at floats 0, 132 and 264, unused
+  blocks skipped), for every instance id in `InstanceIdToSubjectIdMap`. Return instances as
   `(instance_id, subject_id, name, vector)`, skipping `IgnoredSubjectIds` and
   `IngnoredInstanceIds` (sic).
 - Sanity check: every vector finite, with a norm like SFace's (about 5 to 20); otherwise

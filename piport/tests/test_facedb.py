@@ -28,8 +28,20 @@ def vec(scale=10.0):
     return v / np.linalg.norm(v) * scale
 
 
-def build(subjects, ignored_subjects=(), tail=96, extra_records=3):
-    """Tar bytes laid out like Protect's: subjects = {subject_id: (name, [vectors])}."""
+def item(*embeddings, garbage=False):
+    """One 2 064-byte Annoy node: 16-byte header, then 512 floats holding the embeddings at
+    floats 0, 132 and 264; with garbage, the unused floats are NaN/huge like Protect's."""
+    v = np.full(facedb.ITEM_DIM, np.nan if garbage else 0.0)
+    if garbage:
+        v[300:310] = 1e30
+    for slot, e in zip(facedb.BLOCKS, embeddings):
+        v[slot:slot + facedb.DIM] = e
+    return np.array([1, 0, 0, 0], "<i4").tobytes() + np.asarray(v, "<f4").tobytes()
+
+
+def build(subjects, ignored_subjects=(), tail=0, extra_records=3, items=None):
+    """Tar bytes laid out like Protect's: subjects = {subject_id: (name, [vectors])}, one
+    instance per vector (items overrides the uiface.db nodes)."""
     to_subject, names, rels, vectors = [], [], [], []
     for sid, (name, vs) in subjects.items():
         names.append([sid, name])
@@ -41,9 +53,9 @@ def build(subjects, ignored_subjects=(), tail=96, extra_records=3):
             ids.append(iid)
         rels.append([sid, ids])
     db = bytearray()
-    for v in vectors:
-        db += np.array([1, 0, 0, 0], "<i4").tobytes() + np.asarray(v, "<f4").tobytes()
-    db += bytes(facedb.RECORD * extra_records) + bytes(tail)
+    for node in (items if items is not None else [item(v) for v in vectors]):
+        db += node
+    db += bytes(facedb.NODE * extra_records) + bytes(tail)
     doc = {"EnrolledSubjectIds": list(subjects), "EnrolledSubjectRelationMap": rels,
            "IgnoredSubjectIds": list(ignored_subjects), "IngnoredInstanceIds": [],
            "InstanceIdToNameMap": [[i, subjects[s][0]] for i, s in to_subject],
@@ -68,14 +80,36 @@ class TestParse(unittest.TestCase):
                          [(0, 5, "Ian Vincent"), (1, 5, "Ian Vincent"), (2, 6, "Pat")])
         np.testing.assert_allclose(db.instances[2][3], c, rtol=1e-6)
 
+    def test_layout_is_annoy_nodes_of_2064_bytes(self):
+        a, b = vec(), vec()
+        data = build({5: ("Ian", [a, b])})
+        with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+            db_bytes = tar.extractfile("known/uiface.db").read()
+        second = np.frombuffer(db_bytes[2064 + 16:2064 + 16 + 512], "<f4")
+        np.testing.assert_allclose(second, b, rtol=1e-6)   # instance 1 at byte 2064 + 16
+
+    def test_instance_with_two_embeddings_and_garbage(self):
+        # Ian's Oct 18 DB: instance 0 held embeddings at floats 0 and 132, the rest of its
+        # item unused memory.
+        a, b, c = vec(), vec(), vec()
+        data = build({5: ("Ian", [a, c])}, items=[item(a, b, garbage=True), item(c, garbage=True)])
+        db = facedb.parse(data)
+        self.assertEqual([i for i, *_ in db.instances], [0, 0, 1])
+        np.testing.assert_allclose(db.instances[1][3], b, rtol=1e-6)
+
+    def test_instance_without_an_embedding_is_skipped(self):
+        db = facedb.parse(build({5: ("Ian", [vec(), vec()])},
+                                items=[item(garbage=True), item(vec())]))
+        self.assertEqual([i for i, *_ in db.instances], [1])
+
     def test_ignored_subject_left_out(self):
         db = facedb.parse(build({5: ("Ian", [vec()]), 6: ("Pat", [vec()])}, ignored_subjects=[6]))
         self.assertEqual(set(db.subjects), {5})
 
     def test_bad_files(self):
-        with self.assertRaises(ValueError):
-            facedb.parse(build({5: ("Ian", [np.zeros(facedb.DIM)])}))   # not an embedding
-        short = build({5: ("Ian", [vec()])}, tail=0, extra_records=0)[:600]
+        db = facedb.parse(build({5: ("Ian", [np.zeros(facedb.DIM)])}))   # not an embedding
+        self.assertEqual(len(db), 0)
+        short = build({5: ("Ian", [vec()])}, extra_records=0)[:600]
         with self.assertRaises(Exception):
             facedb.parse(short)
 

@@ -441,6 +441,19 @@ class TestCameraEvent(Base):
         person_tid = face["person_tid"]
         self.assertEqual(av._motion_state["D"]["tracks"][person_tid]["face_tid"], fid)
 
+    def test_face_trailing_its_person_keeps_its_track(self):
+        # Live 10:40 on Backyard: the snapshot's face lagged a fast-moving person's live box,
+        # fell outside it, and opened a second face track.
+        self.tick(dict(self.PERSON, coord=[700, 400, 180, 500]), dict(self.FACE, coord=[750, 420, 50, 50]))
+        self.tick(dict(self.PERSON, coord=[150, 400, 180, 500]), dict(self.FACE, coord=[600, 430, 50, 50]))
+        self.assertEqual(len(self.face_tracks()), 1)
+
+    def test_same_face_twice_in_one_read_is_one_track(self):
+        face = dict(self.FACE, coord=[450, 220, 60, 60])
+        self.tick(self.PERSON, face, dict(face, score=0.85))
+        self.tick(self.PERSON, face, dict(face, score=0.85))
+        self.assertEqual(len(self.face_tracks()), 1)
+
     def test_two_people_keep_their_own_faces(self):
         a, b = dict(self.PERSON, coord=[100, 200, 200, 600]), dict(self.PERSON, coord=[600, 200, 200, 600])
         fa, fb = dict(self.FACE, coord=[150, 220, 60, 60]), dict(self.FACE, coord=[650, 220, 60, 60])

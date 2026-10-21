@@ -1644,25 +1644,46 @@ def _center_inside(inner, outer):
 # A face belongs to the person whose box holds its centre; it always continues that person's
 # face track (`face_tid`), however far it moved, and a named person's match carries over to it.
 def _face_owner(tracks, coord, boxes=None):
-    """tracker_id of the smallest person track whose box holds coord's centre, or None."""
+    """tracker_id of the smallest person track whose box holds coord's centre; failing that,
+    the only moving person in view (faces come from the once-a-second snapshot, so a face can
+    trail a fast-moving person's live box: live 10:40 on Backyard a face fell just outside its
+    person's box and opened a second face track); else None."""
     boxes = boxes or {}
-    holders = [(tid, boxes.get(tid) or tr["coord"]) for tid, tr in tracks.items()
-               if tr["objectType"] == "person"
-               and _center_inside(coord, boxes.get(tid) or tr["coord"])]
-    if not holders:
-        return None
-    return min(holders, key=lambda h: h[1][2] * h[1][3])[0]
+    people = [(tid, boxes.get(tid) or tr["coord"]) for tid, tr in tracks.items()
+              if tr["objectType"] == "person"]
+    holders = [(tid, box) for tid, box in people if _center_inside(coord, box)]
+    if holders:
+        return min(holders, key=lambda h: h[1][2] * h[1][3])[0]
+    moving = [tid for tid, _ in people if not tracks[tid].get("stationary_coord")]
+    return moving[0] if len(moving) == 1 else None
 
 
 def _match_faces_to_people(tracks, detections, matches, unclaimed):
     """Re-point each face detection at its person's face track (matches/unclaimed in place)."""
     boxes = {tid: detections[i]["coord"] for tid, i in matches.items()
              if tracks.get(tid, {}).get("objectType") == "person"}
-    for idx, d in enumerate(detections):
+    claimed, kept = set(), []
+    for idx, d in sorted(enumerate(detections), key=lambda e: -e[1]["score"]):
         if d["objectType"] != "face" or d.get("seeded"):
             continue
+        if any(_iou(d["coord"], k) >= 0.5 for k in kept):  # the same face found twice
+            for tid in [t for t, i in matches.items() if i == idx]:
+                del matches[tid]
+            if idx in unclaimed:
+                unclaimed.remove(idx)
+            continue
+        kept.append(d["coord"])
         owner = _face_owner(tracks, d["coord"], boxes)
-        fid = tracks.get(owner, {}).get("face_tid") if owner is not None else None
+        if owner is None:
+            continue
+        if owner in claimed:  # its person already has a face from this read
+            for tid in [t for t, i in matches.items() if i == idx]:
+                del matches[tid]
+            if idx in unclaimed:
+                unclaimed.remove(idx)
+            continue
+        claimed.add(owner)
+        fid = tracks[owner].get("face_tid")
         if fid not in tracks or tracks[fid]["objectType"] != "face":
             continue
         for tid in [t for t, i in matches.items() if i == idx and t != fid]:

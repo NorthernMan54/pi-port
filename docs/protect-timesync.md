@@ -1,6 +1,9 @@
 # Protect time sync (`ubnt_avclient_timeSync`): change required in pi-port
 
-Status: proposed (2026-10-20), not implemented.
+Status: proposed (2026-10-20), not implemented, and not needed while the pi-port host
+is NTP-synced: two NTP clocks on a LAN are normally within a few to tens of ms, less
+than one detection frame. Do this if the host can't run NTP or drifts from the console.
+For what does improve accuracy, see [frame-timestamps.md](frame-timestamps.md) (change 3; change 4 was tested and doesn't help).
 
 pi-port stamps every event with its host's clock. Real UniFi cameras and the AI Port
 sync their clock with Protect over the avclient WebSocket before saying hello, and again

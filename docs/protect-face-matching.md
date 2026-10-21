@@ -118,8 +118,9 @@ On the face descriptor, and on its person (via `associatedFaceTrackerID`), send
 ### 6. Checking it live
 
 1. In Protect, name the other two people on faces that came from the AI Port cameras, so
-   the DB has three subjects. Check the downloaded DB: three subjects, and record *i*'s
-   vector equals the `faceEmbed` pi-port sent for instance *i*. That confirms the layout.
+   the DB has three subjects. Check the downloaded DB: three subjects, each instance's
+   embeddings equal to a `faceEmbed` pi-port sent. (The layout is now confirmed from the
+   firmware; see above.)
 2. One of them walks past a camera. The log shows the match and its similarity; Protect
    shows the name on the event. If Protect ignores `matchedId`/`matchedName`, try
    `matchedId` as the instance's unique id, then as a string.

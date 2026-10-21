@@ -509,7 +509,8 @@ orphaned ffmpeg children too:
 
 ```bash
 pkill -9 -f '[r]un_all.py'
-pkill -9 -f '[f]fmpeg.*rtsp://'
+pkill -9 -f '[f]fmpeg.*split=2'        # paired-camera/ONVIF detection pulls
+pkill -9 -f '[f]fmpeg.*streamName='    # ONVIF video pushes
 ```
 
 **Starting detached over SSH hangs.** Use

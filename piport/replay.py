@@ -9,11 +9,25 @@ which events open, which objects join them, and when they leave.
     venv/bin/python piport/replay.py ~/piport-clips/backyard-walk.mp4
     venv/bin/python piport/replay.py CLIP --moves          # every moving update too
     venv/bin/python piport/replay.py CLIP --json           # machine-readable summary
+    venv/bin/python piport/replay.py CLIP --faces          # read faces as the live snapshot does
+    venv/bin/python piport/replay.py --check ~/piport-clips  # every clip with an "expect"
 
 A sidecar CLIP.json (written by scripts/record_clip.py) supplies the camera's Protect
 settings: stream width/height (for Protect's coordinate canvas), detection and exclusion
 zones, lines, eventStartMSec and the event time limit. Without one the camera has no zones.
 The detector is the live one: AIPORT_MODEL_PATH etc. apply. Thumbnails aren't produced.
+
+With --faces, faces (and plates) are read once a second from the clip's own full-size frames,
+as live they're read from the camera's once-a-second snapshot; no face DB or gallery is used.
+
+--check replays every clip whose sidecar has an "expect" block, each in its own process with
+the sidecar's "env" (AIPORT_* settings, read at import) and "args" (e.g. ["--startup",
+"--device", "AABBCC3344CC"]), and prints PASS or FAIL per clip. "expect" may hold:
+    "events": 1 or [min, max]                 how many events
+    "objects": {"vehicle": 1, "person": [2, 3]}  tracks of each type, over all events
+    "distinct_face_snapshots": true           no two face tracks have the same face thumbnail
+    "no_face_embed": true                     no faceEmbed is sent
+and "why": what the clip guards against.
 """
 import argparse
 import collections
@@ -78,7 +92,31 @@ def clip_frames(av, path, width=None, height=None):
         proc.wait()
 
 
-def replay(av, frames, settings=None, start_ms=0, settle_s=5.0, startup=False):
+def snapshot_frames(av, path):
+    """(t_s, BGR frame) once a second at the clip's full size: what the live snapshot gives the
+    face and plate readers."""
+    width, height = probe_size(path) or (None, None)
+    if not (width and height):
+        return
+    import numpy as np
+    cmd = [av.FFMPEG_BIN, "-loglevel", "error", "-i", path, "-vf", "fps=1",
+           "-pix_fmt", "bgr24", "-f", "rawvideo", "-"]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    frame_bytes = width * height * 3
+    try:
+        k = 0
+        while True:
+            buf = proc.stdout.read(frame_bytes)
+            if len(buf) < frame_bytes:
+                break
+            yield float(k), np.frombuffer(buf, dtype=np.uint8).reshape((height, width, 3))
+            k += 1
+    finally:
+        proc.stdout.close()
+        proc.wait()
+
+
+def replay(av, frames, settings=None, start_ms=0, settle_s=5.0, startup=False, snapshots=None):
     """Run frames (at av.DETECT_FPS) through the tracker. Returns [(t_s, payload)] for every
     EventSmartDetect sent. After the clip, `settle_s` of empty frames let open tracks close.
     startup=False skips the live 15 s startup window, in which objects already in view are
@@ -86,6 +124,19 @@ def replay(av, frames, settings=None, start_ms=0, settle_s=5.0, startup=False):
     globals are restored afterwards."""
     settings = settings or {}
     sent, now = [], [0.0]
+    snap = {"next": None, "cur": (None, None), "it": iter(snapshots) if snapshots else None}
+
+    def load_snapshot(device_id):
+        """The newest snapshot at or before the clip's clock (None before the first)."""
+        if snap["it"] is None:
+            return None, None
+        while True:
+            if snap["next"] is None:
+                snap["next"] = next(snap["it"], False)
+            if snap["next"] is False or snap["next"][0] > now[0]:
+                return snap["cur"][1], snap["cur"][0]
+            snap["cur"], snap["next"] = snap["next"], None
+
     class _ClipTime:
         """avclient's `time`, with the monotonic clock following the clip (the motion
         gate's reference frame advances on it)."""
@@ -104,6 +155,8 @@ def replay(av, frames, settings=None, start_ms=0, settle_s=5.0, startup=False):
         "_BOX_DELAY_DEFAULT_MS": 0,
         "_BOX_DELAY_MS": {},
         "_STREAM_DIR": tempfile.mkdtemp(prefix="piport-replay-"),  # never the live one
+        "STATE_DIR": tempfile.mkdtemp(prefix="piport-replay-state-"),  # no face DB, no crops
+        "_load_snapshot_bgr": load_snapshot,
     }
     if not startup:
         patches["STARTUP_WINDOW_MS"] = -1
@@ -116,6 +169,8 @@ def replay(av, frames, settings=None, start_ms=0, settle_s=5.0, startup=False):
         for name, value in saved.items():
             setattr(av, name, value)
         shutil.rmtree(patches["_STREAM_DIR"], ignore_errors=True)
+        shutil.rmtree(patches["STATE_DIR"], ignore_errors=True)
+        av._enrich_cache.pop(DEVICE, None)
         for table in (av._motion_state, av._stream_dims, av._latest_frame,
                       av._latest_frame_seq, av._latest_frame_time, av._analysed_frame_time,
                       av._detect_zones, av._detect_zone_types, av._exclude_zones, av._lines, av._event_start_ms,
@@ -193,7 +248,94 @@ def summarize(sent):
             o["max_conf"] = max(o["max_conf"], snap.get("confidenceLevel", 0))
         if p["edgeType"] == "leave":
             ev["end_s"] = t
+            for snap in p.get("smartDetectSnapshots") or []:
+                ev["objects"][snap["trackerID"]]["snapshot"] = snap.get("coord")
+            for tid, attrs in (p.get("trackerIDAttrMap") or {}).items():
+                o = ev["objects"].get(int(tid))
+                if o is not None:
+                    o["face_embed"] = "faceEmbed" in attrs
     return [dict(ev, objects=list(ev["objects"].values())) for ev in events.values()]
+
+
+def _within(value, want):
+    lo, hi = (want, want) if isinstance(want, int) else want
+    return lo <= value <= hi
+
+
+def check(expect, events):
+    """What in `expect` (a sidecar's "expect" block) the summarized events miss: [reason]."""
+    bad = []
+    if "events" in expect and not _within(len(events), expect["events"]):
+        bad.append("%d event(s), expected %s" % (len(events), expect["events"]))
+    objects = [o for ev in events for o in ev["objects"]]
+    for kind, want in (expect.get("objects") or {}).items():
+        n = sum(o["type"] == kind for o in objects)
+        if not _within(n, want):
+            bad.append("%d %s track(s), expected %s" % (n, kind, want))
+    if expect.get("distinct_face_snapshots"):
+        faces = [o for o in objects if o["type"] == "face" and o.get("snapshot")]
+        for i, a in enumerate(faces):
+            for b in faces[i + 1:]:
+                if _iou(a["snapshot"], b["snapshot"]) >= 0.5:
+                    bad.append("faces #%s and #%s share a thumbnail %s"
+                               % (a["tracker"], b["tracker"], a["snapshot"]))
+    if expect.get("no_face_embed"):
+        sent = [o["tracker"] for o in objects if o.get("face_embed")]
+        if sent:
+            bad.append("faceEmbed sent for face(s) %s" % sent)
+    return bad
+
+
+def _iou(a, b):
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    iw = min(ax + aw, bx + bw) - max(ax, bx)
+    ih = min(ay + ah, by + bh) - max(ay, by)
+    if iw <= 0 or ih <= 0:
+        return 0.0
+    return iw * ih / float(aw * ah + bw * bh - iw * ih)
+
+
+def check_clips(paths, out=sys.stdout):
+    """Replay every clip with an "expect" under paths (clips or folders), one process each.
+    Returns how many failed."""
+    sidecars = []
+    for path in paths:
+        if os.path.isdir(path):
+            sidecars += sorted(os.path.join(path, n) for n in os.listdir(path)
+                               if n.endswith(".json"))
+        else:
+            sidecars.append(os.path.splitext(path)[0] + ".json")
+    failed = 0
+    for sidecar in sidecars:
+        with open(sidecar) as f:
+            settings = json.load(f)
+        expect = settings.get("expect")
+        clips = [os.path.splitext(sidecar)[0] + ext for ext in (".mp4", ".mkv", ".avi")]
+        clip = next((c for c in clips if os.path.exists(c)), None)
+        if not expect or clip is None:
+            continue
+        env = dict(os.environ, **{k: str(v) for k, v in (settings.get("env") or {}).items()})
+        cmd = [sys.executable, os.path.abspath(__file__), clip, "--json"] + list(
+            settings.get("args") or [])
+        t0 = _time.monotonic()
+        run = subprocess.run(cmd, env=env, capture_output=True, text=True)
+        name = os.path.basename(clip)
+        try:
+            events = json.loads(run.stdout)["events"]
+        except (ValueError, KeyError):
+            failed += 1
+            print("FAIL %s: replay crashed\n%s" % (name, run.stderr[-2000:]), file=out)
+            continue
+        bad = check(expect, events)
+        failed += bool(bad)
+        found = ", ".join("%s#%s" % (o["type"], o["tracker"]) for ev in events
+                          for o in ev["objects"]) or "no events"
+        print("%s %s (%.0f s): %s%s" % ("FAIL" if bad else "PASS", name, _time.monotonic() - t0,
+                                       found, "".join("\n    - " + b for b in bad)), file=out)
+        if bad and settings.get("why"):
+            print("    guards: %s" % settings["why"], file=out)
+    return failed
 
 
 def _fmt_desc(d):
@@ -222,7 +364,14 @@ def print_report(sent, moves=False, out=sys.stdout):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("clip")
+    ap.add_argument("clip", nargs="?")
+    ap.add_argument("--check", nargs="+", metavar="CLIP_OR_DIR",
+                    help="replay every clip with an \"expect\" block and report PASS/FAIL")
+    ap.add_argument("--faces", action="store_true",
+                    help="read faces and plates once a second from full-size frames")
+    ap.add_argument("--device", help="the camera's deviceID, so per-camera AIPORT_* settings apply")
+    ap.add_argument("--startup-window-ms", type=int,
+                    help="length of the startup window with --startup (live: 15000)")
     ap.add_argument("--sidecar", help="settings JSON (default: CLIP with .json)")
     ap.add_argument("--fps", type=float, help="detection rate (AIPORT_DETECT_FPS)")
     ap.add_argument("--settle", type=float, default=5.0,
@@ -233,6 +382,13 @@ def main(argv=None):
     ap.add_argument("--json", action="store_true", help="print the summary as JSON")
     ap.add_argument("-v", "--verbose", action="store_true", help="avclient's INFO log on stderr")
     args = ap.parse_args(argv)
+    if args.check:
+        sys.exit(1 if check_clips(args.check) else 0)
+    if not args.clip:
+        ap.error("a clip is needed (or --check)")
+    if args.device:
+        global DEVICE
+        DEVICE = args.device
 
     if args.fps:
         os.environ["AIPORT_DETECT_FPS"] = str(args.fps)
@@ -249,9 +405,12 @@ def main(argv=None):
     start_ms = 0
     if settings.get("start"):
         start_ms = int(datetime.fromisoformat(settings["start"]).timestamp() * 1000)
+    if args.startup_window_ms is not None:
+        av.STARTUP_WINDOW_MS = args.startup_window_ms
     sent = replay(av, clip_frames(av, args.clip, settings.get("width"), settings.get("height")),
                   settings, start_ms=start_ms,
-                  settle_s=args.settle, startup=args.startup)
+                  settle_s=args.settle, startup=args.startup,
+                  snapshots=snapshot_frames(av, args.clip) if args.faces else None)
     if args.json:
         json.dump({"events": summarize(sent), "messages": len(sent)}, sys.stdout, indent=1)
         print()

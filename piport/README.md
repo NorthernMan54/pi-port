@@ -473,8 +473,37 @@ event with its objects and their best confidence; `-v` adds avclient's log. The 
 through the same ffmpeg filter graph as a live camera at `AIPORT_DETECT_FPS`, with the clock
 taken from frame timestamps (20 s of Backyard replays in ~5 s on the M2); 5 s of empty frames
 after the clip let open tracks close (`--settle`). The live 15 s startup window, in which
-objects already in view are parked, is off unless `--startup`. Not covered: thumbnails,
-plates and faces (they read the live snapshot file).
+objects already in view are parked, is off unless `--startup` (`--startup-window-ms` shortens
+it for short clips). `--device <deviceID>` makes per-camera `AIPORT_*` entries apply. With
+`--faces`, faces and plates are read once a second from the clip's full-size frames, as live
+they're read from the camera's snapshot (no face DB or gallery is used). Not covered:
+thumbnails.
+
+### Scenario clips (`--check`)
+
+Each clip that captured a live problem keeps, in its sidecar, the settings it must replay with
+and what it should give:
+
+```json
+"env": {"AIPORT_MODEL_PATH": ".../yolov9-s-320.onnx", "AIPORT_MOTION_CONTOUR_AREA": "10,AABBCC3344CC=100"},
+"args": ["--device", "AABBCC3344CC", "--startup", "--startup-window-ms", "4000", "--faces"],
+"expect": {"events": 1, "objects": {"person": [2, 3]}, "distinct_face_snapshots": true},
+"why": "Two people crossing: a face must not jump to the other person (2026-10-21 13:33)."
+```
+
+`expect` takes `events` and per-type `objects` counts (a number or `[min, max]`),
+`distinct_face_snapshots` (no two face tracks share a thumbnail) and `no_face_embed`. Copy the
+live `AIPORT_*` settings into `env`: they're read at import, so each clip replays in its own
+process. Then replay them all, before a commit that touches tracking or faces:
+
+```bash
+venv/bin/python piport/replay.py --check ~/piport-clips
+```
+
+It prints `PASS`/`FAIL` per clip with what it found, the reasons for a failure and what the clip
+guards against, and exits 1 if any failed. To add a scenario, fetch the footage from Frigate
+(`/api/<camera>/start/<s>/end/<s>/clip.mp4`) into `~/piport-clips`, copy a sidecar from the
+same camera, and set its `start`, `expect` and `why`.
 
 ## Known limitations and next steps
 

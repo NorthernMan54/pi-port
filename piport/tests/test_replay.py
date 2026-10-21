@@ -2,6 +2,7 @@
 """replay.py on synthetic clips (a white box crossing a black frame) with a fake detector
 that finds it, and record_clip.py's log scan. ffmpeg tests are skipped if it's absent."""
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -114,6 +115,75 @@ class TestReplay(unittest.TestCase):
             summary = json.load(f)
         self.assertEqual(len(summary["events"]), 1)
         self.assertGreater(summary["messages"], 2)
+
+    def test_faces_read_from_full_size_frames_once_a_second(self):
+        reads = []
+        with mock.patch.object(av, "_enrich_detections",
+                               lambda dev, dets: reads.append(av._load_snapshot_bgr(dev)) or []):
+            replay.replay(av, replay.clip_frames(av, self.clip), {"width": 320, "height": 180},
+                          snapshots=replay.snapshot_frames(av, self.clip))
+        shots = [(img.shape, t) for img, t in reads if img is not None]
+        self.assertTrue(shots)
+        self.assertEqual({shape for shape, _ in shots}, {(180, 320, 3)})   # the clip's own size
+        self.assertEqual(sorted({t for _, t in shots}), [0.0, 1.0, 2.0])   # one a second
+
+    def test_check_clips_runs_the_sidecar_expectations(self):
+        with open(os.path.join(self.dir, "walk.json"), "w") as f:
+            json.dump({"expect": {"events": 1, "objects": {"person": 1}},
+                       "env": {"AIPORT_TICK_S": "0.2"}, "args": ["--device", "D1"]}, f)
+        runs = []
+        def run(cmd, env, **kw):
+            runs.append((cmd, env))
+            events = [{"objects": [{"tracker": 1, "type": "person"}]}]
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"events": events}), "")
+        out = io.StringIO()
+        with mock.patch.object(replay.subprocess, "run", run):
+            self.assertEqual(replay.check_clips([self.dir], out=out), 0)
+            (cmd, env), = runs
+            self.assertEqual(cmd[2:], [self.clip, "--json", "--device", "D1"])
+            self.assertEqual(env["AIPORT_TICK_S"], "0.2")
+            self.assertIn("PASS walk.avi", out.getvalue())
+            with open(os.path.join(self.dir, "walk.json"), "w") as f:
+                json.dump({"expect": {"events": 2}, "why": "two walks"}, f)
+            self.assertEqual(replay.check_clips([self.dir], out=out), 1)
+        self.assertIn("FAIL walk.avi", out.getvalue())
+        self.assertIn("guards: two walks", out.getvalue())
+
+class TestCheck(unittest.TestCase):
+    """replay.check: what a clip's summary misses of its "expect" block."""
+
+    def ev(self, *objects):
+        return {"objects": [dict(o) for o in objects]}
+
+    def test_counts(self):
+        events = [self.ev({"tracker": 1, "type": "vehicle"}, {"tracker": 2, "type": "vehicle"})]
+        self.assertEqual(replay.check({"events": 1, "objects": {"vehicle": [1, 2]}}, events), [])
+        self.assertEqual(replay.check({"objects": {"vehicle": 1}}, events),
+                         ["2 vehicle track(s), expected 1"])
+        self.assertEqual(replay.check({"events": 0}, events), ["1 event(s), expected 0"])
+
+    def test_faces_sharing_a_thumbnail(self):
+        # 13:33 before the fix: two face tracks both kept her face as their thumbnail.
+        events = [self.ev({"tracker": 9, "type": "face", "snapshot": [510, 525, 37, 85]},
+                          {"tracker": 10, "type": "face", "snapshot": [511, 525, 37, 85]})]
+        self.assertEqual(len(replay.check({"distinct_face_snapshots": True}, events)), 1)
+        events[0]["objects"][1]["snapshot"] = [684, 276, 21, 53]
+        self.assertEqual(replay.check({"distinct_face_snapshots": True}, events), [])
+
+    def test_face_embed_sent(self):
+        events = [self.ev({"tracker": 44, "type": "face", "face_embed": True})]
+        self.assertEqual(replay.check({"no_face_embed": True}, events),
+                         ["faceEmbed sent for face(s) [44]"])
+
+    def test_summary_records_thumbnails_and_embeds(self):
+        sent = [(1.0, {"eventId": 7, "edgeType": "enter", "descriptors": [
+                    {"trackerID": 4, "objectType": "face", "confidenceLevel": 80}]}),
+                (2.0, {"eventId": 7, "edgeType": "leave", "descriptors": [],
+                       "smartDetectSnapshots": [{"trackerID": 4, "smartDetectSnapshotType": "face",
+                                                 "coord": [1, 2, 3, 4], "confidenceLevel": 90}],
+                       "trackerIDAttrMap": {"4": {"objectType": "face", "faceEmbed": [0.1]}}})]
+        (face,) = replay.summarize(sent)[0]["objects"]
+        self.assertEqual((face["snapshot"], face["face_embed"]), ([1, 2, 3, 4], True))
 
 
 class TestRecordClipLogScan(unittest.TestCase):

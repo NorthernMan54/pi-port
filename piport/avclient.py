@@ -3441,8 +3441,8 @@ def _parse_points_scale(spec):
     return scale
 
 
-# Protect allows an AI Port 10 points (it divides usedPoints by 10 and caps the total at 1.0,
-# a fixed limit in its controller). AIPORT_POINTS_SCALE reports each stream at a fraction of
+# Protect divides usedPoints by 10 and caps the total at the AI Port's maxCameraCapacity, which
+# its controller sets by device type. AIPORT_POINTS_SCALE reports each stream at a fraction of
 # the real device's points, so more cameras pair: 0.5 doubles the room. Protect still adds
 # its own full estimate for the camera being paired, and may show capacity as "inconsistent".
 POINTS_SCALE = _parse_points_scale(os.environ.get("AIPORT_POINTS_SCALE"))

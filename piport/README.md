@@ -38,11 +38,12 @@ additions. All of the following was confirmed live against a real console.
      `{"status":"started"|"stopped","usedPoints":N}`; `usedPoints` MUST be on every reply
      (start **and** stop) or the controller's capacity bookkeeping breaks after repeated
      pair/unpair cycles. Each stream counts the real device's points (2, 2.5, 5 or 10 by
-     pixel rate) and Protect allows 10 in all, a fixed limit in its controller.
-     `AIPORT_POINTS_SCALE` (default 1) reports a fraction of that, so more cameras pair: 0.5
-     doubles the room. Protect still adds its own full estimate for the camera being paired,
-     and may show capacity as "inconsistent". The host's real limit is the per-minute frame
-     log: a camera "falling behind" means the Mac is out of headroom.
+     pixel rate). Protect divides `usedPoints` by 10 and checks the total against the
+     device's `maxCameraCapacity`, which its controller sets by device type (`/aiports`).
+     `AIPORT_POINTS_SCALE` (default 1) reports a fraction of each stream's points, so more
+     cameras pair: 0.5 doubles the room. Protect still adds its own full estimate for the
+     camera being paired, and may show capacity as "inconsistent". The host's real limit is
+     the per-minute frame log: a camera "falling behind" means the Mac is out of headroom.
    - `EventSmartDetect` -- device-to-controller detection push. Top-level `descriptors` array
      (not `tracks`); each has `objectType`, `coord: [x,y,w,h]` (flat array), `trackerID`,
      `confidenceLevel`. Top-level `edgeType` is a per-track state machine: `"enter"` opens a

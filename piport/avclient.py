@@ -1547,10 +1547,20 @@ def _park(tr):
     tr["moved_ticks"] = 0
 
 
+# A face that has matched someone once keeps its embedding back until it's named, or for this
+# many fresh reads: live 11:13 on Backyard the second read was the first match, the embedding
+# went out unnamed a second before the name, and Protect showed one unknown face.
+FACE_EMBED_HOLD_READS = 4
+
+
 def _face_decided(tr):
-    """True once a face track is named, or has had FACE_MATCH_HITS fresh embedding reads."""
+    """True once a face track is named; or, with no match yet, after FACE_MATCH_HITS fresh
+    embedding reads; or, with a match that hasn't named it yet, after FACE_EMBED_HOLD_READS."""
     extra = tr.get("extra") or {}
-    return extra.get("matchedId") is not None or tr.get("embed_reads", 0) >= FACE_MATCH_HITS
+    if extra.get("matchedId") is not None:
+        return True
+    reads = tr.get("embed_reads", 0)
+    return reads >= (FACE_EMBED_HOLD_READS if tr.get("match_hits") else FACE_MATCH_HITS)
 
 
 def _track_args(tracker_id, tr, hold_embed=True):

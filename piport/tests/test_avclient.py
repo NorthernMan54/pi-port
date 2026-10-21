@@ -507,6 +507,19 @@ class TestCameraEvent(Base):
         self.tick(self.PERSON, stale)
         self.assertEqual(ftr["embed_reads"], 2)
 
+    def test_face_that_matched_once_waits_for_its_name(self):
+        # Live 11:13: read 1 didn't match, read 2 was the first match; the embedding went out
+        # unnamed and Protect showed an unknown face.
+        tr = {"objectType": "face", "score": 0.9, "coord": [0, 0, 1, 1], "first_shown_ms": 0,
+              "extra": {"faceEmbed": [0.1]}, "embed_reads": 2}
+        self.assertIn("faceEmbed", av._track_args(1, tr)["descriptor_extra"])   # never matched
+        tr["match_hits"] = {(186, "Sean"): 1}
+        self.assertNotIn("faceEmbed", av._track_args(1, tr)["descriptor_extra"])
+        tr["embed_reads"] = av.FACE_EMBED_HOLD_READS
+        self.assertIn("faceEmbed", av._track_args(1, tr)["descriptor_extra"])   # waited long enough
+        tr["embed_reads"], tr["extra"]["matchedId"] = 2, 186
+        self.assertIn("faceEmbed", av._track_args(1, tr)["descriptor_extra"])   # named
+
     def test_named_face_sends_its_embedding_at_once(self):
         tr = {"objectType": "face", "score": 0.9, "coord": [0, 0, 1, 1], "first_shown_ms": 0,
               "extra": {"faceEmbed": [0.1], "matchedId": 5}}

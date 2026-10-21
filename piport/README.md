@@ -351,7 +351,10 @@ sent, and zone/line checks run in it; crops and plate/face reads stay in image s
 A detection is in a zone (or an exclusion zone) when its box's **bottom-centre** is, where the
 object stands, as in Frigate; line crossing still follows the box centre. A person walking
 along Backyard's hedge had their box centre on the edge of zone 2 while their feet were well
-inside it. A detection only counts in a zone whose `objectTypes` list its type (a license plate
+inside it. Zones decide what's reported, not what's tracked (as in Frigate): every detection outside an
+exclusion zone is tracked, and a track joins an event only once its feet have been in a zone
+listing its type (a face: once its person's feet are in a zone listing faces), then stays in the
+event until it's gone, gaps between zones included. A detection only counts in a zone whose `objectTypes` list its type (a license plate
 counts where vehicles do): a vehicle in a zone set to person/animal/face isn't reported. A
 partial settings update (`{"isLprCamera": 0}`) keeps the zones, exclusion zones and lines it
 leaves out.

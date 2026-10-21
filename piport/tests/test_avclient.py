@@ -470,6 +470,40 @@ class TestCameraEvent(Base):
             self.tick()
         self.assertEqual(self.face_tracks(), {})
 
+    def zone_left_half(self):
+        av._detect_zones["D"] = [[(0, 0), (500, 0), (500, 1000), (0, 1000)]]
+        av._detect_zone_types["D"] = [["person", "face"]]
+
+    def person_at(self, x):
+        return dict(self.PERSON, coord=[x, 200, 100, 600])   # feet at x + 50
+
+    def test_person_tracked_outside_zones_joins_when_it_enters(self):
+        self.zone_left_half()
+        for x in (620, 580, 540, 500):                        # feet at 550..670: outside
+            self.tick(self.person_at(x))
+        self.assertEqual(self.events(), [])                   # tracked, not reported
+        self.assertEqual(len(av._motion_state["D"]["tracks"]), 1)
+        self.tick(self.person_at(420))                        # feet at 470: in the zone
+        self.assertEqual(self.events()[0][0], "enter")
+        self.assertEqual(len(av._motion_state["D"]["tracks"]), 1)   # the same track
+
+    def test_person_stays_in_its_event_across_a_gap(self):
+        # Live 11:38 on Driveway: the walk to the front door crossed a gap between zones.
+        self.zone_left_half()
+        self.tick(self.person_at(380))
+        self.sent.clear()
+        for x in (420, 460, 500, 540, 580):                   # feet 470 -> 630: out of every zone
+            self.tick(self.person_at(x))
+        self.assertEqual(len(av._motion_state["D"]["tracks"]), 1)
+        self.assertTrue(self.events())
+        self.assertTrue(all(e[0] == "moving" for e in self.events()))
+
+    def test_person_never_in_a_zone_is_never_reported(self):
+        self.zone_left_half()
+        for x in (900, 850, 800, 750):
+            self.tick(self.person_at(x))
+        self.assertEqual(self.sent, [])
+
     def test_two_people_keep_their_own_faces(self):
         a, b = dict(self.PERSON, coord=[100, 200, 200, 600]), dict(self.PERSON, coord=[600, 200, 200, 600])
         fa, fb = dict(self.FACE, coord=[150, 220, 60, 60]), dict(self.FACE, coord=[650, 220, 60, 60])

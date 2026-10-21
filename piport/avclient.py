@@ -846,9 +846,6 @@ def _classify_frame_detections(device_id):
         if _is_excluded(device_id, coord):
             _log_dropped(device_id, r, "excluded by configured excludeZones")
             continue
-        if _is_outside_detect_zones(device_id, coord, r["objectType"]):
-            _log_dropped(device_id, r, "outside all configured detection zones")
-            continue
         d = {"objectType": r["objectType"], "score": r["score"], "coord": coord}
         if r["objectType"] == "vehicle" and enrich.vehicle_attrs_enabled():
             try:
@@ -1195,12 +1192,41 @@ def _plate_rep(reads):
     return text, max(r[1] for r in best if r[0] == text)
 
 
+def _hold_for_zones(device_id, tracks, joining):
+    """joining without the tracks that haven't been in a zone yet; those wait (awaiting_zone)
+    and join on the tick they first are."""
+    out, seen = [], set()
+    for tid, tr in tracks.items():
+        if tr.get("awaiting_zone") and tr.get("zoned") and tr.get("confirmed", True):
+            tr.pop("awaiting_zone")
+            log.info("real motion tick: %s tracker_id=%s entered a zone, joining for deviceID=%s",
+                     tr["objectType"], tid, device_id)
+            out.append((tid, tr))
+            seen.add(tid)
+    for tid, tr in joining:
+        if tid in seen:
+            continue
+        if tr.get("zoned", True):
+            out.append((tid, tr))
+            seen.add(tid)
+        elif not tr.get("awaiting_zone"):
+            tr["awaiting_zone"] = True
+            log.info("real motion tick: %s tracker_id=%s outside the zones for its type; tracked, "
+                     "joining once it enters one, for deviceID=%s", tr["objectType"], tid,
+                     device_id)
+    return out
+
+
 def _merge_extra(tr, d, device_id=None, tracker_id=None):
     """Carry enrichment fields onto a track. A vehicle's plate (`name`) is the
     representative of its recent reads (_plate_rep), logged when it first appears or
     changes; other scored keys (a face's `faceEmbed`) keep the best-scoring read; other
     keys (attributes, names) take the newest value and are never cleared by a
     tick that lacks them."""
+    if d.get("in_zone", True):
+        tr["zoned"] = True        # latched: it has been in a zone listing its type
+    else:
+        tr.setdefault("zoned", False)
     out = tr.setdefault("extra", {})
     out.update({k: v for k, v in (d.get("extra") or {}).items() if v not in ("", None)})
     if d.get("fresh_read") and "faceEmbed" in (d.get("scored") or {}):
@@ -1732,6 +1758,11 @@ def _link_faces(tracks, device_id):
         person = tracks[pid]
         if person.get("face_tid") not in tracks:
             person["face_tid"] = fid
+        # A face is in a zone when its person's feet are in one listing faces (the face box's
+        # own bottom is the chin).
+        if not face.get("zoned") and person.get("zoned", True) and not _is_outside_detect_zones(
+                device_id, person["coord"], "face"):
+            face["zoned"] = True
         pextra, fextra = person.get("extra") or {}, face.setdefault("extra", {})
         if pextra.get("matchedId") is not None and fextra.get("matchedId") is None:
             fextra["matchedId"], fextra["matchedName"] = pextra["matchedId"], pextra.get("matchedName")
@@ -2114,6 +2145,15 @@ def _motion_tick(ws, device_id):
         starting = dev.get("started_ms") is None or now_ms - dev["started_ms"] <= STARTUP_WINDOW_MS  # {"id", "started_ms", "finished": [(tid, tr)]} or None
         unclaimed = list(range(len(detections)))
         joining = []  # tracks that start (or resume) taking part in the event this tick
+        # Zones decide what's reported, not what's tracked (as Frigate): every detection is
+        # tracked; a track joins the event only once its feet have been in a zone listing its
+        # type, and stays in it until it's gone. Live 11:38 on Driveway a walk to the front door
+        # crossed a gap between zones; dropping the detections there starved the person's track,
+        # named Sean, and it never made the event.
+        for d in detections:
+            if "in_zone" not in d:
+                d["in_zone"] = bool(d.get("seeded")) or not _is_outside_detect_zones(
+                    device_id, d["coord"], d["objectType"])
 
         # 1. Which detection belongs to which track: Norfair (AIPORT_TRACKER=norfair) or
         #    the built-in IoU + nearest-neighbour matcher.
@@ -2320,9 +2360,13 @@ def _motion_tick(ws, device_id):
                          "deviceID=%s", tr["objectType"], tid, parent, device_id)
                 joining.append((tid, tr))
 
-        # 4. Camera event lifecycle. Unconfirmed tracks aren't part of it yet.
+        # 3c. A confirmed track joins only once it has been in a zone listing its type.
+        joining = _hold_for_zones(device_id, tracks, joining)
+
+        # 4. Camera event lifecycle. Unconfirmed (or not yet zoned) tracks aren't part of it.
         active = [(tid, tr) for tid, tr in tracks.items()
-                  if not tr.get("stationary_coord") and tr.get("confirmed", True)]
+                  if not tr.get("stationary_coord") and tr.get("confirmed", True)
+                  and tr.get("zoned", True)]
         # A track can join and park in one tick (still since before it was confirmed):
         # that's a parked car, not an event.
         if event is None and joining and active:

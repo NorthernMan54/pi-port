@@ -130,6 +130,27 @@ class TestRegionDetection(unittest.TestCase):
         self.assertAlmostEqual(x, 1000 / 1280 * 1000, delta=2)    # back in frame coords
         self.assertAlmostEqual(y, 150 / 720 * 1000, delta=3)
 
+    def test_box_cut_off_by_its_crop_is_looked_at_again(self):
+        # Live 12:59 on Driveway: a crop placed for a road car cut through a large object at
+        # the top, and its cut-off box took over the car's track.
+        f = np.full(SHAPE, 90, np.uint8)
+        f[100:400, 300:700] = 255                      # a large object
+        av._latest_frame["R"] = f
+
+        class Calibrated:
+            def is_calibrating(self):
+                return False
+        av._motion_detectors["R"] = Calibrated()
+        av._motion_boxes["R"] = [(640, 200, 660, 220)]   # motion at its right side only
+        out = av._detect_regions("R", self.det, f)
+        self.assertEqual(len(out), 1)
+        x1, y1, x2, y2 = out[0]["box"]
+        self.assertEqual((round(x1), round(y1), round(x2), round(y2)), (300, 100, 699, 399))
+        self.assertFalse(out[0]["clipped"])
+        # the motion crop; a look twice that box's size (still cut: it was cut on two sides);
+        # one more, which sees it whole
+        self.assertEqual(len(self.det.calls), 3)
+
     def test_no_motion_no_tracks_no_inference(self):
         self.frame(spot=(1000, 150))
         av._motion_boxes["R"] = []

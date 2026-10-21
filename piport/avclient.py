@@ -759,6 +759,7 @@ def _is_outside_detect_zones(device_id, coord, object_type=None):
                    for poly, t in zip(polygons, types))
 
 
+CLIPPED_REDETECT_MAX = 3   # extra looks a frame may take at boxes cut off by their crop
 # deviceID -> {"first", "last"}: monotonic s of the stream's first frame and last full look.
 _startup_scan = {}
 STARTUP_SCAN_INTERVAL_S = 1.0
@@ -800,13 +801,39 @@ def _detect_regions(device_id, detector, frame):
         scan["last"] = now
         found += regions.startup_regions(shape)
     dets = []
-    for region in found:
+
+    def run(region):
         x1, y1, x2, y2 = (int(v) for v in region)
+        got = []
         for r in detector.detect(frame[y1:y2, x1:x2]):
             bx1, by1, bx2, by2 = r["box"]
-            dets.append(dict(r, label=r.get("label") or r["objectType"], region=region,
-                             box=(bx1 + x1, by1 + y1, bx2 + x1, by2 + y1)))
+            got.append(dict(r, label=r.get("label") or r["objectType"], region=region,
+                            box=(bx1 + x1, by1 + y1, bx2 + x1, by2 + y1)))
+        return got
+
+    for region in found:
+        dets += run(region)
+    # A box cut off by its crop's edge (not the picture's) is looked at again on a crop twice
+    # its size, as older Frigate did: live 12:59 on Driveway a crop placed for a road car cut
+    # through a large object at the top, and its cut-off box took over the car's track.
+    # A box still cut off after that gets another look (up to CLIPPED_REDETECT_MAX a frame).
+    redone = []
+    queue = sorted([d for d in dets if regions.clipped(d, shape)], key=lambda d: -d["score"])
+    while queue and len(redone) < CLIPPED_REDETECT_MAX:
+        d = queue.pop(0)
+        bx1, by1, bx2, by2 = d["box"]
+        region = regions.calculate_region(shape, bx1, by1, bx2, by2, regions.MIN_REGION,
+                                          multiplier=2)
+        if region in redone:
+            continue
+        redone.append(region)
+        got = run(region)
+        dets += got
+        queue = sorted(queue + [g for g in got if regions.clipped(g, shape)],
+                       key=lambda d: -d["score"])
     out = regions.reduce_detections(shape, dets)
+    for r in out:
+        r["clipped"] = regions.clipped(r, shape)
     out.sort(key=lambda r: -r["score"])
     for tid, tr, box in seeded:
         out.append({"objectType": tr["objectType"], "label": None, "score": tr["score"],
@@ -848,6 +875,8 @@ def _classify_frame_detections(device_id):
             _log_dropped(device_id, r, "excluded by configured excludeZones")
             continue
         d = {"objectType": r["objectType"], "score": r["score"], "coord": coord}
+        if r.get("clipped"):
+            d["clipped"] = True
         if r["objectType"] == "vehicle" and enrich.vehicle_attrs_enabled():
             try:
                 attrs = enrich.vehicle_attributes(r.get("label"), frame, coord)
@@ -2189,6 +2218,13 @@ def _motion_tick(ws, device_id):
             matches, unclaimed = _builtin_match(tracks, detections)
             pending_ids = {}
         _match_faces_to_people(tracks, detections, matches, unclaimed)
+        # A box still cut off by its crop after the second look neither moves a moving track
+        # (that frame counts as a miss) nor starts one; a parked track may still take it.
+        for tid in [t for t, i in matches.items()
+                    if detections[i].get("clipped") and not tracks[t].get("stationary_coord")]:
+            del matches[tid]
+        for idx in [i for i in unclaimed if detections[i].get("clipped")]:
+            unclaimed.remove(idx)
 
         for tracker_id, tr in list(tracks.items()):
             if tracker_id in matches:
@@ -2198,6 +2234,8 @@ def _motion_tick(ws, device_id):
                 tr["miss_count"] = 0
                 if _center_moved(tr.get("first_coord") or d["coord"], d["coord"]):
                     tr["moved"] = True
+                if _iou(tr.get("first_coord") or d["coord"], d["coord"]) < STILL_IOU:
+                    tr["left_first_box"] = True
                 _record_score(tr, d["score"], device_id)
                 _update_still(tr, now_ms)
                 if (tr.get("stationary_coord") and not d.get("seeded")
@@ -2353,9 +2391,14 @@ def _motion_tick(ws, device_id):
         # 2b. A track confirms once it's a true positive (median score) and has been around
         #     for Protect's eventStartMSec -- even on a frame it was missed in, so an object
         #     seen on only its first few frames still makes its event.
+        #     A vehicle still on the box it was first seen on waits: the yolov5n model misses
+        #     the red car parked on Driveway, and a crop zoomed in on a passing road car found
+        #     its side mirror as a small "vehicle" that joined the car's event (live 12:59 and
+        #     the 17:20 clip). A car that is arriving or passing leaves its first box at once.
         for tid, tr in tracks.items():
             if (not tr.get("confirmed", True) and tr.get("true_positive")
                     and tr["objectType"] not in CONFIRM_WITH
+                    and (tr["objectType"] not in PARK_WHEN_STILL or tr.get("left_first_box"))
                     and now_ms - tr["first_shown_ms"] >= confirm_ms):
                 tr["confirmed"] = True
                 log.info("real motion tick: %s tracker_id=%s confirmed after %d ms (median score "
@@ -2365,7 +2408,12 @@ def _motion_tick(ws, device_id):
                 joining.append((tid, tr))
 
         # 3. A vehicle that has stopped (still ~30 s) parks; its snapshot stays in the leave.
+        #    One that never left its first box parks with no event.
         for tid, tr in tracks.items():
+            if (not tr.get("stationary_coord") and tr.get("still")
+                    and tr["objectType"] in PARK_WHEN_STILL and not tr.get("confirmed", True)
+                    and tr.get("true_positive") and not tr.get("left_first_box")):
+                tr["confirmed"] = True
             if (not tr.get("stationary_coord") and tr.get("still")
                     and tr["objectType"] in PARK_WHEN_STILL and tr.get("confirmed", True)):
                 log.info("real motion tick: %s tracker_id=%s still for %d ticks, parked for "

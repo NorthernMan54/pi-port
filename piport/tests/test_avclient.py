@@ -521,6 +521,19 @@ class TestCameraEvent(Base):
             self.tick(self.person_at(x))
         self.assertEqual(self.sent, [])
 
+    def test_clipped_box_starts_no_track(self):
+        self.tick(dict(self.CAR, clipped=True))
+        self.tick(dict(self.CAR, clipped=True))
+        self.assertEqual(av._motion_state["D"]["tracks"], {})
+
+    def test_clipped_box_does_not_move_a_moving_track(self):
+        self.tick(self.CAR)
+        self.tick(dict(self.CAR, coord=[120, 500, 200, 100]))
+        self.tick(dict(self.CAR, coord=[300, 400, 150, 300], clipped=True))
+        (tid, tr), = av._motion_state["D"]["tracks"].items()
+        self.assertEqual(tr["coord"], [120, 500, 200, 100])
+        self.assertEqual(tr["miss_count"], 1)
+
     def test_two_people_keep_their_own_faces(self):
         a, b = dict(self.PERSON, coord=[100, 200, 200, 600]), dict(self.PERSON, coord=[600, 200, 200, 600])
         fa, fb = dict(self.FACE, coord=[150, 220, 60, 60]), dict(self.FACE, coord=[650, 220, 60, 60])
@@ -755,7 +768,7 @@ class TestCameraEvent(Base):
         with mock.patch.object(av, "MIN_HITS", 2):
             self.tick(dict(self.CAR, score=0.9))
             self.assertEqual(self.events(), [])
-            self.tick(dict(self.CAR, score=0.85))
+            self.tick(dict(self.CAR, score=0.85, coord=[200, 500, 200, 100]))
         self.assertOpened(["vehicle"])
 
     def test_median_reaching_threshold_confirms(self):
@@ -857,6 +870,26 @@ class TestCameraEvent(Base):
         self.assertEqual(self.events(), [])
         self.tick(dict(self.PERSON, coord=[550, 200, 200, 600]))
         self.assertOpened(["person"])
+
+    def test_vehicle_on_its_first_box_waits_to_confirm(self):
+        # Live 12:59 on Driveway: a parked car's mirror, found on a zoomed-in crop, joined
+        # the passing car's event as a second vehicle.
+        clock = self._clock()
+        av._event_start_ms["D"] = 1000
+        for _ in range(6):
+            self.tick(self.CAR)
+            clock[0] += 400
+        self.assertEqual(self.events(), [])
+        self.tick(dict(self.CAR, coord=[200, 500, 200, 100]))
+        self.assertOpened(["vehicle"])
+
+    def test_passing_vehicle_confirms_on_time(self):
+        clock = self._clock()
+        av._event_start_ms["D"] = 1000
+        for x in (100, 200, 300, 400):
+            self.tick(dict(self.CAR, coord=[x, 500, 200, 100]))
+            clock[0] += 400
+        self.assertOpened(["vehicle"])
 
     def test_face_confirms_with_its_person(self):
         # Live 13:54:51: a face found once was dropped before it could confirm on its own.

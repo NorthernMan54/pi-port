@@ -556,6 +556,18 @@ class TestCameraEvent(Base):
         self.tick(self.ME, self.HER, dict(self.HER_FACE, parent_coord=self.HER["coord"]))
         self.assertEqual(self.person_of_face(), self.HER["coord"])
 
+    def test_face_goes_to_its_finder_after_the_finder_has_moved(self):
+        # 13:33 clip: read from a snapshot 0.8 s old, the face's centre was 2 px outside my
+        # live box, which overlapped my box at the read by IoU 0.22; it opened a second face.
+        tracks = {3: {"objectType": "person", "coord": [617, 260, 117, 408]},
+                  7: {"objectType": "person", "coord": [467, 511, 108, 487]}}
+        self.assertEqual(av._face_owner(tracks, [725, 297, 22, 53],
+                                        parent_coord=[688, 293, 119, 388]), 3)
+        # ...but with two people overlapping the finder's box, neither is taken on a weak overlap
+        tracks[7]["coord"] = [780, 300, 100, 400]
+        self.assertIsNone(av._face_owner(tracks, [900, 297, 22, 53],
+                                         parent_coord=[688, 293, 119, 388]))
+
     def test_face_without_its_finder_goes_to_the_head_it_is_at(self):
         self.tick(self.ME, self.HER, self.HER_FACE)
         self.assertEqual(self.person_of_face(), self.HER["coord"])

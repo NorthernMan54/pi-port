@@ -1753,7 +1753,8 @@ def _face_depth(coord, box):
     return (coord[1] + coord[3] / 2 - box[1]) / max(1.0, box[3])
 
 
-# A face's finder is the person track whose box overlaps the box it was found in by this much.
+# A face's finder is the person track whose box overlaps the box it was found in by this much
+# (or the only one overlapping it at all).
 FACE_FINDER_IOU = 0.3
 
 
@@ -1770,9 +1771,15 @@ def _face_owner(tracks, coord, boxes=None, parent_coord=None):
     people = [(tid, boxes.get(tid) or tr["coord"]) for tid, tr in tracks.items()
               if tr["objectType"] == "person"]
     if parent_coord:
-        tid, box = max(people, key=lambda p: _iou(p[1], parent_coord), default=(None, None))
-        if tid is not None and _iou(box, parent_coord) >= FACE_FINDER_IOU:
-            return tid
+        # The finder has moved since the once-a-second snapshot (13:33 clip: walking, its box
+        # overlapped its box at the read by IoU 0.22), so the only person overlapping that box
+        # is the finder too.
+        overlaps = [(p, _iou(p[1], parent_coord)) for p in people]
+        overlaps = [(p, v) for p, v in overlaps if v > 0]
+        if overlaps:
+            (tid, _box), best = max(overlaps, key=lambda o: o[1])
+            if best >= FACE_FINDER_IOU or len(overlaps) == 1:
+                return tid
     holders = [(tid, box) for tid, box in people if _center_inside(coord, box)]
     if holders:
         heads = [h for h in holders if _face_depth(coord, h[1]) <= FACE_HEAD_FRACTION]

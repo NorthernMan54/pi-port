@@ -47,16 +47,16 @@
 </style>
 </head>
 <body>
-<h1>AI Port emulator host</h1>
+<h1><span id="board">Board</span> &mdash; AI Port emulator host</h1>
 <div class="grid">
   <div class="card"><div class="label">CPU</div><div class="value" id="cpu-val">--</div>
     <div class="bar"><div class="bar-fill" id="cpu-bar" style="width:0%"></div></div></div>
   <div class="card"><div class="label">Memory</div><div class="value" id="mem-val">--</div>
     <div class="sub" id="mem-sub"></div>
     <div class="bar"><div class="bar-fill" id="mem-bar" style="width:0%"></div></div></div>
-  <div class="card"><div class="label">GPU (Mali)</div><div class="value" id="gpu-val">--</div>
+  <div class="card"><div class="label">GPU</div><div class="value" id="gpu-val">--</div>
     <div class="bar"><div class="bar-fill" id="gpu-bar" style="width:0%"></div></div></div>
-  <div class="card"><div class="label">NPU (RKNN, avg of 3 cores)</div><div class="value" id="npu-val">--</div>
+  <div class="card"><div class="label" id="npu-label">Accelerator</div><div class="value" id="npu-val">--</div>
     <div class="sub" id="npu-sub"></div>
     <div class="bar"><div class="bar-fill" id="npu-bar" style="width:0%"></div></div></div>
   <div class="card cores-card"><div class="label">Per-core CPU</div>
@@ -121,10 +121,21 @@ async function poll() {
     setStat("cpu", d.cpu_percent, d.cpu_percent + "%");
     setStat("mem", d.mem_percent, d.mem_percent + "%", d.mem_used_mb + " / " + d.mem_total_mb + " MB");
     setStat("gpu", d.gpu_percent, d.gpu_percent + "%");
+    if (d.board) document.getElementById("board").textContent = d.board;
+    const npuLabel = document.getElementById("npu-label");
     if (d.npu) {
+      npuLabel.textContent = "NPU (RKNN, avg of " + d.npu.cores.length + " cores)";
       setStat("npu", d.npu.average, d.npu.average + "%", "cores: " + d.npu.cores.join("% / ") + "%");
+    } else if (d.coral) {
+      // The Edge TPU has no load counter: show the link instead, which matters (USB 2 is slower).
+      npuLabel.textContent = "Coral Edge TPU";
+      const link = d.coral.bus === "pcie" ? "PCIe"
+        : d.coral.speed_mbps >= 5000 ? "USB 3" : d.coral.speed_mbps ? "USB 2" : "USB";
+      setStat("npu", 0, link, d.coral.firmware_loaded ? "attached (no load counter)"
+        : "attached, firmware loads on first use");
     } else {
-      setStat("npu", null, "n/a");
+      npuLabel.textContent = "Accelerator";
+      setStat("npu", null, "n/a", "");
     }
     renderCores(d.cpu_cores);
   } catch (e) {

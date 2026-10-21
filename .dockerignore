@@ -1,8 +1,8 @@
 # Build context is the repo root (see docker/Dockerfile).
 .git
 .github
-docker/
 rknn_convert/
+docs/
 # Superseded duplicated CPU tree (only present if checked out from the old branch)
 piport/x86/
 **/__pycache__
@@ -24,3 +24,8 @@ piport/x86/
 **/adopt_state.json.tmp
 **/fw_version.json
 **/device_name
+**/*.bak-preinstall
+# Model binaries: the image fetches its own (sha256-pinned).
+**/*.onnx
+**/*.rknn
+**/*.tflite

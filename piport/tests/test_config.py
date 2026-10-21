@@ -211,5 +211,48 @@ class TestFirmwarePin(unittest.TestCase):
         self.assertEqual(config.device_name(self.d), "Front Door")
 
 
+class TestRedact(unittest.TestCase):
+    def test_rtsp_credentials(self):
+        line = ("payload={'streamUrl': 'rtsp://onvif:s3cret@192.168.1.22/Streaming/Channels/101"
+                "?transportmode=unicast', 'width': 3840}")
+        out = config.redact(line)
+        self.assertNotIn("s3cret", out)
+        self.assertNotIn("onvif:", out)
+        self.assertIn("rtsp://<redacted>@192.168.1.22/Streaming/Channels/101", out)
+
+    def test_password_and_token_fields(self):
+        out = config.redact('body={"username": "ui", "password": "FAKEPASS", "token": "FAKE"}')
+        self.assertEqual(out, 'body={"username": "ui", "password": "<redacted>", '
+                              '"token": "<redacted>"}')
+        self.assertEqual(config.redact("headers={'X-Guid': 'g', 'X-Token': 'FAKE'}"),
+                         "headers={'X-Guid': 'g', 'X-Token': '<redacted>'}")
+        out = config.redact("payload={'mac': 'fcecda', 'adoptionCode': 'FAKE', 'ip': '1.2.3.4'}")
+        self.assertNotIn("FAKE", out)
+        self.assertIn("'ip': '1.2.3.4'", out)
+
+    def test_token_query_and_label(self):
+        self.assertEqual(config.redact("wss://h:7442/camera/1.0/ws?token=abc123 headers"),
+                         "wss://h:7442/camera/1.0/ws?token=<redacted> headers")
+        self.assertEqual(config.redact("  token:      FAKETOKEN0123456"), "  token:      <redacted>")
+        self.assertEqual(config.redact("token FAKETOKEN0123456789 already used on a prior"),
+                         "token <redacted> already used on a prior")
+        self.assertEqual(config.redact("adopt token changed (FAKETOKEN012 -> Ab12Cd34Ef56Gh)"),
+                         "adopt token changed (<redacted>)")
+        self.assertEqual(config.redact("reconnecting tokenless (fingerprint pinned)"),
+                         "reconnecting tokenless (fingerprint pinned)")
+
+    def test_leaves_ordinary_text(self):
+        for line in ("connecting to wss://192.168.1.2:7442/ with headers={'X-Ident': 'fc'}",
+                     "starting merged RTSP pull for deviceID=D: rtsp://10.0.0.1:7447/abc"):
+            self.assertEqual(config.redact(line), line)
+
+    def test_filter_rewrites_record(self):
+        import logging
+        rec = logging.LogRecord("t", logging.INFO, __file__, 1, "url=%s n=%d",
+                                ("rtsp://u:p@cam/1", 3), None)
+        self.assertTrue(config.RedactFilter().filter(rec))
+        self.assertEqual(rec.getMessage(), "url=rtsp://<redacted>@cam/1 n=3")
+
+
 if __name__ == "__main__":
     unittest.main()

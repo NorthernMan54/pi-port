@@ -13,6 +13,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 
@@ -51,12 +52,15 @@ DEFAULTS = {
     # [console]
     "host": "",  # set to your controller's IP
     "port": "7442",
+    # [hardware]
+    "detector": "auto",         # auto | rknn | edgetpu | cpu | none (see detectors/)
+    "detector_model": "",       # blank = the backend's default model in models/
     # [logging]
     "debug": "false",
 }
 
 # Env overrides applied after aiport.cfg (container-friendly identity/console config,
-# e.g. -e AIPORT_CONSOLE_HOST=...). The detector's own vars are read in detector.py.
+# e.g. -e AIPORT_CONSOLE_HOST=...). The detector's own vars are read in detectors/.
 ENV_OVERRIDES = {
     "AIPORT_MAC": "mac",
     "AIPORT_HOSTNAME": "hostname",
@@ -95,9 +99,45 @@ def get_bool(cfg, key):
     return str(cfg.get(key, "")).strip().lower() in ("1", "true", "yes", "on")
 
 
+# Secrets that show up in logged payloads/headers: camera RTSP credentials
+# (OnvifStreamControl streamUrl), the console's login password for this
+# device, and adoption tokens.
+_REDACTIONS = [
+    (re.compile(r"(\b[a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s@'\"]+@"), r"\1<redacted>@"),
+    (re.compile(r"([?&]token=)[^&\s'\"]+"), r"\1<redacted>"),
+    (re.compile(r"""(['"](?:password|[\w-]*token|adoptionCode)['"]\s*:\s*['"])[^'"]+""", re.I),
+     r"\1<redacted>"),
+    # "token: X", "token X already used": a long value right after the word.
+    (re.compile(r"(\btoken\b[^A-Za-z0-9<(]{1,12})[A-Za-z0-9_-]{12,}"), r"\1<redacted>"),
+    (re.compile(r"(\btoken changed \()[^)]*"), r"\1<redacted>"),
+]
+
+
+def redact(text):
+    for pattern, repl in _REDACTIONS:
+        text = pattern.sub(repl, text)
+    return text
+
+
+class RedactFilter(logging.Filter):
+    """Rewrites each record's final message through redact()."""
+
+    def filter(self, record):
+        message = record.getMessage()
+        redacted = redact(message)
+        if redacted != message:
+            record.msg, record.args = redacted, None
+        return True
+
+
 def apply_logging(debug=False):
     logging.basicConfig(level=logging.DEBUG if debug else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
+    # On the handlers, not the root logger: logger filters skip records
+    # propagated from child loggers.
+    for handler in logging.getLogger().handlers:
+        if not any(isinstance(f, RedactFilter) for f in handler.filters):
+            handler.addFilter(RedactFilter())
 
 
 def sysid_int(cfg):

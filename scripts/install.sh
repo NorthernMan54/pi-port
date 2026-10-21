@@ -1,8 +1,55 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 hutchx86
-# One-shot Orange Pi 5 Plus (RK3588/aarch64) installer: apt deps, venv, model
-# assets, librknnrt upgrade, a macvlan systemd instance + web UI. Run as root; -h for options.
+#
+# One-shot installer for the Pi Port AI-Port emulator. Targets an Orange Pi 5
+# Plus (RK3588 NPU) or a Raspberry Pi 5 with a Coral Edge TPU; any other Linux
+# box can run the CPU backend. Does, in order:
+#
+#   1. apt prerequisites (python3-venv/pip, ffmpeg, iproute2, isc-dhcp-client,
+#      curl, ca-certificates, diffutils, git)
+#   2. a venv at piport/.venv + piport/requirements.txt + the detector
+#      backend's runtime (rknn-toolkit-lite2 / ai-edge-litert / onnxruntime)
+#   3. that backend's model (scripts/fetch_models.py; the .rknn as below)
+#   4. its system library: the librknnrt.so upgrade (rknn) or libedgetpu
+#      (edgetpu); backed up / idempotent
+#   5. a macvlan systemd instance via instance_manager.py (survives reboot)
+#   6. a systemd unit for the web UI (sysinfo_server.py) and starts it
+#
+# Run as root (it installs packages, writes /etc/systemd/system and creates a
+# network interface):
+#
+#   sudo scripts/install.sh --console <UNVR-IP> [--parent-iface <iface>]
+#
+# Options:
+#   --name NAME            instance name (default: main)
+#   --parent-iface IFACE   physical NIC the macvlan instance is built on
+#                          (alias: --iface; default: auto-detected)
+#   --console HOST[:PORT]  UniFi Protect console address; written to aiport.cfg
+#   --accel BACKEND        detector backend: auto (default) | rknn | edgetpu |
+#                          cpu | none. auto picks rknn on an RK3588, edgetpu
+#                          when a Coral is plugged in, else cpu. Written to
+#                          aiport.cfg [hardware] detector.
+#   --rknn PATH            prebuilt yolov5s_relu.rknn to install (see below)
+#   --rknn-url URL         download the .rknn from URL (overrides PIPORT_RKNN_URL)
+#   --rknn-sha256 HEX      verify a downloaded/supplied .rknn against this sha256
+#   --webui-port N         web UI listen port (default: 8090)
+#   --no-npu               same as --accel none: no detector runtime or model
+#                          (protocol stack still installs)
+#   -h, --help
+#
+# Edge TPU: installs feranick's libedgetpu1-std build (Google's apt repo is
+# unmaintained) for this distro, plus Google's SSDLite MobileDet model. Only
+# the USB Coral is handled; a PCIe/M.2 Coral additionally needs the gasket
+# kernel driver, which this script does not install.
+#
+# The NPU model is deliberately not shipped in the repo (binary). It can come
+# from, in order: --rknn PATH, a local/submodule copy (models-rknn/ or
+# rknn_convert/), --rknn-url URL, PIPORT_RKNN_URL, or the DEFAULT_RKNN_URL set
+# below (published as a separate AGPL-3.0 model repo/release -- see README.md).
+# rknn-toolkit2 can only convert ONNX -> RKNN on an x86_64 host, so a copy built
+# elsewhere (fetch_models.py --convert) is the alternative.
+#
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,6 +66,24 @@ RKNNRT_URL="https://raw.githubusercontent.com/airockchip/rknn-toolkit2/v2.3.2/rk
 DEFAULT_RKNN_URL="https://raw.githubusercontent.com/hutchx86/pi-port-models/v1/yolov5s_relu.rknn"
 DEFAULT_RKNN_SHA256="f4fd0122ecca3117323b8268d270e6cc293e364d6a9dda8e83293d64c8377a3c"
 
+# libedgetpu1-std from feranick/libedgetpu (built against TF 2.19.1; verified
+# with ai-edge-litert 2.3.0 on Pi OS trixie). sha256 per <distro>_<arch>, from
+# the release's published asset digests.
+LIBEDGETPU_TAG="16.0TF2.19.1-1"
+LIBEDGETPU_VER="16.0tf2.19.1-1"
+declare -A LIBEDGETPU_SHA256=(
+    [bookworm_amd64]=23be53c72eff4d44afc2f727700da185791d3ca0867bd0b5e082ec3a0de21925
+    [bookworm_arm64]=46ab47310d6de120bda4678febe5eb6143f5c7d7dd17c0d017ae5f6cd67dfec5
+    [bullseye_amd64]=35ede313bb3883efcd1ce981713e8b57de5d368ce5618bd2dcc9fc83268c29e6
+    [bullseye_arm64]=09ae76e712c5606788fa516cf85505343d0f931d010d7433bddee47f65ce8c93
+    [trixie_amd64]=764d1bc680f65440ca1c8aca1d33ce986d7ca652b984ae0fc744d04b2f896e53
+    [trixie_arm64]=df9e9b16c802f4e4ad6fd8d9d0866d25eff8ddef989813f398794546d267bd11
+    [ubuntu22.04_amd64]=a8a254d241ab6c18c1932f6e725d61a2721097b9c65d20ca3c31b3298d817128
+    [ubuntu22.04_arm64]=974bf41b59831817ca674e64a8bc857d84564cb25513da1a18711c50d3351377
+    [ubuntu24.04_amd64]=5010e68411e22cafb135950c7322c769d4041fa5c2d2c11eaf638500fde3f357
+    [ubuntu24.04_arm64]=308479366bd0c1b78b732a8eb5e60dc329c618917a0b4c8f0b19b1a50e9ca5c8
+)
+
 NAME="main"
 PARENT_IFACE=""
 CONSOLE=""
@@ -26,7 +91,7 @@ RKNN=""
 RKNN_URL=""
 RKNN_SHA256=""
 WEBUI_PORT="8090"
-NO_NPU=0
+ACCEL="auto"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }
@@ -65,7 +130,8 @@ while [ $# -gt 0 ]; do
         --rknn-url)     RKNN_URL="${2:?}"; shift 2 ;;
         --rknn-sha256)  RKNN_SHA256="${2:?}"; shift 2 ;;
         --webui-port)   WEBUI_PORT="${2:?}"; shift 2 ;;
-        --no-npu)       NO_NPU=1; shift ;;
+        --accel)        ACCEL="${2:?}"; shift 2 ;;
+        --no-npu)       ACCEL="none"; shift ;;
         -h|--help)      usage; exit 0 ;;
         *)              die "unknown argument: $1 (see --help)" ;;
     esac
@@ -76,9 +142,43 @@ done
 case "$NAME" in *[!a-zA-Z0-9_-]*|"") die "invalid --name '$NAME' (letters/digits/-/_ only, max 12)" ;; esac
 [ "${#NAME}" -le 12 ] || die "--name must be <= 12 characters (becomes a Linux interface name)"
 
+# Same USB ids as detectors/edgetpu.py: 1a6e:089a before libedgetpu loads the
+# firmware, 18d1:9302 after.
+coral_present() {
+    local d
+    for d in /sys/bus/usb/devices/*; do
+        [ -f "$d/idVendor" ] || continue
+        case "$(cat "$d/idVendor"):$(cat "$d/idProduct")" in
+            1a6e:089a|18d1:9302) return 0 ;;
+        esac
+    done
+    [ -e /dev/apex_0 ]
+}
+
 ARCH="$(uname -m)"
-if [ "$ARCH" != "aarch64" ] && [ "$NO_NPU" -eq 0 ]; then
-    die "this installer targets aarch64/RK3588, got $ARCH. For CPU/x86 use the Docker stack (docker/README.md); or pass --no-npu for a CPU-only install"
+case "$ACCEL" in
+    auto)
+        if tr -d '\0' < /proc/device-tree/compatible 2>/dev/null | grep -q rk3588; then
+            ACCEL="rknn"
+        elif coral_present; then
+            ACCEL="edgetpu"
+        else
+            ACCEL="cpu"
+        fi
+        log "auto-detected detector backend: $ACCEL" ;;
+    rknn|edgetpu|cpu|none) ;;
+    *) die "invalid --accel '$ACCEL' (auto|rknn|edgetpu|cpu|none)" ;;
+esac
+if [ "$ACCEL" = "rknn" ] && [ "$ARCH" != "aarch64" ]; then
+    die "--accel rknn needs an aarch64 RK3588 board, got $ARCH; use --accel cpu or edgetpu (the Docker stack is in docker/README.md)"
+fi
+if [ "$ACCEL" = "edgetpu" ]; then
+    case "$ARCH" in
+        aarch64) DEB_ARCH="arm64" ;;
+        x86_64)  DEB_ARCH="amd64" ;;
+        *) die "--accel edgetpu supports aarch64/x86_64, got $ARCH" ;;
+    esac
+    coral_present || warn "no Coral found on USB (or /dev/apex_0); installing anyway -- plug it in before starting"
 fi
 
 log "installing system packages"
@@ -94,16 +194,49 @@ fi
 log "installing Python dependencies"
 "$PY" -m pip install --quiet --upgrade pip
 "$PY" -m pip install --quiet -r "$PIPORT_DIR/requirements.txt"
-if [ "$NO_NPU" -eq 0 ]; then
-    log "installing rknn-toolkit-lite2"
-    "$PY" -m pip install --quiet rknn-toolkit-lite2
+case "$ACCEL" in
+    rknn)    log "installing rknn-toolkit-lite2"; "$PY" -m pip install --quiet rknn-toolkit-lite2 ;;
+    edgetpu) log "installing ai-edge-litert";     "$PY" -m pip install --quiet ai-edge-litert ;;
+    cpu)     log "installing onnxruntime";        "$PY" -m pip install --quiet onnxruntime ;;
+esac
+
+if [ "$ACCEL" = "edgetpu" ] || [ "$ACCEL" = "cpu" ]; then
+    log "fetching the $ACCEL model (binaries are gitignored)"
+    "$PY" "$REPO_ROOT/scripts/fetch_models.py" --backend "$ACCEL"
 fi
 
-log "fetching model assets (ONNX + labels/anchors; binaries are gitignored)"
-# --no-cpu-model: the CPU yolov5n.onnx is for x86/arm64 runs, not this NPU board.
-"$PY" "$REPO_ROOT/scripts/fetch_models.py" --no-cpu-model
+if [ "$ACCEL" = "edgetpu" ]; then
+    # "|| true": dpkg-query exits 1 when either name is unknown, which pipefail would propagate.
+    if { dpkg-query -W -f='${Status}\n' libedgetpu1-std libedgetpu1-max 2>/dev/null || true; } \
+            | grep -q "install ok installed"; then
+        log "libedgetpu already installed"
+    else
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        distro="${VERSION_CODENAME:-}"
+        [ "${ID:-}" = "ubuntu" ] && distro="ubuntu${VERSION_ID:-}"
+        key="${distro}_${DEB_ARCH}"
+        sha="${LIBEDGETPU_SHA256[$key]:-}"
+        [ -n "$sha" ] || die "no libedgetpu build for '$key' (have: ${!LIBEDGETPU_SHA256[*]}); install libedgetpu1-std yourself and re-run"
+        deb="libedgetpu1-std_${LIBEDGETPU_VER}.${distro}_${DEB_ARCH}.deb"
+        tmpdir="$(mktemp -d)"
+        log "installing $deb"
+        curl -fsSL -o "$tmpdir/$deb" \
+            "https://github.com/feranick/libedgetpu/releases/download/${LIBEDGETPU_TAG}/${deb}" \
+            || die "failed to download $deb"
+        verify_sha256 "$tmpdir/$deb" "$sha" || die "$deb failed sha256 verification"
+        apt-get install -y -qq "$tmpdir/$deb"
+        rm -rf "$tmpdir"
+        # Its udev rule only applies on (re)plug; trigger so a Coral already in works now.
+        udevadm control --reload-rules && udevadm trigger || true
+    fi
+fi
 
-if [ "$NO_NPU" -eq 0 ]; then
+if [ "$ACCEL" = "rknn" ]; then
+    log "fetching model assets (ONNX + labels/anchors; binaries are gitignored)"
+    # --no-cpu-model: the CPU yolov5n.onnx is for x86/arm64/macOS, not this NPU board.
+    "$PY" "$REPO_ROOT/scripts/fetch_models.py" --no-cpu-model
+
     # Source precedence: --rknn file > local/submodule copy > download, where
     # the download URL is --rknn-url > PIPORT_RKNN_URL > DEFAULT_RKNN_URL.
     rknn_url="${RKNN_URL:-${PIPORT_RKNN_URL:-$DEFAULT_RKNN_URL}}"
@@ -190,7 +323,7 @@ then copy piport/models/yolov5s_relu.rknn to this Pi, or re-run with
   --rknn <path>   /   --rknn-url <url>   /   PIPORT_RKNN_URL=<url> ...
 
 To install the protocol stack now and add NPU detection later, re-run with
-  --no-npu
+  --accel none
 EOF
         exit 1
     fi
@@ -200,7 +333,7 @@ EOF
 fi
 
 # librknnrt.so must match rknn-toolkit2 2.3.2; the stock OS version is too old.
-if [ "$NO_NPU" -eq 0 ]; then
+if [ "$ACCEL" = "rknn" ]; then
     lib="$(ldconfig -p 2>/dev/null | awk '/librknnrt\.so/{print $NF; exit}' || true)"
     lib="${lib:-/usr/lib/librknnrt.so}"
     tmp="$(mktemp)"
@@ -224,21 +357,28 @@ if [ "$NO_NPU" -eq 0 ]; then
     rm -f "$tmp"
 fi
 
-set_ini() {  # set_ini <section> <key> <value> <file>
+set_ini() {  # set_ini <section> <key> <value> <file>; adds the key/section if missing
     local section="$1" key="$2" value="$3" file="$4" tmp
     tmp="$(mktemp)"
     awk -v sec="$section" -v k="$key" -v v="$value" '
-        /^\[/ { insec = ($0 == "[" sec "]") }
-        insec && $0 ~ ("^" k "[ \t]*=") { print k " = " v; next }
+        /^\[/ {
+            if (insec && !done) { print k " = " v; done = 1 }
+            insec = ($0 == "[" sec "]"); if (insec) seen = 1
+        }
+        insec && $0 ~ ("^" k "[ \t]*=") { print k " = " v; done = 1; next }
         { print }
+        END {
+            if (insec && !done) { print k " = " v; done = 1 }
+            if (!seen) { print ""; print "[" sec "]"; print k " = " v }
+        }
     ' "$file" > "$tmp"
     cat "$tmp" > "$file"
     rm -f "$tmp"
 }
 
-if [ -n "$CONSOLE" ] || [ -n "$PARENT_IFACE" ]; then
-    [ -f "$CFG.bak-preinstall" ] || cp -a "$CFG" "$CFG.bak-preinstall"
-fi
+[ -f "$CFG.bak-preinstall" ] || cp -a "$CFG" "$CFG.bak-preinstall"
+set_ini hardware detector "$ACCEL" "$CFG"
+log "set [hardware] detector=$ACCEL in aiport.cfg"
 if [ -n "$CONSOLE" ]; then
     console_host="${CONSOLE%%:*}"
     console_port="7442"
@@ -334,7 +474,12 @@ Pi Port installed.
 
 Next: adopt "AI Port" from the Protect console UI, then pair a camera.
 Re-run safely any time to reinstall/update; the instance identity is preserved.
-Note: the distro ffmpeg (software decode) is installed; swap in a Rockchip
-rkmpp build for hardware H.264 decode if your board has one.
 ============================================================
 EOF
+case "$ACCEL" in
+    rknn)    echo "Note: the distro ffmpeg (software decode) is installed; swap in a Rockchip"
+             echo "rkmpp build for hardware H.264 decode." ;;
+    edgetpu) echo "Note: a USB Coral is fastest on a USB 3 port; if it ever fails to open"
+             echo "(\"Failed to load delegate\"), unplug and replug it." ;;
+    none)    echo "Note: no detector backend installed; detection is disabled." ;;
+esac

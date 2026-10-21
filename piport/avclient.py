@@ -1056,14 +1056,14 @@ def _enrich_detections(device_id, detections):
                 face = {"objectType": "face", "score": f["score"], "coord": f["coord"],
                         "extra": {"name": f["name"], "tag": f["name"]},
                         "frame": _snapshot_bytes.get(device_id), "size_px": f.get("size_px")}
-                if f["embedding"] is not None:
+                # A face under FACE_MATCH_MIN_PX is reported without its embedding: Protect
+                # enrols the embedding it's sent, and one from an 18 px face made a reference
+                # the same person later scored 0.299 against. It isn't matched either.
+                small = f.get("size_px", enrich.FACE_MATCH_MIN_PX) < enrich.FACE_MATCH_MIN_PX
+                if f["embedding"] is not None and not small:
                     face["scored"] = {"faceEmbed": (f["embedding"], f["score"])}
                     db = _get_face_db()
-                    small = f.get("size_px", enrich.FACE_MATCH_MIN_PX) < enrich.FACE_MATCH_MIN_PX
-                    m = db.match(f["embedding"], FACE_DB_THRESH) if db and not small else None
-                    if db and small:
-                        log.debug("face DB: face on deviceID=%s is %d px, under %d px: not matched",
-                                  device_id, f["size_px"], enrich.FACE_MATCH_MIN_PX)
+                    m = db.match(f["embedding"], FACE_DB_THRESH) if db else None
                     if m:
                         subject_id, name, sim = m
                         face["scored"]["match"] = ((subject_id, name), sim)

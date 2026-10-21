@@ -166,7 +166,7 @@ class TestAvclientMatching(unittest.TestCase):
         self.assertNotIn("match", again[0]["scored"])
         self.assertIn("faceEmbed", again[0]["scored"])
 
-    def test_small_face_is_not_matched(self):
+    def test_small_face_is_reported_without_embedding_or_match(self):
         # Live 09:21 on Backyard: an 18 x 23 px face scored 0.299 against the same person.
         ian = vec()
         db = facedb.parse(build({5: ("Ian", [ian])}))
@@ -184,8 +184,9 @@ class TestAvclientMatching(unittest.TestCase):
                 mock.patch.object(av, "_load_snapshot_bgr", lambda dev: (np.zeros((9, 9, 3)), 2.0)):
             av._enrich_cache.pop("D", None)
             faces = av._enrich_detections("D", [dict(person)])
-        self.assertIn("faceEmbed", faces[0]["scored"])   # still reported, just not matched
-        self.assertNotIn("match", faces[0]["scored"])
+        self.assertEqual(faces[0]["objectType"], "face")   # still reported...
+        self.assertNotIn("faceEmbed", faces[0].get("scored", {}))   # ...without its embedding
+        self.assertNotIn("match", faces[0].get("scored", {}))
 
 
 if __name__ == "__main__":

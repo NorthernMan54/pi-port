@@ -1221,9 +1221,12 @@ class TestCameraEvent(Base):
         self.assertEqual(tracks[1]["coord"], [140, 280, 75, 110])
 
     def test_size_jump(self):
-        self.assertTrue(av._size_jump([0, 0, 40, 57], [0, 0, 49, 136]))   # 2.4x taller
-        self.assertTrue(av._size_jump([0, 0, 107, 253], [0, 0, 49, 136]))  # 2.2x narrower
+        # live 10:20: the bicycle and the bigger box beside it (35% of the bike inside it)
+        self.assertTrue(av._size_jump([239, 54, 40, 57], [265, 22, 49, 136]))
+        self.assertTrue(av._size_jump([280, 1, 107, 253], [265, 22, 49, 136]))   # 2.2x narrower
         self.assertFalse(av._size_jump([0, 0, 40, 57], [0, 0, 60, 90]))
+        # live 11:33: a person up close, the new box holding the old one
+        self.assertFalse(av._size_jump([516, 375, 79, 575], [366, 230, 226, 740]))
 
     def test_nearest_radius_is_capped(self):
         tall = {"objectType": "vehicle", "coord": [280, 96, 90, 264], "miss_count": 20}

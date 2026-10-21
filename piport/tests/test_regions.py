@@ -61,6 +61,18 @@ class TestRegions(unittest.TestCase):
         half = {"label": "car", "score": 0.7, "box": (300, 400, 450, 500), "region": (0, 0, 720, 720)}
         self.assertEqual(regions.reduce_detections(SHAPE, [car, half]), [car])
 
+    def test_upper_body_inside_the_same_persons_full_box_is_dropped(self):
+        # Live 11:33 at the doorbell: the upper-body box was 89% inside the full-body box (its
+        # top above it) and became a second person at Frigate's 0.9.
+        full = {"label": "person", "score": 0.9, "box": (349, 229, 670, 970), "region": (0, 0, 720, 720)}
+        upper = {"label": "person", "score": 0.95, "box": (441, 203, 553, 432), "region": (0, 0, 720, 720)}
+        self.assertEqual(regions.reduce_detections(SHAPE, [full, upper]), [full])
+
+    def test_two_people_side_by_side_are_kept(self):
+        a = {"label": "person", "score": 0.9, "box": (300, 200, 450, 700), "region": (0, 0, 720, 720)}
+        b = {"label": "person", "score": 0.9, "box": (400, 220, 550, 700), "region": (0, 0, 720, 720)}
+        self.assertEqual(len(regions.reduce_detections(SHAPE, [a, b])), 2)
+
     def test_small_car_behind_a_big_one_is_kept(self):
         near = {"label": "car", "score": 0.8, "box": (0, 200, 1000, 719), "region": (0, 0, 720, 720)}
         far = {"label": "car", "score": 0.8, "box": (400, 210, 470, 250), "region": (0, 0, 720, 720)}

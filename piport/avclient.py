@@ -193,6 +193,7 @@ NN_MISS_GROWTH_MAX = 1.5
 # shorter) than its own, from Norfair or the nearest rule: live 10:20 on Driveway a bicycle's
 # track (40x57) took a 49x136 box beside it, then a 107x253 one, and held the event 16 s.
 NN_SIZE_RATIO_MAX = 2.0
+SIZE_JUMP_INSIDE = 0.8
 # Min IOU (same objectType) to match a detection to an existing track.
 IOU_MATCH_THRESHOLD = 0.3
 # Which detection belongs to which track (AIPORT_TRACKER): "norfair", Frigate's Kalman-filtered
@@ -1092,7 +1093,15 @@ def _enrich_detections(device_id, detections):
 
 def _size_jump(a, b):
     """True if box b ([x, y, w, h]) is over NN_SIZE_RATIO_MAX x wider or taller than a, or
-    under 1/NN_SIZE_RATIO_MAX x: a different object, not this one moving."""
+    under 1/NN_SIZE_RATIO_MAX x: a different object, not this one moving. Not when the
+    smaller box lies mostly (SIZE_JUMP_INSIDE) inside the larger: the same object seen whole
+    or in part (live 11:33 a person up close to the doorbell went from a 79- to a 226-wide box
+    holding the old one, and became a new person track)."""
+    small, large = sorted((a, b), key=lambda c: c[2] * c[3])
+    iw = min(small[0] + small[2], large[0] + large[2]) - max(small[0], large[0])
+    ih = min(small[1] + small[3], large[1] + large[3]) - max(small[1], large[1])
+    if iw > 0 and ih > 0 and iw * ih >= SIZE_JUMP_INSIDE * max(small[2] * small[3], 1e-6):
+        return False
     for i in (2, 3):
         lo, hi = sorted((max(a[i], 1e-6), max(b[i], 1e-6)))
         if hi / lo > NN_SIZE_RATIO_MAX:

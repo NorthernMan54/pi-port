@@ -1461,6 +1461,13 @@ class TestFrameStats(Base):
         self.assertIn("600 delivered (10.0/s), 300 analysed (5.0/s), 300 skipped", line)
         self.assertIn("falling behind", line)
 
+    def test_frame_without_a_number_is_ignored(self):
+        # Live 12:39: a first pass with no frame number yet crashed every camera's loop.
+        av._note_frame("FS", None, 0.02, now=1000.0)
+        av._note_frame("FS", 5, 0.02, now=1001.0)
+        av._note_frame("FS", 6, 0.02, now=1070.0)     # past the minute: logs, no crash
+        self.assertEqual(av._frame_stats["FS"]["first_seq"], 6)
+
     def test_new_stream_starts_counting_again(self):
         av._note_frame("FS", 500, 0.02, now=1000.0)
         av._note_frame("FS", 1, 0.02, now=1001.0)   # frame numbers restarted: a new pull

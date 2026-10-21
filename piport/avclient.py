@@ -2509,9 +2509,11 @@ _inferred = collections.Counter()   # deviceID -> passes that ran the detector
 
 def _note_frame(device_id, seq, busy_s, now=None):
     """Count one analysed frame; log the camera's minute when it's up."""
+    if seq is None:   # no frame numbered yet (a stream just starting)
+        return
     now = time.monotonic() if now is None else now
     st = _frame_stats.get(device_id)
-    if st is None or seq is None or (st["last_seq"] is not None and seq < st["last_seq"]):
+    if st is None or seq < st["last_seq"]:
         # first frame, or a new stream (its frame numbers start again)
         _frame_stats[device_id] = {"t0": now, "first_seq": seq, "last_seq": seq, "analysed": 0,
                                    "busy_s": 0.0, "inferred0": _inferred[device_id]}
@@ -2564,7 +2566,10 @@ def _start_motion_detector(ws, device_id, ip, port, uri, preserve_tracks=False):
                 _motion_tick(ws, device_id)
             except Exception:
                 log.exception("motion poll tick crashed for deviceID=%s", device_id)
-            _note_frame(device_id, seq, time.monotonic() - started)
+            try:
+                _note_frame(device_id, seq, time.monotonic() - started)
+            except Exception:  # accounting must never stop a camera
+                log.exception("frame stats failed for deviceID=%s", device_id)
 
     log.info("starting real motion detector (up to %.0f frames/s, reports every %.2fs) for "
              "deviceID=%s", 1 / DETECT_INTERVAL_S, MOTION_POLL_INTERVAL_S, device_id)

@@ -9,9 +9,11 @@ Two backends, same ``Detector`` interface and identical output, so callers
     ``yolov5s_relu.rknn`` built from Rockchip's rknn_model_zoo v2.3.2
     (box decode, filtering and NMS adapted from that repo's yolov5 script).
   * ``onnx`` -- generic CPU via ``onnxruntime`` (x86_64 and arm64: Pi 4/5 and
-    any CPU-only server), no NPU. Two ONNX layouts are auto-detected:
+    any CPU-only server), no NPU. Three ONNX layouts are auto-detected:
     Ultralytics YOLOv5 (default ``models/yolov5n.onnx``, decode/sigmoid baked
-    into the graph) and Rockchip ``yolov5s_relu.onnx`` (three raw heads).
+    into the graph), Rockchip ``yolov5s_relu.onnx`` (three raw heads), and
+    anchor-free YOLOv8/v9/v11 (``[1,84,N]``, e.g. Frigate's ``yolov9-s-320.onnx``).
+    The model's input size is read from the graph; frames are resized to it.
 
 Backend choice (``AIPORT_BACKEND`` = ``auto``/``rknn``/``onnx``): in ``auto``
 the NPU is used when rknnlite and its model are present, otherwise the CPU
@@ -38,7 +40,7 @@ ONNX_MODEL_PATH = os.path.join(MODELS_DIR, "yolov5n.onnx")
 LABELS_PATH = os.path.join(MODELS_DIR, "coco_80_labels_list.txt")
 ANCHORS_PATH = os.path.join(MODELS_DIR, "anchors_yolov5.txt")
 
-IMG_SIZE = (640, 640)  # (width, height) -- matches the model's fixed input
+IMG_SIZE = (640, 640)  # (width, height) of the frames callers pass; models may differ
 # Objectness x class gate; raised from 0.35 to suppress night false "person" hits
 # (0.36-0.48). Override with AIPORT_OBJ_THRESH.
 OBJ_THRESH = float(os.environ.get("AIPORT_OBJ_THRESH", "0.5"))
@@ -105,11 +107,11 @@ def _box_process(position, anchors):
     return xyxy
 
 
-def _filter_boxes(boxes, box_confidences, box_class_probs):
+def _filter_boxes(boxes, box_confidences, box_class_probs, thresh=OBJ_THRESH):
     box_confidences = box_confidences.reshape(-1)
     class_max_score = np.max(box_class_probs, axis=-1)
     classes = np.argmax(box_class_probs, axis=-1)
-    pos = np.where(class_max_score * box_confidences >= OBJ_THRESH)
+    pos = np.where(class_max_score * box_confidences >= thresh)
     scores = (class_max_score * box_confidences)[pos]
     return boxes[pos], classes[pos], scores
 
@@ -153,7 +155,7 @@ def _nms_per_class(boxes, classes, scores):
     return np.concatenate(nboxes), np.concatenate(nclasses), np.concatenate(nscores)
 
 
-def _post_process(outputs, anchors):
+def _post_process(outputs, anchors, thresh=OBJ_THRESH):
     boxes, scores, classes_conf = [], [], []
     reshaped = [o.reshape([len(anchors[0]), -1] + list(o.shape[-2:])) for o in outputs]
     for i, data in enumerate(reshaped):
@@ -169,7 +171,7 @@ def _post_process(outputs, anchors):
     classes_conf = np.concatenate([flatten(c) for c in classes_conf])
     scores = np.concatenate([flatten(s) for s in scores])
 
-    boxes, classes, scores = _filter_boxes(boxes, scores, classes_conf)
+    boxes, classes, scores = _filter_boxes(boxes, scores, classes_conf, thresh)
     if boxes.shape[0] == 0:
         return None, None, None
     return _nms_per_class(boxes, classes, scores)
@@ -186,17 +188,55 @@ def _xywh2xyxy(xywh):
     return xyxy
 
 
-def _post_process_ultralytics(output):
+def _post_process_ultralytics(output, thresh=OBJ_THRESH):
     pred = output[0]  # (N, 5+num_classes): xywh(px), obj, class scores
     obj = pred[:, 4]
     class_conf = pred[:, 5:]
     classes = np.argmax(class_conf, axis=1)
     scores = obj * class_conf[np.arange(class_conf.shape[0]), classes]
-    keep = scores >= OBJ_THRESH
+    keep = scores >= thresh
     if not np.any(keep):
         return None, None, None
     boxes = _xywh2xyxy(pred[keep, :4])
     return _nms_per_class(boxes, classes[keep], scores[keep])
+
+
+# --- Anchor-free layout ([1,4+num_classes,N]: YOLOv8/v9/v11, no objectness) ---
+
+def _post_process_anchor_free(output, thresh=OBJ_THRESH):
+    pred = output[0].T  # (N, 4+num_classes): xywh(px), class scores
+    class_conf = pred[:, 4:]
+    classes = np.argmax(class_conf, axis=1)
+    scores = class_conf[np.arange(class_conf.shape[0]), classes]
+    keep = scores >= thresh
+    if not np.any(keep):
+        return None, None, None
+    boxes = _xywh2xyxy(pred[keep, :4])
+    return _nms_per_class(boxes, classes[keep], scores[keep])
+
+
+def _resize(frame_rgb, size):
+    """Resize an HxWx3 frame to (width, height): OpenCV area filter when present,
+    else nearest-neighbour in numpy (detector.py has no hard OpenCV dependency)."""
+    w, h = size
+    try:
+        import cv2
+        return cv2.resize(frame_rgb, (w, h), interpolation=cv2.INTER_AREA)
+    except ImportError:
+        ys = (np.arange(h) * frame_rgb.shape[0] / h).astype(int)
+        xs = (np.arange(w) * frame_rgb.shape[1] / w).astype(int)
+        return frame_rgb[ys][:, xs]
+
+
+def _layout(output_shapes, num_classes):
+    """'ultralytics' ([1,N,5+nc]), 'anchor_free' ([1,4+nc,N]) or 'raw_heads'."""
+    if len(output_shapes) == 1 and len(output_shapes[0]) == 3:
+        shape = output_shapes[0]
+        if shape[-1] == 5 + num_classes:
+            return "ultralytics"
+        if shape[1] == 4 + num_classes:
+            return "anchor_free"
+    return "raw_heads"
 
 
 def _has_onnxruntime():
@@ -262,14 +302,34 @@ class _RknnBackend:
         with self._lock:
             return self._rknn.inference(inputs=[batched])
 
-    def boxes(self, raw_outputs):
-        return _post_process(raw_outputs, self._anchors)
+    def boxes(self, raw_outputs, thresh=OBJ_THRESH):
+        return _post_process(raw_outputs, self._anchors, thresh)
+
+
+def _onnx_providers(available, fp16_input=True):
+    """onnxruntime providers (AIPORT_ORT_PROVIDER = auto/coreml/cpu): Core ML on
+    macOS (~5-6x CPU on Apple silicon), else CPU. The Core ML format follows the
+    model's input dtype; on an M2 each format was ~7x slower on the other model."""
+    want = os.environ.get("AIPORT_ORT_PROVIDER", "auto").strip().lower()
+    if want != "cpu" and "CoreMLExecutionProvider" in available:
+        if fp16_input:
+            # Default NeuralNetwork format falls back to CPU on the fp16 Ultralytics
+            # YOLOv5 (95 ms vs 4 ms per frame).
+            opts = {"ModelFormat": "MLProgram", "MLComputeUnits": "CPUAndNeuralEngine"}
+        else:
+            # float32 graphs (Frigate's yolov9-s-320): NeuralNetwork 3 ms, MLProgram 22 ms.
+            opts = {}
+        return [("CoreMLExecutionProvider", opts), "CPUExecutionProvider"]
+    if want == "coreml":
+        log.warning("AIPORT_ORT_PROVIDER=coreml but onnxruntime has no Core ML provider; using CPU")
+    return ["CPUExecutionProvider"]
 
 
 class _OnnxBackend:
-    """One shared onnxruntime InferenceSession behind a lock (CPU)."""
+    """One shared onnxruntime InferenceSession behind a lock (CPU or Core ML)."""
 
     name = "onnx"
+    input_size = IMG_SIZE
 
     def __init__(self):
         try:
@@ -295,19 +355,37 @@ class _OnnxBackend:
                 so.add_session_config_entry(key, "0")
             except Exception:
                 pass
-        self._session = ort.InferenceSession(self.model_path, so, providers=["CPUExecutionProvider"])
+        available = ort.get_available_providers()
+        fp16_input = True
+        if "CoreMLExecutionProvider" in available:
+            # Core ML's format depends on the input dtype; a CPU session reads it.
+            probe = ort.InferenceSession(self.model_path, so, providers=["CPUExecutionProvider"])
+            fp16_input = "float16" in probe.get_inputs()[0].type
+            del probe
+        providers = _onnx_providers(available, fp16_input)
+        try:
+            self._session = ort.InferenceSession(self.model_path, so, providers=providers)
+        except Exception:
+            if providers == ["CPUExecutionProvider"]:
+                raise
+            # Not every graph compiles for Core ML; CPU always works.
+            log.exception("Core ML session failed for %s; falling back to CPU", self.model_path)
+            self._session = ort.InferenceSession(self.model_path, so,
+                                                 providers=["CPUExecutionProvider"])
+        self.provider = self._session.get_providers()[0]
         inp = self._session.get_inputs()[0]
         self._input_name = inp.name
         # Ultralytics release ONNX is fp16; honour the graph's input dtype.
         self._in_dtype = np.float16 if "float16" in inp.type else np.float32
-        shapes = [o.shape for o in self._session.get_outputs()]
-        # Single [1,N,5+classes] output => Ultralytics; else raw heads.
-        if len(shapes) == 1 and len(shapes[0]) == 3 and shapes[0][-1] == 5 + len(self._labels):
-            self._mode = "ultralytics"
-        else:
-            self._mode = "raw_heads"
+        # NCHW input; a fixed H/W (e.g. 320 for yolov9-s-320) is the size frames go in at.
+        shape = list(getattr(inp, "shape", []) or [])
+        if len(shape) == 4 and all(isinstance(v, int) and v > 0 for v in shape[2:]):
+            self.input_size = (shape[3], shape[2])
+        self._mode = _layout([o.shape for o in self._session.get_outputs()], len(self._labels))
 
     def raw(self, frame_rgb):
+        if (frame_rgb.shape[1], frame_rgb.shape[0]) != self.input_size:
+            frame_rgb = _resize(frame_rgb, self.input_size)
         # NHWC uint8 -> NCHW float [1,3,H,W], scaled to [0,1].
         chw = frame_rgb.transpose(2, 0, 1).astype(np.float32) / 255.0
         batched = chw[np.newaxis, ...].astype(self._in_dtype)
@@ -315,39 +393,48 @@ class _OnnxBackend:
             outputs = self._session.run(None, {self._input_name: batched})
         return [np.asarray(o, dtype=np.float32) for o in outputs]
 
-    def boxes(self, raw_outputs):
+    def boxes(self, raw_outputs, thresh=OBJ_THRESH):
         if self._mode == "ultralytics":
-            return _post_process_ultralytics(raw_outputs[0])
-        return _post_process(raw_outputs, self._anchors)
+            return _post_process_ultralytics(raw_outputs[0], thresh)
+        if self._mode == "anchor_free":
+            return _post_process_anchor_free(raw_outputs[0], thresh)
+        return _post_process(raw_outputs, self._anchors, thresh)
 
 
 class Detector:
-    """YOLOv5 detection with the rknn (NPU) or onnx (CPU) backend selected at
+    """YOLO detection with the rknn (NPU) or onnx (CPU) backend selected at
     construction. ``detect()`` output is identical for both."""
 
     def __init__(self):
         backend = _resolve_backend()
         self._labels = _load_labels()
         self._backend = _RknnBackend() if backend == "rknn" else _OnnxBackend()
-        log.info("Detector initialized (backend=%s, model=%s)",
-                 self._backend.name, self._backend.model_path)
+        log.info("Detector initialized (backend=%s, provider=%s, model=%s, layout=%s, input=%dx%d)",
+                 self._backend.name, getattr(self._backend, "provider", "-"),
+                 self._backend.model_path, getattr(self._backend, "_mode", "rknn"),
+                 *getattr(self._backend, "input_size", IMG_SIZE))
 
-    def detect(self, frame_rgb):
+    def detect(self, frame_rgb, min_score=OBJ_THRESH):
         """frame_rgb: HxWx3 uint8 RGB, already resized to IMG_SIZE (plain
         stretch, no letterboxing). Returns {"objectType", "score", "box":
         (x1,y1,x2,y2)} in IMG_SIZE pixel space, score-descending, mapped to
-        AI Port's person/vehicle/animal vocabulary."""
+        AI Port's person/vehicle/animal vocabulary; boxes down to min_score."""
         raw = self._backend.raw(frame_rgb)
-        boxes, classes, scores = self._backend.boxes(raw)
+        boxes, classes, scores = self._backend.boxes(raw, min_score)
         if boxes is None:
             return []
+        # Boxes come back in the model's input space; report them in the frame's.
+        in_w, in_h = getattr(self._backend, "input_size", IMG_SIZE)
+        sx, sy = frame_rgb.shape[1] / in_w, frame_rgb.shape[0] / in_h
         results = []
         for box, cls, score in zip(boxes, classes, scores):
             coco_label = self._labels[int(cls)] if int(cls) < len(self._labels) else None
             mapped = _map_object_type(coco_label) if coco_label else None
             if not mapped:
                 continue
-            x1, y1, x2, y2 = [float(v) for v in box]
-            results.append({"objectType": mapped, "score": float(score), "box": (x1, y1, x2, y2)})
+            x1, y1, x2, y2 = (float(box[0]) * sx, float(box[1]) * sy,
+                              float(box[2]) * sx, float(box[3]) * sy)
+            results.append({"objectType": mapped, "label": coco_label.strip(),
+                            "score": float(score), "box": (x1, y1, x2, y2)})
         results.sort(key=lambda r: -r["score"])
         return results

@@ -95,6 +95,7 @@ paired, the console hands the host an RTSP URL on its own internal relay
 | x86_64 server / PC | amd64 | Verified | `docker/` CPU image; no NPU |
 | Raspberry Pi 4 | BCM2711 | Verified | `docker/` image; H.264 hardware decode bare-metal only |
 | Raspberry Pi 5 | BCM2712 | Untested | CPU image; **no H.264 hardware decoder** (software decode) |
+| Mac (Apple silicon) | M-series | Verified | Bare metal only (Docker Desktop has no LAN L2); `onnxruntime` on the Neural Engine (Core ML) |
 
 ## Features
 
@@ -229,6 +230,37 @@ KillMode=control-group
 WantedBy=multi-user.target
 ```
 
+### macOS (bare metal)
+
+Verified on an Apple-silicon Mac (adopted, 3 cameras paired, detections with thumbnails).
+Run it on the host: Docker Desktop's VM can't do the L2 discovery the console needs.
+With no `/sys`, `/proc` or `ip`, `config.py` finds the interface, MAC and IP through
+`route`, `networksetup` and `ifconfig` (`--iface en0` to pick one explicitly).
+The detector runs on the Neural Engine through onnxruntime's Core ML provider
+(~6.5 ms vs ~37 ms per frame on CPU, M1 Pro); `AIPORT_ORT_PROVIDER=cpu` forces CPU.
+
+```bash
+brew install ffmpeg
+python3 -m venv venv
+venv/bin/pip install -r piport/requirements.txt onnxruntime
+venv/bin/pip install fast-alpr opencv-python-headless      # optional: plates + faces (enrich.py)
+venv/bin/python scripts/fetch_models.py                    # downloads yolov5n.onnx
+venv/bin/python scripts/fetch_models.py --face-models-only # optional: YuNet/SFace face models
+$EDITOR piport/aiport.cfg                                   # set [console] host + device_id
+sudo caffeinate -is venv/bin/python piport/run_all.py --iface en0 --state-dir ~/.piport-state
+```
+
+- `caffeinate -is` stops the Mac sleeping while it runs (a sleeping Mac drops off the console).
+- `--iface` is the default-route interface (`route -n get default`); the MAC is derived from it,
+  so each Mac gets its own.
+- **Every AI Port needs its own, stable `device_id`.** The default in `aiport.cfg` is shared, so on
+  a second machine set a fresh one once (e.g. `uuidgen | tr A-Z a-z`) in `aiport.cfg`, or pass the
+  same `--device-id` on every start; changing it makes Protect see a different device.
+- A new machine (empty `--state-dir`) appears in Protect as a new "AI Port": adopt it and pair
+  cameras to it. Adoption state lives in the state dir, so keep it across restarts.
+- Without the optional enrichment packages it runs person/vehicle/animal only; plate models
+  download to `~/.cache` on the first plate read.
+
 ### Manual install
 
 ```bash
@@ -261,7 +293,9 @@ reproducible, they are not committed; `scripts/fetch_models.py` downloads them:
 | anchors, COCO labels, bus.jpg, calibration subset | RKNN conversion | <https://github.com/airockchip/rknn_model_zoo> (tag `v2.3.2`) |
 
 The CPU backend uses Ultralytics `yolov5n.onnx` and still accepts the Rockchip
-`yolov5s_relu.onnx` via `AIPORT_MODEL_PATH` (both layouts are auto-detected). The
+`yolov5s_relu.onnx` via `AIPORT_MODEL_PATH`, and anchor-free YOLOv8/v9 exports such as
+Frigate's `yolov9-s-320.onnx` (all three layouts are auto-detected; the input size is read
+from the model). The
 Dockerfile downloads and sha256-verifies the CPU model at build time.
 
 `yolov5s_relu.rknn` is produced on an x86_64 machine with `rknn-toolkit2`
@@ -300,8 +334,8 @@ Device identity, network mode and the console address live in
 | `[console] host` / `port` | — / `7442` | The Protect console to dial when not yet adopted |
 
 Detector/runtime environment overrides: `AIPORT_BACKEND`, `AIPORT_MODEL_PATH`,
-`AIPORT_OBJ_THRESH`, `AIPORT_HWDEC`, `AIPORT_ORT_INTRA_THREADS`,
-`AIPORT_MOTION_GATE` / `AIPORT_MOTION_GATE_THRESH` (see `piport/README.md`).
+`AIPORT_OBJ_THRESH`, `AIPORT_HWDEC`, `AIPORT_ORT_INTRA_THREADS`, `AIPORT_ORT_PROVIDER`, `AIPORT_TICK_S`, `AIPORT_DETECT_FPS`, `AIPORT_CONFIRM_MS`, `AIPORT_MISS_S`, `AIPORT_TRUE_THRESH`, `AIPORT_RESUME_S`, `AIPORT_BOX_DELAY_MS`, `AIPORT_LPR`, `AIPORT_FACE`,
+`AIPORT_MOTION_GATE` / `AIPORT_MOTION_THRESHOLD` / `AIPORT_MOTION_CONTOUR_AREA`, `AIPORT_REGIONS` / `AIPORT_DETECT_SIZE`, `AIPORT_TRACKER` (see `piport/README.md`).
 
 ## Verification
 
@@ -323,7 +357,9 @@ Detector/runtime environment overrides: `AIPORT_BACKEND`, `AIPORT_MODEL_PATH`,
 ## Roadmap / known limitations
 
 - **Known:** detection is stock YOLOv5 (person/vehicle/animal), not Ubiquiti's
-  classifier; face, license-plate and vehicle-classification are not implemented.
+  classifier. Vehicle type/colour, license plates and faces (`enrich.py`, optional) use
+  open models and a **best-guess wire format** not yet confirmed against Protect; faces
+  match a local gallery, not Protect's own face enrolment.
 - **Known:** on the Raspberry Pi 4 the H.264 hardware decoder is instance-limited
   and known-flaky; the Pi 5 has no H.264 hardware decoder at all. See
   `implementation.md` (CPU-x86 only) and `docker/README.md`.

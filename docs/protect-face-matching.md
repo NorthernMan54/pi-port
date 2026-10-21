@@ -122,3 +122,23 @@ On the face descriptor, and on its person (via `associatedFaceTrackerID`), send
   `topKCandidate` too.
 - The firmware's thresholds for each `recognitionAccuracy` level.
 - What the records after the instances are (not needed for matching).
+
+## What Protect does with it (2026-10-21, Protect's `ds.log`)
+
+A walk-by at 09:43 on Backyard showed the protocol works: when a face track carries
+`matchedId`, Protect logs `using camera matchedId=178 (no ai-feature-console call)` and
+`Face recognition → unifi-protect: group_id=178 name="Sean Gracey"`, and labels the event
+`group:face_178`, `groupType:known`. A face with only `faceEmbed` makes Protect run its own
+search (`ai-feature-console search_group`), which may attach an unknown face group.
+
+Two things stopped that event showing the name, both fixed:
+
+- **One face track per person.** Faces are read about once a second; as the person walked up,
+  their face grew from 56 to 92 px and moved further between reads than the track matcher
+  allows, and became face tracks 5, 7 and 8. Now a face always continues the face track of
+  the person whose box holds it (`face_tid`), a named person's match carries over to its face,
+  and `associatedFaceTrackerID` is the person's own face track.
+- **The embedding waits for a decision.** The first, unmatched embedding made Protect attach
+  unknown face group 50 a second before pi-port's match arrived. A face's `faceEmbed` is now
+  held out of enter/moving updates until the face is named or has had 2 fresh reads without a
+  match; the leave always carries it.

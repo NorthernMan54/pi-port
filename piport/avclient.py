@@ -1055,7 +1055,8 @@ def _enrich_detections(device_id, detections):
             for f in enricher.faces(img, [p["coord"] for p in people]):
                 face = {"objectType": "face", "score": f["score"], "coord": f["coord"],
                         "extra": {"name": f["name"], "tag": f["name"]},
-                        "frame": _snapshot_bytes.get(device_id), "size_px": f.get("size_px")}
+                        "frame": _snapshot_bytes.get(device_id), "size_px": f.get("size_px"),
+                        "fresh_read": True}
                 # A face under FACE_MATCH_MIN_PX is reported without its embedding: Protect
                 # enrols the embedding it's sent, and one from an 18 px face made a reference
                 # the same person later scored 0.299 against. It isn't matched either.
@@ -1083,7 +1084,7 @@ def _enrich_detections(device_id, detections):
                      e["objectType"], device_id, e["score"], e["extra"]["name"],
                      "faceEmbed" in e.get("scored", {}), e.get("size_px"))
     # A face DB match counts once per snapshot read, not on every tick that reuses it.
-    return [dict(e, extra=dict(e["extra"]),
+    return [dict(e, extra=dict(e["extra"]), fresh_read=fresh and e.get("fresh_read", False),
                  **({"scored": {k: v for k, v in e["scored"].items() if fresh or k != "match"}}
                     if "scored" in e else {}))
             for e in extra]
@@ -1193,6 +1194,8 @@ def _merge_extra(tr, d, device_id=None, tracker_id=None):
     tick that lacks them."""
     out = tr.setdefault("extra", {})
     out.update({k: v for k, v in (d.get("extra") or {}).items() if v not in ("", None)})
+    if d.get("fresh_read") and "faceEmbed" in (d.get("scored") or {}):
+        tr["embed_reads"] = tr.get("embed_reads", 0) + 1
     scores = tr.setdefault("extra_scores", {})
     for key, (value, score) in (d.get("scored") or {}).items():
         if key == "name" and tr.get("objectType") == "vehicle":
@@ -1544,12 +1547,26 @@ def _park(tr):
     tr["moved_ticks"] = 0
 
 
-def _track_args(tracker_id, tr):
+def _face_decided(tr):
+    """True once a face track is named, or has had FACE_MATCH_HITS fresh embedding reads."""
+    extra = tr.get("extra") or {}
+    return extra.get("matchedId") is not None or tr.get("embed_reads", 0) >= FACE_MATCH_HITS
+
+
+def _track_args(tracker_id, tr, hold_embed=True):
+    """Per-track arguments for _send_smart_detect_event. A face's embedding is held back until
+    the face is decided (live 09:43: Protect searched the first, unmatched embedding of a face
+    pi-port named a second later, and tagged the event with an unknown face group too); a
+    leave always carries it."""
     still = bool(tr.get("still"))
+    extra = tr.get("extra")
+    if hold_embed and tr["objectType"] == "face" and extra and "faceEmbed" in extra \
+            and not _face_decided(tr):
+        extra = {k: v for k, v in extra.items() if k != "faceEmbed"}
     return {"tracker_id": tracker_id, "object_type": tr["objectType"],
             "coord": tr.get("smooth") or tr["coord"],
             "confidence": tr["score"], "first_shown_ms": tr["first_shown_ms"],
-            "descriptor_extra": tr.get("extra"), "best": tr.get("best"),
+            "descriptor_extra": extra, "best": tr.get("best"),
             "still": still, "idle_since_ms": tr.get("still_since_ms") if still else None}
 
 
@@ -1592,7 +1609,7 @@ def _send_event_message(ws, device_id, edge_type, event_id, members, stationary=
     if not members:
         return
     members = sorted(members, key=lambda m: m[1]["objectType"] == "face")
-    args = [_track_args(tid, tr) for tid, tr in members]
+    args = [_track_args(tid, tr, hold_embed=edge_type != "leave") for tid, tr in members]
     try:
         _send_smart_detect_event(ws, device_id, edge_type=edge_type, event_id=event_id,
                                   stationary=stationary, also_leaving=args[1:], **args[0])
@@ -1622,14 +1639,74 @@ def _center_inside(inner, outer):
     return x <= cx <= x + w and y <= cy <= y + h
 
 
+# One face track per person (live 09:43 on Backyard: a face read once a second moved and grew
+# from 56 to 92 px between reads as its person walked up, and became face tracks 5, 7 and 8).
+# A face belongs to the person whose box holds its centre; it always continues that person's
+# face track (`face_tid`), however far it moved, and a named person's match carries over to it.
+def _face_owner(tracks, coord, boxes=None):
+    """tracker_id of the smallest person track whose box holds coord's centre, or None."""
+    boxes = boxes or {}
+    holders = [(tid, boxes.get(tid) or tr["coord"]) for tid, tr in tracks.items()
+               if tr["objectType"] == "person"
+               and _center_inside(coord, boxes.get(tid) or tr["coord"])]
+    if not holders:
+        return None
+    return min(holders, key=lambda h: h[1][2] * h[1][3])[0]
+
+
+def _match_faces_to_people(tracks, detections, matches, unclaimed):
+    """Re-point each face detection at its person's face track (matches/unclaimed in place)."""
+    boxes = {tid: detections[i]["coord"] for tid, i in matches.items()
+             if tracks.get(tid, {}).get("objectType") == "person"}
+    for idx, d in enumerate(detections):
+        if d["objectType"] != "face" or d.get("seeded"):
+            continue
+        owner = _face_owner(tracks, d["coord"], boxes)
+        fid = tracks.get(owner, {}).get("face_tid") if owner is not None else None
+        if fid not in tracks or tracks[fid]["objectType"] != "face":
+            continue
+        for tid in [t for t, i in matches.items() if i == idx and t != fid]:
+            del matches[tid]                       # another face track had taken it
+        displaced = matches.get(fid)
+        if displaced is not None and displaced != idx:
+            unclaimed.append(displaced)
+        matches[fid] = idx
+        if idx in unclaimed:
+            unclaimed.remove(idx)
+
+
+def _link_faces(tracks, device_id):
+    """Record each face track's person (and the person's face track), and give a face the
+    match its person already has."""
+    for fid, face in tracks.items():
+        if face["objectType"] != "face":
+            continue
+        pid = face.get("person_tid")
+        if pid not in tracks:
+            pid = _face_owner(tracks, face["coord"])
+            if pid is None:
+                continue
+            face["person_tid"] = pid
+        person = tracks[pid]
+        if person.get("face_tid") not in tracks:
+            person["face_tid"] = fid
+        pextra, fextra = person.get("extra") or {}, face.setdefault("extra", {})
+        if pextra.get("matchedId") is not None and fextra.get("matchedId") is None:
+            fextra["matchedId"], fextra["matchedName"] = pextra["matchedId"], pextra.get("matchedName")
+            log.info("face DB: face tracker_id=%s deviceID=%s takes its person tracker_id=%s's "
+                     "match %r", fid, device_id, pid, pextra.get("matchedName"))
+
+
 def _associate_faces(members):
-    """{person tracker_id: face tracker_id} for faces inside a person's box."""
+    """{person tracker_id: face tracker_id}: a person's own face track when it's a member,
+    else a face inside its box."""
     def box(tr):
         return (tr.get("best") or {}).get("coord") or tr["coord"]
     people = [(tid, tr) for tid, tr in members if tr["objectType"] == "person"]
-    out = {}
+    member_ids = {tid for tid, _ in members}
+    out = {tid: tr["face_tid"] for tid, tr in people if tr.get("face_tid") in member_ids}
     for fid, face in members:
-        if face["objectType"] != "face":
+        if face["objectType"] != "face" or fid in out.values():
             continue
         holders = [(tid, tr) for tid, tr in people
                    if tid not in out and _center_inside(box(face), box(tr))]
@@ -1999,6 +2076,7 @@ def _motion_tick(ws, device_id):
         else:
             matches, unclaimed = _builtin_match(tracks, detections)
             pending_ids = {}
+        _match_faces_to_people(tracks, detections, matches, unclaimed)
 
         for tracker_id, tr in list(tracks.items()):
             if tracker_id in matches:
@@ -2143,6 +2221,8 @@ def _motion_tick(ws, device_id):
                       "for deviceID=%s tracker_id=%s", d["objectType"], d["score"],
                       device_id, tracker_id)
             joining.append((tracker_id, tracks[tracker_id]))
+
+        _link_faces(tracks, device_id)
 
         # 2a. An unconfirmed track keeps each frame's box, sent back-dated when it confirms.
         stamp = _frame_time(device_id)

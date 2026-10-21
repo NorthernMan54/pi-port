@@ -421,6 +421,77 @@ class TestCameraEvent(Base):
                  sorted(x["smartDetectSnapshotType"] for x in p.get("smartDetectSnapshots", [])))
                 for fn, p in self.sent if fn == "EventSmartDetect"]
 
+    def face_tracks(self):
+        return {tid: tr for tid, tr in av._motion_state["D"]["tracks"].items()
+                if tr["objectType"] == "face"}
+
+    def test_walking_up_face_stays_one_face_track(self):
+        # Live 09:43 on Backyard: a face read once a second grew from 56 to 92 px and moved
+        # down and across between reads, and became face tracks 5, 7 and 8.
+        # face 20 -> 28 -> 36 units wide, its centre ~200 units further each read: past the
+        # nearest-match radius (3x its size + 30), as live
+        # (the person track itself stays one track: its boxes overlap read to read)
+        steps = [([400, 100, 300, 800], [420, 150, 20, 20]),
+                 ([380, 120, 330, 820], [600, 330, 28, 28]),
+                 ([350, 140, 360, 840], [420, 560, 36, 36])]
+        for person, face in steps:
+            self.tick(dict(self.PERSON, coord=person), dict(self.FACE, coord=face))
+        self.assertEqual(len(self.face_tracks()), 1)
+        (fid, face), = self.face_tracks().items()
+        person_tid = face["person_tid"]
+        self.assertEqual(av._motion_state["D"]["tracks"][person_tid]["face_tid"], fid)
+
+    def test_two_people_keep_their_own_faces(self):
+        a, b = dict(self.PERSON, coord=[100, 200, 200, 600]), dict(self.PERSON, coord=[600, 200, 200, 600])
+        fa, fb = dict(self.FACE, coord=[150, 220, 60, 60]), dict(self.FACE, coord=[650, 220, 60, 60])
+        self.tick(a, b, fa, fb)
+        self.tick(a, b, dict(fa, coord=[160, 230, 60, 60]), dict(fb, coord=[640, 230, 60, 60]))
+        faces = self.face_tracks()
+        self.assertEqual(len(faces), 2)
+        self.assertEqual(len({f["person_tid"] for f in faces.values()}), 2)
+
+    def test_named_person_names_its_face(self):
+        self.tick(self.PERSON, self.FACE)
+        tracks = av._motion_state["D"]["tracks"]
+        pid = next(t for t, tr in tracks.items() if tr["objectType"] == "person")
+        tracks[pid].setdefault("extra", {}).update({"matchedId": 178, "matchedName": "Sean"})
+        self.tick(self.PERSON, self.FACE)
+        (_, face), = self.face_tracks().items()
+        self.assertEqual((face["extra"]["matchedId"], face["extra"]["matchedName"]), (178, "Sean"))
+
+    def test_face_embedding_held_until_decided(self):
+        emb = [0.1] * 128
+        face = dict(self.FACE, scored={"faceEmbed": (emb, 0.9)}, fresh_read=True)
+        self.tick(self.PERSON, face)
+        def sent_embeds():
+            return [("faceEmbed" in d) for fn, p in self.sent if fn == "EventSmartDetect"
+                    for d in p["descriptors"] if d["objectType"] == "face"]
+        self.assertEqual(sent_embeds(), [False])       # one read: not decided yet
+        self.sent.clear()
+        self.tick(self.PERSON, face)                    # a second fresh read
+        self.assertEqual(sent_embeds(), [True])
+        self.sent.clear()
+        stale = dict(face, fresh_read=False)            # reused snapshot: not a new read
+        tracks = av._motion_state["D"]["tracks"]
+        (fid, ftr), = self.face_tracks().items()
+        self.assertEqual(ftr["embed_reads"], 2)
+        self.tick(self.PERSON, stale)
+        self.assertEqual(ftr["embed_reads"], 2)
+
+    def test_named_face_sends_its_embedding_at_once(self):
+        tr = {"objectType": "face", "score": 0.9, "coord": [0, 0, 1, 1], "first_shown_ms": 0,
+              "extra": {"faceEmbed": [0.1], "matchedId": 5}}
+        self.assertIn("faceEmbed", av._track_args(1, tr)["descriptor_extra"])
+        tr["extra"].pop("matchedId")
+        self.assertNotIn("faceEmbed", av._track_args(1, tr)["descriptor_extra"])
+        self.assertIn("faceEmbed", av._track_args(1, tr, hold_embed=False)["descriptor_extra"])
+
+    def test_person_points_at_its_own_face_track(self):
+        person = {"objectType": "person", "coord": [0, 0, 500, 1000], "face_tid": 8}
+        old = {"objectType": "face", "coord": [100, 100, 50, 50]}
+        own = {"objectType": "face", "coord": [300, 100, 50, 50]}
+        self.assertEqual(av._associate_faces([(4, person), (5, old), (8, own)]), {4: 8})
+
     def test_person_and_face_one_event(self):
         self.tick(self.PERSON, self.FACE)
         self.tick(self.PERSON, self.FACE)

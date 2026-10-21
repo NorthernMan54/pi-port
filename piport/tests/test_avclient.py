@@ -1475,6 +1475,43 @@ class TestFrameStats(Base):
         self.assertEqual(av._frame_stats["FS"]["analysed"], 0)
 
 
+class TestPollLoop(Base):
+    """The camera loop wakes on each new frame (live 12:43: a fixed 0.1 s wait before each
+    pass analysed only 7-8 of 10 frames a second)."""
+
+    def start(self, ticks):
+        import time as _t
+        patcher = mock.patch.object(av, "_motion_tick",
+                                    lambda ws, dev: (ticks.append(av._latest_frame_seq.get(dev)),
+                                                     _t.sleep(0.01)))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        av._start_motion_detector(None, "PL", "ip", 1, "uri", preserve_tracks=True)
+        self.addCleanup(av._stop_motion_detector, "PL", True)
+        self.addCleanup(av._latest_frame_time.pop, "PL", None)
+        self.addCleanup(av._latest_frame_seq.pop, "PL", None)
+
+    def test_every_frame_is_analysed(self):
+        import time as _t
+        ticks = []
+        self.start(ticks)
+        for seq in range(1, 21):                      # 20 frames, 40 ms apart
+            with av._frame_cond:
+                av._latest_frame_seq["PL"] = seq
+                av._latest_frame_time["PL"] = (1_000_000 + seq, seq)
+                av._frame_cond.notify_all()
+            _t.sleep(0.04)
+        _t.sleep(0.1)
+        self.assertEqual(sorted(set(t for t in ticks if t)), list(range(1, 21)))
+
+    def test_ticks_continue_without_a_stream(self):
+        import time as _t
+        ticks = []
+        self.start(ticks)
+        _t.sleep(0.55)                                # no frames at all
+        self.assertGreaterEqual(len(ticks), 3)        # ~every DETECT_INTERVAL_S
+
+
 class TestBoxDelay(Base):
     """AIPORT_BOX_DELAY_MS back-dates frame-describing timestamps per camera."""
 

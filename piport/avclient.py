@@ -340,7 +340,7 @@ _latest_frame_time = {}
 # event time describes that frame, not the moment the event is sent.
 _analysed_frame_time = {}
 _frame_lock = threading.Lock()
-_frame_cond = threading.Condition(_frame_lock)  # notified when a frame JPEG arrives
+_frame_cond = threading.Condition(_frame_lock)  # notified when a frame or its JPEG arrives
 FRAME_JPEG_KEEP_S = 2.0
 FRAME_JPEG_WAIT_S = 0.5  # how long a detection waits for its frame's JPEG
 _stream_dims = {}    # deviceID -> (width, height) of the real camera stream
@@ -639,10 +639,11 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
                 stamp = _now_ms()
                 frame = np.frombuffer(buf, dtype=np.uint8).reshape((det_h, det_w, 3))
                 seq += 1
-                with _frame_lock:
+                with _frame_cond:
                     _latest_frame[device_id] = frame
                     _latest_frame_seq[device_id] = seq
                     _latest_frame_time[device_id] = stamp
+                    _frame_cond.notify_all()   # wakes the camera's poll loop
         except Exception:
             log.exception("frame reader crashed for deviceID=%s", device_id)
         rc = proc.wait()
@@ -2548,14 +2549,23 @@ def _start_motion_detector(ws, device_id, ip, port, uri, preserve_tracks=False):
 
     def _poll_loop():
         last_stamp = None
-        while not stop_event.wait(DETECT_INTERVAL_S):
+        while not stop_event.is_set():
+            # Wake on each new frame (live 12:43: a fixed 0.1 s wait before each 11-20 ms pass
+            # analysed only 7-8 of 10 frames a second). With no stream there's no frame: the
+            # timeout keeps ticking every DETECT_INTERVAL_S so tracks still close.
+            with _frame_cond:
+                _frame_cond.wait_for(
+                    lambda: stop_event.is_set()
+                    or _latest_frame_time.get(device_id) != last_stamp,
+                    timeout=DETECT_INTERVAL_S)
+                stamp = _latest_frame_time.get(device_id)
+            if stop_event.is_set():
+                return
             # Superseded by a newer loop -> this one must not touch shared state.
             if _motion_poll_stop.get(device_id) is not stop_event:
                 log.info("motion poll loop superseded for deviceID=%s -- exiting", device_id)
                 return
-            # Analyse each frame once: with no new frame since the last pass, wait.
-            with _frame_lock:
-                stamp = _latest_frame_time.get(device_id)
+            # Analyse each frame once: with no new frame since the last pass, wait again.
             if stamp is not None and stamp == last_stamp:
                 continue
             last_stamp = stamp

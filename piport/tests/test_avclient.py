@@ -543,6 +543,29 @@ class TestCameraEvent(Base):
         self.assertEqual(len(faces), 2)
         self.assertEqual(len({f["person_tid"] for f in faces.values()}), 2)
 
+    # Live 13:33:38 on Driveway: two people crossing; her face sat low in my smaller box.
+    ME = {"objectType": "person", "score": 0.9, "coord": [517, 235, 91, 414]}
+    HER = {"objectType": "person", "score": 0.9, "coord": [447, 511, 136, 467]}
+    HER_FACE = {"objectType": "face", "score": 0.9, "coord": [528, 512, 35, 86]}
+
+    def person_of_face(self):
+        (_, face), = self.face_tracks().items()
+        return av._motion_state["D"]["tracks"][face["person_tid"]]["coord"]
+
+    def test_face_goes_to_the_person_whose_crop_found_it(self):
+        self.tick(self.ME, self.HER, dict(self.HER_FACE, parent_coord=self.HER["coord"]))
+        self.assertEqual(self.person_of_face(), self.HER["coord"])
+
+    def test_face_without_its_finder_goes_to_the_head_it_is_at(self):
+        self.tick(self.ME, self.HER, self.HER_FACE)
+        self.assertEqual(self.person_of_face(), self.HER["coord"])
+
+    def test_face_found_twice_keeps_the_read_at_its_finders_head(self):
+        low = dict(self.HER_FACE, score=0.95, parent_coord=self.ME["coord"])
+        high = dict(self.HER_FACE, coord=[529, 513, 35, 86], parent_coord=self.HER["coord"])
+        self.tick(self.ME, self.HER, low, high)
+        self.assertEqual(self.person_of_face(), self.HER["coord"])
+
     def test_named_person_names_its_face(self):
         self.tick(self.PERSON, self.FACE)
         tracks = av._motion_state["D"]["tracks"]

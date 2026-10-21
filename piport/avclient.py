@@ -1107,7 +1107,7 @@ def _enrich_detections(device_id, detections):
                 face = {"objectType": "face", "score": f["score"], "coord": f["coord"],
                         "extra": {"name": f["name"], "tag": f["name"]},
                         "frame": _snapshot_bytes.get(device_id), "size_px": f.get("size_px"),
-                        "fresh_read": True}
+                        "fresh_read": True, "parent_coord": list(people[f["parent"]]["coord"])}
                 # A face under FACE_MATCH_MIN_PX is reported without its embedding: Protect
                 # enrols the embedding it's sent, and one from an 18 px face made a reference
                 # the same person later scored 0.299 against. It isn't matched either.
@@ -1743,17 +1743,41 @@ def _center_inside(inner, outer):
 # from 56 to 92 px between reads as its person walked up, and became face tracks 5, 7 and 8).
 # A face belongs to the person whose box holds its centre; it always continues that person's
 # face track (`face_tid`), however far it moved, and a named person's match carries over to it.
-def _face_owner(tracks, coord, boxes=None):
-    """tracker_id of the smallest person track whose box holds coord's centre; failing that,
-    the only moving person in view (faces come from the once-a-second snapshot, so a face can
-    trail a fast-moving person's live box: live 10:40 on Backyard a face fell just outside its
-    person's box and opened a second face track); else None."""
+# A face whose centre is in the top FACE_HEAD_FRACTION of a person box is at that person's head.
+FACE_HEAD_FRACTION = 0.4
+
+
+def _face_depth(coord, box):
+    """How far down person box `box` the centre of face `coord` is (0 top, 1 bottom)."""
+    return (coord[1] + coord[3] / 2 - box[1]) / max(1.0, box[3])
+
+
+# A face's finder is the person track whose box overlaps the box it was found in by this much.
+FACE_FINDER_IOU = 0.3
+
+
+def _face_owner(tracks, coord, boxes=None, parent_coord=None):
+    """tracker_id of the person a face belongs to. First the person whose crop found it
+    (parent_coord: that person's box when it was read); else the person track whose box holds
+    coord's centre nearest its top (the smallest such box when the face is at more than one
+    person's head); failing that, the only moving person in view (faces come from the
+    once-a-second snapshot, so a face can trail a fast-moving person's live box: live 10:40 on
+    Backyard a face fell just outside its person's box and opened a second face track); else
+    None. Live 13:33 on Driveway two people crossed: a face found in her crop sat low in my
+    smaller box, went to me as the smallest box holding it, and its crop became my thumbnail."""
     boxes = boxes or {}
     people = [(tid, boxes.get(tid) or tr["coord"]) for tid, tr in tracks.items()
               if tr["objectType"] == "person"]
+    if parent_coord:
+        tid, box = max(people, key=lambda p: _iou(p[1], parent_coord), default=(None, None))
+        if tid is not None and _iou(box, parent_coord) >= FACE_FINDER_IOU:
+            return tid
     holders = [(tid, box) for tid, box in people if _center_inside(coord, box)]
     if holders:
-        return min(holders, key=lambda h: h[1][2] * h[1][3])[0]
+        heads = [h for h in holders if _face_depth(coord, h[1]) <= FACE_HEAD_FRACTION]
+        if heads:
+            return min(heads, key=lambda h: h[1][2] * h[1][3])[0]
+        return min(holders, key=lambda h: _face_depth(coord, h[1]))[0]
     moving = [tid for tid, _ in people if not tracks[tid].get("stationary_coord")]
     return moving[0] if len(moving) == 1 else None
 
@@ -1763,7 +1787,12 @@ def _match_faces_to_people(tracks, detections, matches, unclaimed):
     boxes = {tid: detections[i]["coord"] for tid, i in matches.items()
              if tracks.get(tid, {}).get("objectType") == "person"}
     claimed, kept = set(), []
-    for idx, d in sorted(enumerate(detections), key=lambda e: -e[1]["score"]):
+    # The same face can turn up in two people's crops (each crop has a margin): the read at
+    # its finder's head comes first, so it's the one kept.
+    def at_head(d):
+        return (d.get("parent_coord") is None
+                or _face_depth(d["coord"], d["parent_coord"]) <= FACE_HEAD_FRACTION)
+    for idx, d in sorted(enumerate(detections), key=lambda e: (not at_head(e[1]), -e[1]["score"])):
         if d["objectType"] != "face" or d.get("seeded"):
             continue
         if any(_iou(d["coord"], k) >= 0.5 for k in kept):  # the same face found twice
@@ -1773,7 +1802,7 @@ def _match_faces_to_people(tracks, detections, matches, unclaimed):
                 unclaimed.remove(idx)
             continue
         kept.append(d["coord"])
-        owner = _face_owner(tracks, d["coord"], boxes)
+        owner = _face_owner(tracks, d["coord"], boxes, d.get("parent_coord"))
         if owner is None:
             continue
         if owner in claimed:  # its person already has a face from this read

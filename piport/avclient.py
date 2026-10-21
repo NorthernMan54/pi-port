@@ -975,12 +975,35 @@ def _save_face_crop(device_id, tracker_id, tr):
                       tracker_id)
 
 
+# Thumbnail choice, as Frigate's is_better_thumbnail (frigate/util/image.py, MIT): a frame cut
+# off by the picture's edge never replaces one that isn't; otherwise a frame wins with a score
+# over 5% higher or a box over 10% larger. Live 12:00 at the doorbell the top-scoring frame was a
+# shoulder at the lens's edge. Unlike Frigate, a whole frame always replaces a cut-off one.
+EDGE_MARGIN = 3  # of 1000
+
+
+def _on_edge(coord):
+    x, y, w, h = coord
+    e = CAMERA_COORD_END - EDGE_MARGIN
+    return x <= EDGE_MARGIN or y <= EDGE_MARGIN or x + w >= e or y + h >= e
+
+
+def _better_thumbnail(best, d):
+    new_edge, cur_edge = _on_edge(d["coord"]), _on_edge(best["coord"])
+    if new_edge and not cur_edge:
+        return False
+    if cur_edge and not new_edge:
+        return True
+    area = lambda c: c[2] * c[3]  # noqa: E731
+    return d["score"] > best["score"] + 0.05 or area(d["coord"]) > 1.1 * area(best["coord"])
+
+
 def _capture_best(device_id, tr, d):
     """Keep the track's best-scoring moment: the full-res JPEG, the box and the
     time. On leave the thumbnails come from it, not from the frame several seconds after
     the object was last seen (which, for a face, no longer contains it)."""
     best = tr.get("best")
-    if d.get("seeded") or (best and d["score"] < best["score"]):
+    if d.get("seeded") or (best and not _better_thumbnail(best, d)):
         return
     mtime, data = d.get("frame") or _read_snapshot(device_id)
     if data is None:

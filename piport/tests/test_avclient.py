@@ -356,11 +356,28 @@ class TestBestFrame(Base):
 
     def test_capture_keeps_best_score(self):
         tr = {}
-        av._capture_best("D", tr, {"score": 0.8, "coord": [1, 2, 3, 4], "frame": (1, b"a")})
-        av._capture_best("D", tr, {"score": 0.6, "coord": [5, 6, 7, 8], "frame": (2, b"b")})
-        self.assertEqual((tr["best"]["jpeg"], tr["best"]["coord"]), (b"a", [1, 2, 3, 4]))
-        av._capture_best("D", tr, {"score": 0.9, "coord": [5, 6, 7, 8], "frame": (2, b"b")})
+        av._capture_best("D", tr, {"score": 0.8, "coord": [100, 200, 100, 300], "frame": (1, b"a")})
+        av._capture_best("D", tr, {"score": 0.6, "coord": [120, 200, 100, 300], "frame": (2, b"b")})
+        self.assertEqual((tr["best"]["jpeg"], tr["best"]["coord"]), (b"a", [100, 200, 100, 300]))
+        av._capture_best("D", tr, {"score": 0.9, "coord": [120, 200, 100, 300], "frame": (2, b"b")})
         self.assertEqual(tr["best"]["jpeg"], b"b")
+
+    def test_capture_prefers_a_larger_box(self):
+        tr = {}
+        av._capture_best("D", tr, {"score": 0.8, "coord": [100, 200, 100, 300], "frame": (1, b"a")})
+        av._capture_best("D", tr, {"score": 0.78, "coord": [100, 200, 120, 330], "frame": (2, b"b")})
+        self.assertEqual(tr["best"]["jpeg"], b"b")            # 32% larger, score about the same
+
+    def test_capture_avoids_a_box_cut_off_by_the_edge(self):
+        # Live 12:00 at the doorbell: the top-scoring frame was a shoulder at the lens's edge.
+        tr = {}
+        av._capture_best("D", tr, {"score": 0.80, "coord": [300, 230, 240, 740], "frame": (1, b"whole")})
+        av._capture_best("D", tr, {"score": 0.95, "coord": [2, 219, 637, 741], "frame": (2, b"shoulder")})
+        self.assertEqual(tr["best"]["jpeg"], b"whole")
+        tr = {}
+        av._capture_best("D", tr, {"score": 0.95, "coord": [2, 219, 637, 741], "frame": (2, b"shoulder")})
+        av._capture_best("D", tr, {"score": 0.70, "coord": [300, 230, 240, 740], "frame": (1, b"whole")})
+        self.assertEqual(tr["best"]["jpeg"], b"whole")         # a whole frame replaces a cut-off one
 
     def test_jpeg_bytes_bounded(self):
         for i in range(av.BEST_FRAME_RECORDS_MAX + 5):

@@ -6,6 +6,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -64,6 +65,53 @@ class TestResolveIface(unittest.TestCase):
         self.assertIsInstance(config.resolve_parent_iface({"parent_iface": "", "iface": ""}), str)
 
 
+class TestBsdFallbacks(unittest.TestCase):
+    """macOS/BSD has no /sys, /proc or `ip`: the interface, MAC and IP come
+    from `route`, `networksetup` and `ifconfig` instead (stubbed here)."""
+
+    IFCONFIG = ("en0: flags=8863<UP,BROADCAST,RUNNING> mtu 1500\n"
+                "\tether c8:89:f3:d4:c3:cd\n"
+                "\tinet6 fe80::1%en0 prefixlen 64 scopeid 0xe\n"
+                "\tinet 192.0.2.10 netmask 0xffffff00 broadcast 192.0.2.255\n")
+
+    def _outputs(self, **by_cmd):
+        return lambda cmd: by_cmd.get(cmd[0], "")
+
+    def test_default_iface_from_route(self):
+        route = "   route to: default\ndestination: default\n  interface: en0\n"
+        with mock.patch("config.open", side_effect=OSError, create=True), \
+                mock.patch("config.os.listdir", side_effect=OSError), \
+                mock.patch("config._run", self._outputs(route=route)):
+            self.assertEqual(config._default_iface(), "en0")
+
+    def test_mac_prefers_networksetup(self):
+        # macOS masks ifconfig's ether as 02:00:00:00:00:00 for most processes.
+        masked = self.IFCONFIG.replace("c8:89:f3:d4:c3:cd", "02:00:00:00:00:00")
+        ns = "Ethernet Address: c8:89:f3:d4:c3:cd (Device: en0)\n"
+        with mock.patch("config._run", self._outputs(networksetup=ns, ifconfig=masked)):
+            self.assertEqual(config._iface_mac("nosuchif0"), "C889F3D4C3CD")
+
+    def test_mac_from_ifconfig(self):
+        with mock.patch("config._run", self._outputs(ifconfig=self.IFCONFIG)):
+            self.assertEqual(config._iface_mac("nosuchif0"), "C889F3D4C3CD")
+
+    def test_masked_mac_is_unknown(self):
+        masked = self.IFCONFIG.replace("c8:89:f3:d4:c3:cd", "02:00:00:00:00:00")
+        with mock.patch("config._run", self._outputs(ifconfig=masked)):
+            self.assertEqual(config._iface_mac("nosuchif0"), "")
+
+    def test_ip_from_ifconfig(self):
+        with mock.patch("config.subprocess.run", side_effect=OSError), \
+                mock.patch("config._run", self._outputs(ifconfig=self.IFCONFIG)):
+            self.assertEqual(config._iface_ip("en0"), "192.0.2.10")
+
+    def test_busybox_inet_addr_rejected(self):
+        busybox = "eth0  Link encap:Ethernet\n  inet addr:10.0.0.5  Bcast:10.0.0.255\n"
+        with mock.patch("config.subprocess.run", side_effect=OSError), \
+                mock.patch("config._run", self._outputs(ifconfig=busybox)):
+            self.assertIsNone(config._iface_ip("eth0"))
+
+
 class TestStreamDir(unittest.TestCase):
     def test_default_is_ram_backed(self):
         d = config.stream_dir()
@@ -77,9 +125,13 @@ class TestStreamDir(unittest.TestCase):
         self.assertNotEqual(a, b)
         self.assertEqual(config.stream_dir("/srv/x/instances/main"), a)
         # relative vs absolute of the same state dir must agree
-        os.chdir("/tmp")
+        # realpath: /tmp is a symlink to /private/tmp on macOS
+        tmp = os.path.realpath(tempfile.gettempdir())
+        old_cwd = os.getcwd()
+        os.chdir(tmp)
+        self.addCleanup(os.chdir, old_cwd)
         self.assertEqual(config.stream_dir("instances/main"),
-                         config.stream_dir("/tmp/instances/main"))
+                         config.stream_dir(os.path.join(tmp, "instances/main")))
 
     def test_tmpfs_base_writable(self):
         self.assertTrue(os.path.isdir(config._tmpfs_base()))
@@ -127,6 +179,22 @@ class TestLoadConfig(unittest.TestCase):
         finally:
             os.environ.pop("AIPORT_HOSTNAME", None)
             os.unlink(path)
+
+    def test_env_overrides_model_identity(self):
+        # sysid, type, discovery platform and guid from the env.
+        env = {"AIPORT_SYSID": "0x1234", "AIPORT_PLATFORM": "Test Type",
+               "AIPORT_DISCOVERY_PLATFORM": "Test SKU",
+               "AIPORT_GUID": "11111111-2222-3333-4444-555555555555"}
+        for k in env:
+            saved = os.environ.get(k)
+            self.addCleanup(lambda k=k, saved=saved: os.environ.__setitem__(k, saved)
+                            if saved is not None else os.environ.pop(k, None))
+        os.environ.update(env)
+        cfg = config.load_config("/nonexistent/aiport.cfg")
+        self.assertEqual(config.sysid_int(cfg), 0x1234)
+        self.assertEqual(cfg["platform"], "Test Type")
+        self.assertEqual(cfg["discovery_platform"], "Test SKU")
+        self.assertEqual(cfg["guid"], env["AIPORT_GUID"])
 
 
 class TestFirmwarePin(unittest.TestCase):

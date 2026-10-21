@@ -169,6 +169,11 @@ decoder** (HEVC only), so it always software-decodes H.264 -- and its CPU does t
 faster than the Pi 4's hardware block. See `docker/README.md` and `implementation.md`
 for the measured numbers and the known Pi 4 decoder limits.
 
+**Stalled pulls restart themselves.** ffmpeg gives up on an RTSP connection that sends
+nothing for `AIPORT_RTSP_TIMEOUT_S` (15 s by default; `-timeout`, or `-stimeout` before
+ffmpeg 5), and a pull that has delivered no frame for `AIPORT_STREAM_STALL_S` (30 s) is
+killed. Either way it restarts like any pull that exits on its own.
+
 The CPU detector disables onnxruntime's thread **spin-wait** (it burned ~3 extra cores
 alongside ffmpeg on a Pi 4) and caps threads with `AIPORT_ORT_INTRA_THREADS` (e.g. `2`
 on a Pi 4; unset = onnxruntime's default). `AIPORT_OBJ_THRESH` (default 0.5) is the score every

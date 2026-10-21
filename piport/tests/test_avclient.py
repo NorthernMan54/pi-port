@@ -1822,6 +1822,77 @@ class TestStreamClocks(Base):
         self.assertNotIn("D", av._analysed_frame_time)
 
 
+class FakeProc:
+    def __init__(self, rc=None):
+        self.rc, self.pid, self.killed = rc, 4242, False
+
+    def poll(self):
+        return self.rc
+
+    def kill(self):
+        self.killed = True
+
+
+class TestStalledPulls(Base):
+    # Live 17:28: a pull sat 70 min on a dead relay connection at 0% CPU, never exiting.
+    START = 1_000_000
+
+    def pull(self, rc=None, last_frame=None):
+        proc = FakeProc(rc)
+        av._active_streams["D"] = proc
+        av._stream_started_monotonic_ms["D"] = self.START
+        if last_frame is not None:
+            av._latest_frame_time["D"] = (0, last_frame)
+        self.addCleanup(av._latest_frame_time.pop, "D", None)
+        return proc
+
+    def test_a_pull_with_no_frame_for_30_s_is_killed(self):
+        proc = self.pull(last_frame=self.START + 5_000)
+        self.assertEqual(av._restart_stalled_pulls(self.START + 34_000), [])
+        self.assertEqual(av._restart_stalled_pulls(self.START + 35_000), ["D"])
+        self.assertTrue(proc.killed)
+
+    def test_a_new_pull_gets_30_s_for_its_first_frame(self):
+        proc = self.pull()
+        self.assertEqual(av._restart_stalled_pulls(self.START + 29_000), [])
+        self.assertEqual(av._restart_stalled_pulls(self.START + 30_000), ["D"])
+        self.assertTrue(proc.killed)
+
+    def test_a_pull_that_already_exited_is_left_to_its_reader(self):
+        proc = self.pull(rc=0, last_frame=self.START)
+        self.assertEqual(av._restart_stalled_pulls(self.START + 60_000), [])
+        self.assertFalse(proc.killed)
+
+    def test_a_streaming_pull_is_left_alone(self):
+        proc = self.pull(last_frame=self.START + 59_900)
+        self.assertEqual(av._restart_stalled_pulls(self.START + 60_000), [])
+        self.assertFalse(proc.killed)
+
+
+class TestRtspTimeout(Base):
+    def args_for(self, help_text):
+        result = subprocess.CompletedProcess([], 0, stdout=help_text)
+        with mock.patch.object(av, "_rtsp_timeout_flag", []), \
+                mock.patch.object(av.subprocess, "run", return_value=result):
+            return av._rtsp_timeout_args()
+
+    def test_ffmpeg_5_and_later_use_timeout(self):
+        self.assertEqual(self.args_for(
+            "  -listen_timeout <int> .D... set maximum timeout (in seconds) to wait for incoming"
+            " connections\n  -timeout <int64> .D... set timeout (in microseconds) of socket I/O"
+            " operations\n"), ["-timeout", "15000000"])
+
+    def test_older_ffmpeg_uses_stimeout_not_the_listen_timeout(self):
+        self.assertEqual(self.args_for(
+            "  -timeout <int> .D... set maximum timeout (in seconds) to wait for incoming"
+            " connections (-1 is infinite, imply flag listen)\n  -stimeout <int> .D... set"
+            " timeout (in microseconds) of socket TCP I/O operations\n"),
+            ["-stimeout", "15000000"])
+
+    def test_no_known_option_means_no_timeout(self):
+        self.assertEqual(self.args_for(""), [])
+
+
 class TestDetectionRate(Base):
     def test_ticks_count_analysed_frames(self):
         self.assertEqual(av._ticks(3), max(1, round(3 / av.DETECT_INTERVAL_S)))

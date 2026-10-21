@@ -121,6 +121,34 @@ def _probe_codec(url, timeout=8):
     return out.splitlines()[0].strip().lower() if out else None
 
 
+# An RTSP pull ffmpeg gives up on after this long with no data, so a dead relay connection
+# exits and is restarted (live 17:28 a pull sat 70 min on one, at 0% CPU, with no frames).
+RTSP_TIMEOUT_S = float(os.environ.get("AIPORT_RTSP_TIMEOUT_S") or 15)
+_rtsp_timeout_flag = []   # cached: [flag or None]
+
+
+def _rtsp_timeout_args():
+    """ffmpeg input args for RTSP_TIMEOUT_S. ffmpeg 5+ calls the socket I/O timeout
+    "-timeout"; before that it was "-stimeout", and "-timeout" made ffmpeg listen instead."""
+    if RTSP_TIMEOUT_S <= 0:
+        return []
+    if not _rtsp_timeout_flag:
+        try:
+            help_text = subprocess.run([FFMPEG_BIN, "-hide_banner", "-h", "demuxer=rtsp"],
+                                       capture_output=True, text=True, timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            help_text = ""
+        flag = None
+        for line in help_text.splitlines():
+            words = line.split()
+            if words and words[0] in ("-timeout", "-stimeout") and "socket" in line:
+                flag = words[0]
+                break
+        _rtsp_timeout_flag.append(flag)
+    flag = _rtsp_timeout_flag[0]
+    return [flag, str(int(RTSP_TIMEOUT_S * 1_000_000))] if flag else []
+
+
 def _hwdec_args(codec):
     """Input decoder args for the active hardware backend, or empty (ffmpeg's
     auto-selected software decoder). Unknown/failed probe assumes h264, the
@@ -583,7 +611,7 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
     snap_interval = 1.0 if enrich.smart_detect_features() else 2.0
     jpeg_r, jpeg_w = os.pipe()
     cmd = [
-        FFMPEG_BIN, "-loglevel", "warning", "-rtsp_transport", "tcp",
+        FFMPEG_BIN, "-loglevel", "warning", "-rtsp_transport", "tcp", *_rtsp_timeout_args(),
         # Low-latency decode (no B-frame reorder delay). Not "-fflags nobuffer": with this
         # split/fps pipeline it left the rawvideo detection output empty (ffmpeg 8).
         "-flags", "low_delay",
@@ -3337,6 +3365,35 @@ def _camera_health(device_id, now):
     return streaming, ready
 
 
+# A pull that has delivered no frame for this long is killed, and its reader restarts it as
+# it would after any unexpected exit: the read timeout misses a pull stuck past the socket
+# (decoding or the filter graph).
+STREAM_STALL_S = float(os.environ.get("AIPORT_STREAM_STALL_S") or 30)
+
+
+def _restart_stalled_pulls(now_ms=None):
+    """Kill each running pull with no frame for STREAM_STALL_S since its last frame or its
+    start; returns the deviceIDs killed."""
+    now_ms = int(time.monotonic() * 1000) if now_ms is None else now_ms
+    killed = []
+    for device_id, proc in list(_active_streams.items()):
+        if proc is None or proc.poll() is not None:
+            continue   # not started, or exited and about to be restarted
+        started = _stream_started_monotonic_ms.get(device_id)
+        if started is None:
+            continue
+        with _frame_lock:
+            stamp = _latest_frame_time.get(device_id)
+        last = max(stamp[1] if stamp else started, started)
+        if now_ms - last < STREAM_STALL_S * 1000:
+            continue
+        log.warning("deviceID=%s RTSP pull delivered no frame for %.0f s, restarting it (pid=%s)",
+                    device_id, (now_ms - last) / 1000, proc.pid)
+        proc.kill()
+        killed.append(device_id)
+    return killed
+
+
 def _check_status(ws, now=None):
     """Send EventAIPortStatus for each paired camera whose health changed."""
     now = time.monotonic() if now is None else now
@@ -3363,6 +3420,10 @@ def _start_status_watch():
     def watch():
         while True:
             time.sleep(STATUS_CHECK_S)
+            try:
+                _restart_stalled_pulls()
+            except Exception:
+                log.exception("stalled pull check failed")
             ws = _status_ws
             if ws is None:
                 continue

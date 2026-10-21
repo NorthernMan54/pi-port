@@ -57,7 +57,7 @@ additions. All of the following was confirmed live against a real console.
 | `http_api.py` | HTTPS `:443`: `/api/1.2/manage`, `/api/1.2/login`, `/api/1.2/status`, `/api/1.2/snapshot`. |
 | `ucp4_client.py` | Generic `ucp4` device-management WebSocket client (adoption, `getInfo`). |
 | `avclient.py` | Classic per-camera avclient client: pairing, detection/classification, `EventSmartDetect` / `EventFeatureFlagsUpdated` pushes, snapshot upload. Most real behavior lives here. |
-| `detector.py` | YOLOv5 detector with a runtime-selected backend: `RKNNLite` (quantized YOLOv5s on the RK3588 NPU) or `onnxruntime` (CPU, `yolov5n.onnx`; x86_64/arm64). |
+| `detector.py` | YOLOv5 detector with a runtime-selected backend: `RKNNLite` (quantized YOLOv5s on the RK3588 NPU) or `onnxruntime` (`yolov5n.onnx`; CPU on x86_64/arm64, Core ML on Apple-silicon macOS). |
 | `run_all.py` | Launches all of the above together. |
 | `sysinfo_server.py` | Board system monitor / multi-instance web UI (CPU, memory, GPU, NPU); not part of the protocol. |
 | `instance_manager.py` | Manages multiple reboot-surviving emulator instances as systemd units (macvlan or physical). |
@@ -133,13 +133,14 @@ Identity and the console endpoint default from `aiport.cfg` -- edit it (or pass 
 before the first run. Then adopt "AI Port" from the Protect UI like a normal camera, and pair a
 real camera to it from the camera's own settings.
 
-## Object detection (NPU / CPU)
+## Object detection (NPU / CPU / Core ML)
 
 The pipeline runs a real YOLOv5 model through `detector.py`, which picks a backend at
 runtime (`AIPORT_BACKEND=auto|rknn|onnx`, or infer from `AIPORT_MODEL_PATH`): the RK3588
-NPU via `rknnlite` (quantized YOLOv5s `.rknn`), or CPU via `onnxruntime` (Ultralytics
-`yolov5n.onnx`, x86_64/arm64). Model binaries are not committed; fetch the assets (ONNX,
-anchors, COCO labels, calibration subset) and optionally build `.rknn`:
+NPU via `rknnlite` (quantized YOLOv5s `.rknn`), or `onnxruntime` (Ultralytics
+`yolov5n.onnx`) on CPU (x86_64/arm64) or Core ML (Apple-silicon macOS). Model binaries
+are not committed; fetch the assets (ONNX, anchors, COCO labels, calibration subset) and
+optionally build `.rknn`:
 
 ```bash
 python3 scripts/fetch_models.py            # CPU model + conversion assets
@@ -147,6 +148,8 @@ python3 scripts/fetch_models.py --convert  # build .rknn (x86 host)
 ```
 
 For a containerized CPU install (x86 servers / Raspberry Pi 4/5) see `docker/README.md`.
+macOS is bare metal only — Docker Desktop's VM can't do the L2 discovery the console
+needs; see the root README.
 
 **Video decode** picks a hardware backend automatically, or by `AIPORT_HWDEC`
 (`auto`|`rkmpp`|`v4l2m2m`|`none`): `rkmpp` on the RK3588 (ffmpeg-rockchip), `v4l2m2m`

@@ -235,7 +235,11 @@ URLs from it, and the device's own IP left paired cameras without thumbnails.
 
 **`EventAIPortStatus`** — per paired camera, deduplicated:
 `{deviceID, isPlug, isStreaming, isSmartDetectReady, isAudioEventReady}`.
-`isSmartDetectReady` appears to gate the console dispatching AI work.
+`isSmartDetectReady` appears to gate the console dispatching AI work. pi-port sends it when a stream starts,
+then again whenever a camera's health changes: `isStreaming` goes false after 30 s with no frame
+from its stream, `isSmartDetectReady` after 30 s with no detection pass (its loop crashed or
+hung), and both return to true when it recovers (checked every 5 s, with 30 s of grace after the
+stream starts). What Protect's UI does with a false value hasn't been seen yet.
 
 **`EventFeatureFlagsUpdated`** — the real capability mechanism (not `/api/1.2/status`).
 The console **replaces** the paired camera's feature flags wholesale with this, so

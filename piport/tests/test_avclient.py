@@ -1512,6 +1512,57 @@ class TestPollLoop(Base):
         self.assertGreaterEqual(len(ticks), 3)        # ~every DETECT_INTERVAL_S
 
 
+class TestCameraStatus(Base):
+    """EventAIPortStatus follows each paired camera's health, sent only on a change."""
+
+    def setUp(self):
+        super().setUp()
+        self.now = 10_000.0
+        av._stream_points["CS"] = 2.5
+        av._stream_started_at["CS"] = self.now
+        av._last_status_sent["CS"] = (True, True, True, True)   # sent at UiStreamControl
+        for table in (av._stream_points, av._stream_started_at, av._last_status_sent,
+                      av._last_analysed, av._latest_frame_time, av._motion_poll_thread):
+            self.addCleanup(table.pop, "CS", None)
+
+    def healthy_at(self, t):
+        av._latest_frame_time["CS"] = (0, int(t * 1000))
+        av._last_analysed["CS"] = t
+
+    def statuses(self):
+        return [(p["isStreaming"], p["isSmartDetectReady"]) for fn, p in self.sent
+                if fn == "EventAIPortStatus"]
+
+    def test_healthy_camera_sends_nothing(self):
+        self.healthy_at(self.now + 50)
+        av._check_status(None, now=self.now + 55)
+        self.assertEqual(self.statuses(), [])
+
+    def test_stream_without_frames_reports_not_streaming_then_recovers(self):
+        self.healthy_at(self.now + 5)
+        av._check_status(None, now=self.now + 20)              # 15 s quiet: still fine
+        self.assertEqual(self.statuses(), [])
+        av._check_status(None, now=self.now + 40)              # 35 s: neither frames nor passes
+        self.assertEqual(self.statuses(), [(False, False)])
+        self.healthy_at(self.now + 45)
+        av._check_status(None, now=self.now + 46)
+        self.assertEqual(self.statuses(), [(False, False), (True, True)])
+
+    def test_dead_loop_reports_not_ready(self):
+        # Live 12:39: every camera's loop had crashed; Protect was still told all was well.
+        class Dead:
+            def is_alive(self):
+                return False
+        av._motion_poll_thread["CS"] = Dead()
+        self.healthy_at(self.now + 50)
+        av._check_status(None, now=self.now + 51)
+        self.assertEqual(self.statuses(), [(True, False)])
+
+    def test_grace_after_the_stream_starts(self):
+        av._check_status(None, now=self.now + 25)              # no frame yet, 25 s in
+        self.assertEqual(self.statuses(), [])
+
+
 class TestBoxDelay(Base):
     """AIPORT_BOX_DELAY_MS back-dates frame-describing timestamps per camera."""
 

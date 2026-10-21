@@ -2576,6 +2576,7 @@ def _start_motion_detector(ws, device_id, ip, port, uri, preserve_tracks=False):
                 _motion_tick(ws, device_id)
             except Exception:
                 log.exception("motion poll tick crashed for deviceID=%s", device_id)
+            _last_analysed[device_id] = time.monotonic()
             try:
                 _note_frame(device_id, seq, time.monotonic() - started)
             except Exception:  # accounting must never stop a camera
@@ -3225,6 +3226,70 @@ _last_status_sent = {}
 _feature_flags_sent = set()
 
 
+# EventAIPortStatus follows each paired camera's health: isStreaming once its stream has
+# delivered no frame for STATUS_STALE_S, isSmartDetectReady once its loop has analysed none
+# for as long (a crash or hang: live 12:39 every camera's loop had crashed while Protect was
+# still told all was well); back to true when it recovers. Checked every STATUS_CHECK_S, sent
+# only on a change, with STATUS_STALE_S of grace after Protect starts a stream.
+STATUS_STALE_S = 30.0
+STATUS_CHECK_S = 5.0
+_status_ws = None            # the live connection to Protect
+_stream_started_at = {}      # deviceID -> monotonic s when UiStreamControl started its stream
+_last_analysed = {}          # deviceID -> monotonic s of its loop's last pass
+_status_thread = None
+
+
+def _camera_health(device_id, now):
+    """(streaming, smart_ready) for a paired camera at monotonic time now."""
+    started = _stream_started_at.get(device_id, now)
+    with _frame_lock:
+        stamp = _latest_frame_time.get(device_id)
+    last_frame = max(stamp[1] / 1000.0 if stamp else started, started)
+    last_pass = max(_last_analysed.get(device_id, started), started)
+    loop = _motion_poll_thread.get(device_id)
+    streaming = now - last_frame < STATUS_STALE_S
+    ready = now - last_pass < STATUS_STALE_S and (loop is None or loop.is_alive())
+    return streaming, ready
+
+
+def _check_status(ws, now=None):
+    """Send EventAIPortStatus for each paired camera whose health changed."""
+    now = time.monotonic() if now is None else now
+    for device_id in list(_stream_points):
+        streaming, ready = _camera_health(device_id, now)
+        state = (True, streaming, ready, True)
+        prev = _last_status_sent.get(device_id)
+        if prev == state:
+            continue
+        if prev is not None:
+            (log.warning if not (streaming and ready) else log.info)(
+                "camera deviceID=%s now %s, %s", device_id,
+                "streaming" if streaming else "not streaming (no frame for %.0f s)" % STATUS_STALE_S,
+                "detecting" if ready else "not detecting (no pass for %.0f s)" % STATUS_STALE_S)
+        _send_status_event(ws, device_id, plug=True, streaming=streaming, smart_ready=ready,
+                           audio_ready=True)
+
+
+def _start_status_watch():
+    global _status_thread
+    if _status_thread is not None and _status_thread.is_alive():
+        return
+
+    def watch():
+        while True:
+            time.sleep(STATUS_CHECK_S)
+            ws = _status_ws
+            if ws is None:
+                continue
+            try:
+                _check_status(ws)
+            except Exception:
+                log.exception("camera status check failed")
+
+    _status_thread = threading.Thread(target=watch, name="camera-status", daemon=True)
+    _status_thread.start()
+
+
 def _send_status_event(ws, device_id, plug, streaming, smart_ready, audio_ready):
     # Field names from the real ubnt_av_aiport string table; isSmartDetectReady gates AI-task dispatch.
     state = (bool(plug), bool(streaming), bool(smart_ready), bool(audio_ready))
@@ -3363,6 +3428,8 @@ def handle_function(ws, msg, device_info):
                 # event is abandoned and prev_center resets (line crossing breaks).
                 _start_motion_detector(ws, device_id, payload["ip"], payload["port"],
                                        payload["uri"], preserve_tracks=True)
+                _stream_started_at[device_id] = time.monotonic()
+                _start_status_watch()
                 points = _stream_points_for(payload.get("width"), payload.get("height"),
                                             payload.get("fps"))
                 # Protect always sends width/height/fps; without them, assume the lowest tier.
@@ -3620,6 +3687,8 @@ def run(host, port, device_info, token=None):
     with connect(url, subprotocols=["secure_transfer"], additional_headers=headers,
                  ssl=ctx, open_timeout=15) as ws:
         log.info("CLASSIC AVCLIENT WSS CONNECTED (subprotocol=%s)", ws.subprotocol)
+        global _status_ws
+        _status_ws = ws
         # hwrev must be non-null or hardwareRevision stays empty; 1 is a placeholder.
         now_ms = int(time.time() * 1000)
         send_msg(ws, "ubnt_avclient_hello", {

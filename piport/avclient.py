@@ -3170,6 +3170,24 @@ def _stream_clocks(device_id):
     return mono, mono
 
 
+def _leave_track_attrs(t):
+    """trackerIDAttrMap entry for a track in a single-tracker leave. Protect's search reads a
+    vehicle's type, colour and plate from here, not from its descriptor: live 10:32 a two-truck
+    event (multi leave, attributes here) was found by "truck" and "black", while one-vehicle
+    events with the same attributes only on the descriptor were not."""
+    extra = t["descriptor_extra"] or {}
+    entry = {"objectType": t["object_type"], "zone": [int(SMART_DETECT_ZONE_ID)]}
+    if t["object_type"] in ("face", "person"):
+        entry.update({k: extra[k] for k in ("matchedId", "matchedName")
+                      if extra.get(k) is not None})
+    if t["object_type"] == "vehicle":
+        attrs = extra.get("attributes") or {}
+        entry.update({k: attrs[k] for k in ("vehicleType", "color") if k in attrs})
+        if extra.get("name"):
+            entry["matchedName"] = extra["name"]   # the plate, as _tracker_attrs sends it
+    return entry
+
+
 def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, stationary=False,
                               object_type="person", coord=None, confidence=95,
                               first_shown_ms=None, tracker_id=1, descriptor_extra=None, best=None,
@@ -3240,14 +3258,7 @@ def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, statio
     # Other *Status fields omitted: the real capture had only zonesStatus, and those detectors aren't implemented.
     if edge_type == "leave":
         # "leave" carries the final classification in trackerIDAttrMap (likely read by add_smart_detect_types()).
-        payload["trackerIDAttrMap"] = {
-            str(t["tracker_id"]): {"objectType": t["object_type"], "zone": [int(SMART_DETECT_ZONE_ID)],
-                                   **{k: (t["descriptor_extra"] or {})[k]
-                                      for k in ("matchedId", "matchedName")
-                                      if (t["descriptor_extra"] or {}).get(k) is not None
-                                      and t["object_type"] in ("face", "person")}}
-            for t in tracks
-        }
+        payload["trackerIDAttrMap"] = {str(t["tracker_id"]): _leave_track_attrs(t) for t in tracks}
         # Full-FoV dims use the real stream resolution, not the square detection buffer.
         seq = _snapshot_seq_by_device.get(device_id, 0) + 1
         _snapshot_seq_by_device[device_id] = seq

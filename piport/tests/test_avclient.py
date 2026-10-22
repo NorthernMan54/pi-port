@@ -354,6 +354,33 @@ class TestBestFrame(Base):
         fullfov = av._snapshot_filename_to_device[payload["smartDetectSnapshotFullFoV"]]
         self.assertEqual(fullfov["jpeg"], best["jpeg"])
 
+    def test_single_vehicle_leave_carries_its_attributes_in_the_attr_map(self):
+        # Live 10:32: only a multi leave's vehicles (attributes in trackerIDAttrMap) were
+        # searchable by type and colour; one-vehicle events had them on the descriptor only.
+        extra = {"attributes": {"vehicleType": {"val": "truck", "confidence": 70},
+                                "color": {"val": "black", "confidence": 60}},
+                 "name": "ABCD123"}
+        av._send_smart_detect_event(None, "D", edge_type="leave", object_type="vehicle",
+                                    coord=[0, 0, 10, 10], tracker_id=21, descriptor_extra=extra)
+        entry = self.sent[-1][1]["trackerIDAttrMap"]["21"]
+        self.assertEqual(entry["vehicleType"], {"val": "truck", "confidence": 70})
+        self.assertEqual(entry["color"], {"val": "black", "confidence": 60})
+        self.assertEqual(entry["matchedName"], "ABCD123")
+        self.assertEqual(entry["objectType"], "vehicle")
+
+    def test_single_leave_attr_map_without_extras_stays_minimal(self):
+        av._send_smart_detect_event(None, "D", edge_type="leave", object_type="vehicle",
+                                    coord=[0, 0, 10, 10], tracker_id=5)
+        self.assertEqual(self.sent[-1][1]["trackerIDAttrMap"]["5"],
+                         {"objectType": "vehicle", "zone": [int(av.SMART_DETECT_ZONE_ID)]})
+        av._send_smart_detect_event(None, "D", edge_type="leave", object_type="person",
+                                    coord=[0, 0, 10, 10], tracker_id=6,
+                                    descriptor_extra={"matchedId": 186, "matchedName": "Alex",
+                                                      "name": "not a plate"})
+        self.assertEqual(self.sent[-1][1]["trackerIDAttrMap"]["6"],
+                         {"objectType": "person", "zone": [int(av.SMART_DETECT_ZONE_ID)],
+                          "matchedId": 186, "matchedName": "Alex"})
+
     def test_capture_keeps_best_score(self):
         tr = {}
         av._capture_best("D", tr, {"score": 0.8, "coord": [100, 200, 100, 300], "frame": (1, b"a")})

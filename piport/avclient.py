@@ -364,6 +364,10 @@ _latest_frame_seq = {}  # deviceID -> number of the frame in _latest_frame (1 = 
 _frame_jpegs = {}
 # deviceID -> (wall ms, monotonic ms) when _latest_frame was read from ffmpeg.
 _latest_frame_time = {}
+# deviceID -> monotonic s of its last frame from any pull. Unlike _latest_frame_time it
+# survives a pull restart, so a brief reconnect isn't reported to Protect as not streaming:
+# live 22:25 each such report made Protect resend settings and drop the relay again, every 15 s.
+_last_frame_at = {}
 # deviceID -> (wall ms, monotonic ms) of the frame the detector last analysed; every
 # event time describes that frame, not the moment the event is sent.
 _analysed_frame_time = {}
@@ -671,6 +675,7 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
                     _latest_frame[device_id] = frame
                     _latest_frame_seq[device_id] = seq
                     _latest_frame_time[device_id] = stamp
+                    _last_frame_at[device_id] = stamp[1] / 1000.0
                     _frame_cond.notify_all()   # wakes the camera's poll loop
         except Exception:
             log.exception("frame reader crashed for deviceID=%s", device_id)
@@ -3357,7 +3362,8 @@ def _camera_health(device_id, now):
     started = _stream_started_at.get(device_id, now)
     with _frame_lock:
         stamp = _latest_frame_time.get(device_id)
-    last_frame = max(stamp[1] / 1000.0 if stamp else started, started)
+    last_frame = max(stamp[1] / 1000.0 if stamp else started, started,
+                     _last_frame_at.get(device_id, started))
     last_pass = max(_last_analysed.get(device_id, started), started)
     loop = _motion_poll_thread.get(device_id)
     streaming = now - last_frame < STATUS_STALE_S

@@ -1590,11 +1590,13 @@ class TestCameraStatus(Base):
         av._stream_started_at["CS"] = self.now
         av._last_status_sent["CS"] = (True, True, True, True)   # sent at UiStreamControl
         for table in (av._stream_points, av._stream_started_at, av._last_status_sent,
-                      av._last_analysed, av._latest_frame_time, av._motion_poll_thread):
+                      av._last_analysed, av._latest_frame_time, av._motion_poll_thread,
+                      av._last_frame_at):
             self.addCleanup(table.pop, "CS", None)
 
     def healthy_at(self, t):
         av._latest_frame_time["CS"] = (0, int(t * 1000))
+        av._last_frame_at["CS"] = t
         av._last_analysed["CS"] = t
 
     def statuses(self):
@@ -1629,6 +1631,19 @@ class TestCameraStatus(Base):
     def test_grace_after_the_stream_starts(self):
         av._check_status(None, now=self.now + 25)              # no frame yet, 25 s in
         self.assertEqual(self.statuses(), [])
+
+    def test_a_brief_pull_restart_still_counts_as_streaming(self):
+        # Live 22:25: a restart cleared the frame time, so 5 s later Protect was told "no
+        # frame for 30 s"; it resent settings and dropped the relay again, every 15 s.
+        self.healthy_at(self.now + 100)
+        av._active_streams["CS"] = None
+        av._stop_stream("CS")                                  # the pull died; restarting
+        av._last_analysed["CS"] = self.now + 105
+        av._check_status(None, now=self.now + 105)
+        self.assertEqual(self.statuses(), [])
+        av._last_analysed["CS"] = self.now + 135
+        av._check_status(None, now=self.now + 135)             # 35 s with no frame
+        self.assertEqual(self.statuses(), [(False, True)])
 
 
 class TestBoxDelay(Base):

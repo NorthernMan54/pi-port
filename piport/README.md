@@ -279,7 +279,10 @@ Knobs: `AIPORT_VEHICLE_ATTRS` / `AIPORT_LPR` / `AIPORT_FACE` (`auto`|`0`|`1`),
 `AIPORT_FACE_MATCH_MIN_PX` (40, the face's shorter side: smaller faces are too small to match
 and get no `faceEmbed`; a face track is still tracked from its small reads but is reported only
 once a read reaches the minimum, with its thumbnail and embedding from those reads. A face that
-stays small is never reported; its person still is), and
+stays small is never reported; its person still is), `AIPORT_FACE_EMBED_MIN_PX` (60: a
+smaller read is still matched against Protect's face DB here, but its `faceEmbed` isn't sent;
+unnamed, Protect would run its own looser search on it, which put 43-48 px reads on the wrong
+person), and
 `AIPORT_FACES_DIR` (default `<state-dir>/faces`): one sub-directory per person, named after
 them, holding a few clear face photos; edits are picked up without a restart.
 

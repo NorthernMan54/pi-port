@@ -216,7 +216,7 @@ class TestAvclientMatching(unittest.TestCase):
         person = {"objectType": "person", "score": 0.9, "coord": [0, 0, 100, 300]}
         found = {}
         minimum = av.enrich.FACE_MATCH_MIN_PX
-        for size, mtime in ((18, 2.0), (minimum, 2.5)):
+        for size, mtime in ((18, 2.0), (minimum, 2.5), (av.FACE_EMBED_MIN_PX, 2.7)):
             with mock.patch.object(av, "_get_enricher", lambda: Enricher()), \
                     mock.patch.object(av, "_get_face_db", lambda: db), \
                     mock.patch.object(av, "_load_snapshot_bgr",
@@ -227,8 +227,11 @@ class TestAvclientMatching(unittest.TestCase):
         self.assertNotIn("faceEmbed", found[18].get("scored", {}))
         self.assertNotIn("match", found[18].get("scored", {}))
         self.assertNotIn("small", found[minimum])                     # at the minimum: nameable
-        self.assertIn("faceEmbed", found[minimum]["scored"])
         self.assertIn("match", found[minimum]["scored"])
+        # ...but its embedding stays here below FACE_EMBED_MIN_PX: live 18:41 a 43 px read went
+        # to Protect's own search unnamed and came back as the wrong person.
+        self.assertNotIn("faceEmbed", found[minimum]["scored"])
+        self.assertIn("faceEmbed", found[av.FACE_EMBED_MIN_PX]["scored"])
 
 
     def _enrich_one(self, embedding, db):

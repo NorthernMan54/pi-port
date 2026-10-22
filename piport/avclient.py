@@ -1431,8 +1431,14 @@ def _enrich_detections(device_id, detections):
                 # A face whose SFace vector is short (enrich.FACE_EMBED_MIN_NORM) is reported
                 # without its embedding and isn't matched: a poor face. Protect enrols the
                 # embedding it's sent, and a poor one makes a bad reference.
+                # Only a read of FACE_EMBED_MIN_PX or more sends its embedding: unnamed, it goes
+                # to Protect's own face search, which put 43-48 px reads on the wrong person
+                # (live 14:39 Alice as Sean, 18:41 Sean as Alice). Smaller ones are still
+                # matched here and reported.
                 if f["embedding"] is not None and not small and not enrich.weak_embedding(f["embedding"]):
-                    face["scored"] = {"faceEmbed": (f["embedding"], f["score"])}
+                    face["scored"] = {}
+                    if f.get("size_px", FACE_EMBED_MIN_PX) >= FACE_EMBED_MIN_PX:
+                        face["scored"]["faceEmbed"] = (f["embedding"], f["score"])
                     db = _get_face_db()
                     m = db.match(f["embedding"], FACE_DB_THRESH) if db else None
                     if m:
@@ -3321,6 +3327,8 @@ def _download_face_db(uri, device_info):
 # passed against Ian on a day he wasn't there (top 0.429). AIPORT_FACE_DB_THRESH overrides it.
 FACE_MATCH_HITS = 2
 FACE_DB_THRESH = float(os.environ.get("AIPORT_FACE_DB_THRESH") or 0.45)
+# Smallest face read (shorter side, snapshot px) whose embedding is sent to Protect.
+FACE_EMBED_MIN_PX = int(os.environ.get("AIPORT_FACE_EMBED_MIN_PX") or 60)
 _face_db = None
 _face_db_tried = False
 

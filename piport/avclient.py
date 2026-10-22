@@ -247,6 +247,10 @@ NN_MISS_GROWTH_MAX = 1.5
 # track (40x57) took a 49x136 box beside it, then a 107x253 one, and held the event 16 s.
 NN_SIZE_RATIO_MAX = 2.0
 SIZE_JUMP_INSIDE = 0.8
+# The size a box is compared with is the median of the track's last SIZE_HISTORY boxes, not
+# its last one: live 16:47 on Camera C a person's box halved for a moment (bending, or half
+# hidden), the full box after it was over 2x that, and the same person became a second track.
+SIZE_HISTORY = 8
 # Min IOU (same objectType) to match a detection to an existing track.
 IOU_MATCH_THRESHOLD = 0.3
 # Which detection belongs to which track (AIPORT_TRACKER): "norfair", Frigate's Kalman-filtered
@@ -1473,6 +1477,18 @@ def _size_jump(a, b):
     return False
 
 
+def _size_ref(tr):
+    """The box a detection's size is compared with: the track's last box resized to the median
+    width and height of its recent boxes (its last box until it has 3)."""
+    sizes = tr.get("sizes") or []
+    if len(sizes) < 3:
+        return tr["coord"]
+    w = statistics.median(s[0] for s in sizes)
+    h = statistics.median(s[1] for s in sizes)
+    x, y, lw, lh = tr["coord"]
+    return [x + lw / 2 - w / 2, y + lh / 2 - h / 2, w, h]
+
+
 def _nearest_detection(tr, detections, unclaimed):
     """Index of the nearest same-type unclaimed detection to where tr's motion predicts it,
     within NN_DIST_FACTOR x its size (+ margin), at most NN_DIST_MAX, widening a little
@@ -1486,7 +1502,7 @@ def _nearest_detection(tr, detections, unclaimed):
     best, best_dist = None, limit
     for idx in unclaimed:
         d = detections[idx]
-        if d["objectType"] != tr["objectType"] or _size_jump(tr["coord"], d["coord"]):
+        if d["objectType"] != tr["objectType"] or _size_jump(_size_ref(tr), d["coord"]):
             continue
         dx, dy = _zone_center_norm(d["coord"])
         dist = ((dx - px) ** 2 + (dy - py) ** 2) ** 0.5
@@ -1503,6 +1519,9 @@ def _follow(tr, coord):
     prev = tr.get("smooth") or tr["coord"]
     tr["smooth"] = [BOX_SMOOTHING * c + (1 - BOX_SMOOTHING) * p for c, p in zip(coord, prev)]
     tr["coord"] = coord
+    sizes = tr.setdefault("sizes", [])
+    sizes.append((coord[2], coord[3]))
+    del sizes[:-SIZE_HISTORY]
 
 
 def _jaro_winkler(a, b):
@@ -2416,7 +2435,7 @@ def _norfair_match(dev, tracks, detections):
                 and _iou(tr["stationary_coord"], detections[idx]["coord"]) < IOU_MATCH_THRESHOLD):
             del ids[gid]  # Norfair moved this object onto another one: the parked track lets go
             continue
-        if not tr.get("stationary_coord") and _size_jump(tr["coord"], detections[idx]["coord"]):
+        if not tr.get("stationary_coord") and _size_jump(_size_ref(tr), detections[idx]["coord"]):
             del ids[gid]  # a box of another size beside it is another object
             continue
         matches[tid] = idx

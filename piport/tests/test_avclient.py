@@ -489,6 +489,22 @@ class TestCameraEvent(Base):
         person_tid = face["person_tid"]
         self.assertEqual(av._motion_state["D"]["tracks"][person_tid]["face_tid"], fid)
 
+    def test_one_shrunken_box_does_not_split_a_person(self):
+        # Live 16:47 on Camera C: walking, the box halved for a moment (55 high), and the full
+        # box after it (120, over 2x) became a second person track.
+        walk = [[470 + 10 * i, 110, 34, 124] for i in range(6)]   # ends at x 520
+        half = [[524, 109, 34, 55]] * 3   # mostly inside the last box: the same person
+        for coord in walk + half + [[511, 114, 36, 120], [513, 112, 34, 121]]:
+            self.tick(dict(self.PERSON, coord=coord))
+        people = [tid for tid, tr in av._motion_state["D"]["tracks"].items()
+                  if tr["objectType"] == "person"]
+        self.assertEqual(len(people), 1)
+
+    def test_size_ref_is_the_median_of_recent_boxes(self):
+        tr = {"coord": [526, 109, 34, 55], "sizes": [(32, 124), (31, 122), (34, 120), (34, 55)]}
+        self.assertEqual(av._size_ref(tr)[2:], [33.0, 121.0])
+        self.assertEqual(av._size_ref({"coord": [1, 2, 3, 4]}), [1, 2, 3, 4])   # too few yet
+
     def test_small_face_is_tracked_but_held_back_until_nameable(self):
         # Live 11:49 on Camera B: a 24 px face showed in Protect as a face no one could name.
         small = dict(self.FACE, small=True)

@@ -66,6 +66,10 @@ def weak_embedding(embedding):
     """True if an SFace vector is too short (a poor face) to send or match."""
     return embedding is None or float(np.linalg.norm(np.asarray(embedding, dtype=np.float64))) < FACE_EMBED_MIN_NORM
 PLATE_SCORE_THRESH = float(os.environ.get("AIPORT_LPR_THRESH", "0.5"))
+# Plates narrower than this (snapshot pixels) aren't read: re-reading the 14:38 clips, every
+# Camera B read under 75 px was wrong, from 80 px all but one were right, and Side Door's
+# 40 px plate came out as DEPM782 and DEFM782 by turns. AIPORT_LPR_MIN_PX overrides it.
+PLATE_MIN_PX = int(os.environ.get("AIPORT_LPR_MIN_PX") or 60)
 # Plate/face crops are expanded by this factor around the parent box: the
 # full-res snapshot can lag the 640 detection frame by up to a second.
 CROP_MARGIN = 1.3
@@ -250,7 +254,8 @@ class Enricher:
         return self._yunet, self._sface
 
     def plates(self, img_bgr, vehicle_coords):
-        """Plates inside each vehicle box: [{coord, text, confidence(0-1), parent}]."""
+        """Plates inside each vehicle box: [{coord, text, confidence(0-1), parent, width_px}].
+        Plates narrower than PLATE_MIN_PX are left out: too small to read reliably."""
         if not self.lpr or img_bgr is None:
             return []
         ih, iw = img_bgr.shape[:2]
@@ -276,10 +281,14 @@ class Enricher:
                     if len(text) < 3:
                         continue
                     b = r.detection.bounding_box
+                    if b.x2 - b.x1 < PLATE_MIN_PX:
+                        log.debug("plate %r skipped: %d px wide, under %d px", text,
+                                  b.x2 - b.x1, PLATE_MIN_PX)
+                        continue
                     out.append({"coord": _to_norm(x1 + b.x1, y1 + b.y1, x1 + b.x2, y1 + b.y2, iw, ih),
                                 "text": text,
                                 "confidence": min(float(r.detection.confidence), conf),
-                                "parent": parent})
+                                "parent": parent, "width_px": int(b.x2 - b.x1)})
         return out
 
     def faces(self, img_bgr, person_coords):

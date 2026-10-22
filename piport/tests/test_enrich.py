@@ -98,13 +98,25 @@ except Exception as exc:  # websockets/requests missing
 
 @unittest.skipIf(avclient is None, f"avclient unavailable ({_AV_ERR})")
 class TestMergeExtra(unittest.TestCase):
-    def test_plate_name_keeps_best_read(self):
+    def test_plate_is_final_only_after_three_agreeing_reads(self):
+        # Live 14:38 on Camera B: one confident misread (DERM782 at 0.90 for DEPM782) became
+        # the plate, and the car, now "confidently" read, was never read again.
         tr = {"objectType": "vehicle"}
-        avclient._merge_extra(tr, {"scored": {"name": ("ABC123", 0.9)}})
-        avclient._merge_extra(tr, {"scored": {"name": ("A8C123", 0.6)}})
-        self.assertEqual(tr["extra"]["name"], "ABC123")
-        avclient._merge_extra(tr, {"scored": {"name": ("ABC124", 0.95)}})
-        self.assertEqual(tr["extra"]["name"], "ABC124")
+        avclient._merge_extra(tr, {"scored": {"name": ("ABRD123", 0.90)}})
+        avclient._merge_extra(tr, {"scored": {"name": ("ABCD123", 0.89)}})
+        self.assertNotIn("name", tr.get("extra", {}))          # not final: nothing reported
+        self.assertNotIn("name", tr.get("extra_scores", {}))   # nor "confident" (keep reading)
+        avclient._merge_extra(tr, {"scored": {"name": ("ABCD123", 0.88)}})
+        self.assertEqual(tr["extra"]["name"], "ABCD123")       # the C wins the vote 2 to 1
+        self.assertAlmostEqual(tr["extra_scores"]["name"], (0.90 + 0.89 + 0.88) / 3)
+
+    def test_plate_vote_is_per_character(self):
+        # Side Door 14:38 at 40 px: the same plate read with a different wrong letter each time.
+        reads = [("DEPM782", 0.88), ("DEFM782", 0.87), ("DEPM732", 0.88)]
+        text, conf, agreeing = avclient._plate_rep(reads)
+        self.assertEqual((text, agreeing), ("DEPM782", 3))
+        reads.append(("123", 0.93))                             # a partial read doesn't vote
+        self.assertEqual(avclient._plate_rep(reads)[0], "DEPM782")
 
     def test_one_misread_does_not_replace_the_plate(self):
         # Live 10:14 on Camera B: 'ABED123' at 0.85 among 'ABCD123's; '123' at 0.93.
@@ -113,7 +125,7 @@ class TestMergeExtra(unittest.TestCase):
                            ("123", 0.93), ("ABCD123", 0.91)]:
             avclient._merge_extra(tr, {"scored": {"name": (text, conf)}})
         self.assertEqual(tr["extra"]["name"], "ABCD123")
-        self.assertEqual(tr["extra_scores"]["name"], 0.91)
+        self.assertAlmostEqual(tr["extra_scores"]["name"], (0.89 + 0.90 + 0.85 + 0.91) / 4)
 
     def test_plate_logged_only_when_it_changes(self):
         tr = {"objectType": "vehicle"}
@@ -147,7 +159,8 @@ class TestMergeExtra(unittest.TestCase):
 
     def test_attributes_and_plate_coexist(self):
         tr = {"objectType": "vehicle", "extra": {"attributes": {"color": {"val": "red"}}}}
-        avclient._merge_extra(tr, {"scored": {"name": ("XYZ9", 0.8)}})
+        for _ in range(avclient.PLATE_AGREE_READS):
+            avclient._merge_extra(tr, {"scored": {"name": ("XYZ9", 0.8)}})
         self.assertEqual(tr["extra"]["name"], "XYZ9")
         self.assertIn("attributes", tr["extra"])
 

@@ -1319,15 +1319,20 @@ def _jaro_winkler(a, b):
 
 # Plate reads: as Frigate, a track keeps its recent reads, groups those whose average
 # similarity is >= PLATE_CLUSTER_SIMILARITY and takes the largest group (ties: the group with
-# the most confident read). Unlike Frigate, which reports that group's most confident read,
-# the reading seen most often in it wins (ties: the most confident), so one confident misread
-# ('ABED123' among 'ABCD123's) can't replace the plate.
+# the most confident read). Within it, the reads of its most common length vote character by
+# character (each read weighted by its confidence), so one misread letter ('ABED123' among
+# 'ABCD123's) is outvoted. The plate is final, and reported, only once PLATE_AGREE_READS of
+# those reads agree: live 14:38 on Camera B a single confident misread (DERM782 at 0.90 for
+# DEPM782) was taken as the plate and the car was never read again.
 PLATE_READS_KEEP = 25
 PLATE_CLUSTER_SIMILARITY = 0.85
+PLATE_AGREE_READS = int(os.environ.get("AIPORT_LPR_AGREE_READS") or 3)
 
 
 def _plate_rep(reads):
-    """(text, confidence) representing a track's [(text, confidence), ...] plate reads."""
+    """(text, confidence, agreeing) for a track's [(text, confidence), ...] plate reads:
+    the per-character vote of its main group, the mean confidence of the reads that voted,
+    and how many reads voted (PLATE_AGREE_READS of them make the plate final)."""
     clusters = []
     for read in reads:
         for cluster in clusters:
@@ -1337,9 +1342,16 @@ def _plate_rep(reads):
         else:
             clusters.append([read])
     best = max(clusters, key=lambda c: (len(c), max(r[1] for r in c)))
-    counts = collections.Counter(r[0] for r in best)
-    text = max(counts, key=lambda t: (counts[t], max(r[1] for r in best if r[0] == t)))
-    return text, max(r[1] for r in best if r[0] == text)
+    lengths = collections.Counter(len(r[0]) for r in best)
+    length = max(lengths, key=lambda n: (lengths[n], max(r[1] for r in best if len(r[0]) == n)))
+    voters = [r for r in best if len(r[0]) == length]
+    text = ""
+    for i in range(length):
+        weight = collections.Counter()
+        for t, conf in voters:
+            weight[t[i]] += conf
+        text += max(weight, key=lambda ch: weight[ch])
+    return text, sum(r[1] for r in voters) / len(voters), len(voters)
 
 
 def _hold_for_zones(device_id, tracks, joining):
@@ -1387,10 +1399,16 @@ def _merge_extra(tr, d, device_id=None, tracker_id=None):
             reads = tr.setdefault("plate_reads", [])
             reads.append((value, score))
             del reads[:-PLATE_READS_KEEP]
-            text, conf = _plate_rep(reads)
+            text, conf, agreeing = _plate_rep(reads)
+            if agreeing < PLATE_AGREE_READS:
+                log.debug("plate %r for vehicle tracker_id=%s deviceID=%s not final yet (%d of "
+                          "%d agreeing reads)", text, tracker_id, device_id, agreeing,
+                          PLATE_AGREE_READS)
+                continue
             if text != tr.get("plate_logged"):
-                log.info("plate %r for vehicle tracker_id=%s deviceID=%s (score=%.2f, %d read(s))",
-                         text, tracker_id, device_id, conf, len(reads))
+                log.info("plate %r for vehicle tracker_id=%s deviceID=%s (score=%.2f, %d of %d "
+                         "read(s) agreeing)", text, tracker_id, device_id, conf, agreeing,
+                         len(reads))
                 tr["plate_logged"] = text
             out[key], scores[key] = text, conf
         elif key == "match":  # (subject_id, name) from Protect's face DB

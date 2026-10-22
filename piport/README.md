@@ -240,15 +240,19 @@ and the vehicle-attribute values follow Protect's label vocabulary:**
 | Stage | Models | Emitted as |
 |-------|--------|------------|
 | Vehicle type + colour | YOLO class + HSV colour vote (no extra model) | `attributes: {vehicleType: {val, confidence}, color: {val, confidence}}` on vehicle descriptors (shape from the Protect backend; value vocabulary unconfirmed) |
-| License plates | `fast-alpr` (YOLOv9 plate detector + CCT OCR, MIT) on the full-res snapshot inside each vehicle box | plate text in the vehicle descriptor's `name` (Protect's `parseSmartDetectTrackPayload` reads it there; `recognizeTracks` recognises moving vehicles with a `name`); per track, the most frequent reading of the largest group of similar reads (see below) |
+| License plates | `fast-alpr` (YOLOv9 plate detector + CCT OCR, MIT) on the full-res snapshot inside each vehicle box | plate text in the vehicle descriptor's `name` (Protect's `parseSmartDetectTrackPayload` reads it there; `recognizeTracks` recognises moving vehicles with a `name`); per track, a per-character vote over the largest group of similar reads, once 3 agree (see below) |
 | Faces | YuNet (MIT) inside each person box; SFace (Apache-2.0) embedding | its own `face` track carrying `faceEmbed` (128 floats, best-scoring face kept), which `recognizeTracks` passes to Protect's face service; an optional local-gallery match also sets `name`/`tag` on the face and parent person |
 
-A vehicle that is still, or already has a confident plate (score >= 0.85), isn't
-re-read: its plate can't have changed. A parked one is read for 5 s after it parks, as in
-Frigate, then not again; a box mostly inside a parked car's box counts as that car. As in
+A plate narrower than `AIPORT_LPR_MIN_PX` (60 snapshot pixels) isn't read at all: on
+re-read clips every read under 75 px was wrong and from 80 px nearly all were right. As in
 Frigate, a track keeps its last 25 reads and groups those whose average Jaro-Winkler
-similarity is >= 0.85; the largest group wins, and within it the reading seen most often
-(Frigate takes the most confident), so one misread can't replace the plate. The plate is
+similarity is >= 0.85; the largest group wins, and its reads of the most common length vote
+character by character (weighted by confidence), so one misread letter is outvoted. A plate
+is final, and reported, only once `AIPORT_LPR_AGREE_READS` (3) reads agree; before that the
+vehicle has no plate, and a single confident misread can't become it. A vehicle that is
+still, or already has a final confident plate (score >= 0.85), isn't re-read: its plate
+can't have changed. A parked one is read for 5 s after it parks, as in Frigate, then not
+again; a box mostly inside a parked car's box counts as that car. The plate is
 logged at INFO only when a track's plate first appears or changes; each raw read is DEBUG. Plates and faces are read from the full-res snapshot (refreshed every second while they are on),
 not the 640x640 detection buffer. The `smartDetect` capabilities gain `licensePlate`,
 `lprEnhancedByAiKey`, `face`, `faceEnhancedByAiKey` only when the matching stage is available.

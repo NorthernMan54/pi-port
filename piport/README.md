@@ -586,7 +586,9 @@ venv/bin/python piport/replay.py --check ~/piport-clips
 ```
 
 It prints `PASS`/`FAIL` per clip with what it found, the reasons for a failure and what the clip
-guards against, and exits 1 if any failed. To add a scenario, fetch the footage from Frigate
+guards against, and exits 1 if any failed. A clip still running after `--clip-timeout` seconds
+(default 300; a sidecar's `timeout` overrides it) is killed, with its ffmpeg, and reported as
+`FAIL ... timed out`. To add a scenario, fetch the footage from Frigate
 (`/api/<camera>/start/<s>/end/<s>/clip.mp4`) into `~/piport-clips`, copy a sidecar from the
 same camera, and set its `start`, `expect` and `why`.
 

@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import tempfile
 import unittest
 from unittest import mock
@@ -132,12 +133,12 @@ class TestReplay(unittest.TestCase):
             json.dump({"expect": {"events": 1, "objects": {"person": 1}},
                        "env": {"AIPORT_TICK_S": "0.2"}, "args": ["--device", "D1"]}, f)
         runs = []
-        def run(cmd, env, **kw):
+        def run(cmd, env, timeout):
             runs.append((cmd, env))
             events = [{"objects": [{"tracker": 1, "type": "person"}]}]
             return subprocess.CompletedProcess(cmd, 0, json.dumps({"events": events}), "")
         out = io.StringIO()
-        with mock.patch.object(replay.subprocess, "run", run):
+        with mock.patch.object(replay, "_run_clip", run):
             self.assertEqual(replay.check_clips([self.dir], out=out), 0)
             (cmd, env), = runs
             self.assertEqual(cmd[2:], [self.clip, "--json", "--device", "D1"])
@@ -148,6 +149,34 @@ class TestReplay(unittest.TestCase):
             self.assertEqual(replay.check_clips([self.dir], out=out), 1)
         self.assertIn("FAIL walk.avi", out.getvalue())
         self.assertIn("guards: two walks", out.getvalue())
+
+    def test_a_hung_clip_times_out_and_fails(self):
+        # Live: one clip ran 21 min at 74% CPU and the whole run printed nothing.
+        with open(os.path.join(self.dir, "walk.json"), "w") as f:
+            json.dump({"expect": {"events": 0}}, f)
+        limits = []
+        def run(cmd, env, timeout):
+            limits.append(timeout)
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        out = io.StringIO()
+        with mock.patch.object(replay, "_run_clip", run):
+            self.assertEqual(replay.check_clips([self.dir], out=out, timeout=7), 1)
+            self.assertIn("FAIL walk.avi: timed out after 7 s", out.getvalue())
+            with open(os.path.join(self.dir, "walk.json"), "w") as f:
+                json.dump({"expect": {"events": 0}, "timeout": 90}, f)
+            replay.check_clips([self.dir], out=out, timeout=7)
+        self.assertEqual(limits, [7, 90])   # a sidecar's "timeout" wins
+
+    def test_run_clip_kills_the_whole_process_group(self):
+        # The replay's ffmpeg was left running after only the replay was killed.
+        cmd = [sys.executable, "-c", "import subprocess, sys, time; subprocess.Popen("
+               "[sys.executable, '-c', 'import time; time.sleep(30)']); time.sleep(30)"]
+        t0 = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            replay._run_clip(cmd, dict(os.environ), 1)
+        self.assertLess(time.monotonic() - t0, 10)   # didn't wait for the grandchild
+        done = replay._run_clip([sys.executable, "-c", "print('ok')"], dict(os.environ), 10)
+        self.assertEqual((done.returncode, done.stdout.strip()), (0, "ok"))
 
 class TestCheck(unittest.TestCase):
     """replay.check: what a clip's summary misses of its "expect" block."""

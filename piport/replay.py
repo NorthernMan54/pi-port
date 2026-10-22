@@ -27,13 +27,15 @@ the sidecar's "env" (AIPORT_* settings, read at import) and "args" (e.g. ["--sta
     "objects": {"vehicle": 1, "person": [2, 3]}  tracks of each type, over all events
     "distinct_face_snapshots": true           no two face tracks have the same face thumbnail
     "no_face_embed": true                     no faceEmbed is sent
-and "why": what the clip guards against.
+and "why": what the clip guards against. A clip still running after --clip-timeout seconds
+(default 300; a sidecar's "timeout" overrides it) is killed and reported as FAIL timed out.
 """
 import argparse
 import collections
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -296,8 +298,31 @@ def _iou(a, b):
     return iw * ih / float(aw * ah + bw * bh - iw * ih)
 
 
-def check_clips(paths, out=sys.stdout):
-    """Replay every clip with an "expect" under paths (clips or folders), one process each.
+# A clip replays in about real time or faster (the longest, 60 s, took ~70 s); one still going
+# after this is stuck (live: 21 min on one clip at 74% CPU, with nothing printed).
+CLIP_TIMEOUT_S = 300
+
+
+def _run_clip(cmd, env, timeout):
+    """Run one clip's replay; on a timeout kill its whole process group (the replay and the
+    ffmpeg it decodes with) and raise subprocess.TimeoutExpired."""
+    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, start_new_session=True)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
+def check_clips(paths, out=sys.stdout, timeout=CLIP_TIMEOUT_S):
+    """Replay every clip with an "expect" under paths (clips or folders), one process each,
+    killing one that runs past `timeout` seconds (a sidecar's "timeout" overrides it).
     Returns how many failed."""
     sidecars = []
     for path in paths:
@@ -319,8 +344,16 @@ def check_clips(paths, out=sys.stdout):
         cmd = [sys.executable, os.path.abspath(__file__), clip, "--json"] + list(
             settings.get("args") or [])
         t0 = _time.monotonic()
-        run = subprocess.run(cmd, env=env, capture_output=True, text=True)
         name = os.path.basename(clip)
+        limit = float(settings.get("timeout") or timeout)
+        try:
+            run = _run_clip(cmd, env, limit)
+        except subprocess.TimeoutExpired:
+            failed += 1
+            print("FAIL %s: timed out after %.0f s" % (name, limit), file=out)
+            if settings.get("why"):
+                print("    guards: %s" % settings["why"], file=out)
+            continue
         try:
             events = json.loads(run.stdout)["events"]
         except (ValueError, KeyError):
@@ -367,6 +400,8 @@ def main(argv=None):
     ap.add_argument("clip", nargs="?")
     ap.add_argument("--check", nargs="+", metavar="CLIP_OR_DIR",
                     help="replay every clip with an \"expect\" block and report PASS/FAIL")
+    ap.add_argument("--clip-timeout", type=float, default=CLIP_TIMEOUT_S, metavar="S",
+                    help="with --check, kill a clip still running after S seconds (default 300)")
     ap.add_argument("--faces", action="store_true",
                     help="read faces and plates once a second from full-size frames")
     ap.add_argument("--device", help="the camera's deviceID, so per-camera AIPORT_* settings apply")
@@ -383,7 +418,7 @@ def main(argv=None):
     ap.add_argument("-v", "--verbose", action="store_true", help="avclient's INFO log on stderr")
     args = ap.parse_args(argv)
     if args.check:
-        sys.exit(1 if check_clips(args.check) else 0)
+        sys.exit(1 if check_clips(args.check, timeout=args.clip_timeout) else 0)
     if not args.clip:
         ap.error("a clip is needed (or --check)")
     if args.device:

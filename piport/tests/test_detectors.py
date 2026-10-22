@@ -209,6 +209,19 @@ class TestOnnxProviders(unittest.TestCase):
         self.assertEqual(fp16.get("ModelFormat"), "MLProgram")
         self.assertNotIn("ModelFormat", fp32)  # NeuralNetwork, Core ML's default
 
+    def test_compute_units_setting(self):
+        # Live 18:40 the Neural Engine, shared with Frigate's Core ML detector, was the
+        # bottleneck; gpu moves pi-port's model off it, in the format that's fast there.
+        self.addCleanup(os.environ.pop, "AIPORT_COREML_UNITS", None)
+        os.environ["AIPORT_COREML_UNITS"] = "gpu"
+        opts = cpu._onnx_providers(self.MAC, fp16_input=False)[0][1]
+        self.assertEqual(opts, {"MLComputeUnits": "CPUAndGPU", "ModelFormat": "MLProgram"})
+        os.environ["AIPORT_COREML_UNITS"] = "ane"
+        self.assertEqual(cpu._onnx_providers(self.MAC, fp16_input=False)[0][1],
+                         {"MLComputeUnits": "CPUAndNeuralEngine"})
+        os.environ["AIPORT_COREML_UNITS"] = "auto"
+        self.assertEqual(cpu._onnx_providers(self.MAC, fp16_input=False)[0][1], {})
+
     def test_auto_without_coreml(self):
         self.assertEqual(cpu._onnx_providers(["CPUExecutionProvider"]),
                          ["CPUExecutionProvider"])

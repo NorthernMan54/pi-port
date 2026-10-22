@@ -209,6 +209,12 @@ format follows the model's input dtype: `MLProgram` for the fp16 Ultralytics YOL
 NeuralNetwork format runs it at ~95 ms), NeuralNetwork for float32 graphs such as YOLOv9
 (3 ms vs 22 ms under MLProgram, M2). `AIPORT_ORT_PROVIDER=cpu` forces CPU; `auto` (default) picks Core ML
 when onnxruntime offers it (never on Linux) and falls back to CPU if the model won't compile.
+`AIPORT_COREML_UNITS` picks where Core ML runs it: `auto` (Core ML's choice, the Neural
+Engine), `ane`, `gpu`, `cpu` or `all`. `gpu` keeps pi-port off the Neural Engine when Frigate's
+Core ML detector shares it on the same Mac (live 18:40 its power rose ~7x with every camera's
+pass time while the CPU sat half idle), and uses the MLProgram format, which runs YOLOv9-s at
+320 in ~7 ms on an M2's GPU (NeuralNetwork: 22 ms; on the Neural Engine 3.5 ms when it's free),
+with the same boxes to a pixel and scores to 0.01.
 
 **YOLOv8/v9 models.** The onnx backend also reads anchor-free exports (one `[1,4+classes,N]`
 output: xywh and class scores, no objectness), e.g. Frigate's `yolov9-s-320.onnx`. The input

@@ -21,6 +21,13 @@ from .base import Detector
 log = logging.getLogger("aiport-detector")
 
 
+# Where Core ML runs the model (AIPORT_COREML_UNITS): auto leaves Core ML's choice (the Neural
+# Engine for these models); gpu keeps it off the Neural Engine, which Frigate's Core ML
+# detector shares on the same Mac (live 18:40 ANE power rose ~7x with every camera's pass time
+# while the CPU sat half idle).
+COREML_UNITS = {"ane": "CPUAndNeuralEngine", "gpu": "CPUAndGPU", "cpu": "CPUOnly", "all": "ALL"}
+
+
 def _onnx_providers(available, fp16_input=True):
     """onnxruntime providers (AIPORT_ORT_PROVIDER = auto/coreml/cpu): Core ML on
     macOS (~5-6x CPU on Apple silicon), else CPU. The Core ML format follows the
@@ -34,6 +41,12 @@ def _onnx_providers(available, fp16_input=True):
         else:
             # float32 graphs (Frigate's yolov9-s-320): NeuralNetwork 3 ms, MLProgram 22 ms.
             opts = {}
+        units = COREML_UNITS.get(os.environ.get("AIPORT_COREML_UNITS", "auto").strip().lower())
+        if units:
+            opts = dict(opts, MLComputeUnits=units)
+        if units == "CPUAndGPU":
+            # On the GPU the NeuralNetwork format ran yolov9-s-320 at 22 ms, MLProgram at 7 ms (M2).
+            opts["ModelFormat"] = "MLProgram"
         return [("CoreMLExecutionProvider", opts), "CPUExecutionProvider"]
     if want == "coreml":
         log.warning("AIPORT_ORT_PROVIDER=coreml but onnxruntime has no Core ML provider; using CPU")

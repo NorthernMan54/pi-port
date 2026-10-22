@@ -596,6 +596,8 @@ same camera, and set its `start`, `expect` and `why`.
 
 ## Known limitations and next steps
 
+- No motion or audio events for paired cameras: Protect takes both from the AI Port while a
+  camera is paired, and pi-port sends neither yet (see the root README's roadmap).
 - Live verification of multi-object tracking in a genuinely simultaneous different-type scene is
   still pending; only the single-object path has been re-confirmed live.
 - Line Crossing support is implemented, but its event and capability shapes have not been tested

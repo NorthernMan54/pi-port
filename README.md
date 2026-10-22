@@ -482,6 +482,17 @@ CPU); `cpu` forces CPU and `coreml` requests Core ML (CPU with a warning if abse
   classifier. Vehicle type/colour, license plates and faces (`enrich.py`, optional) use
   open models and a **best-guess wire format** not yet confirmed against Protect; faces
   match a local gallery, not Protect's own face enrolment.
+- **Gap: no motion events for paired cameras.** While a camera is paired, Protect
+  ignores the camera's own motion events (`EventSmartMotion`/`EventAnalytics`) and
+  takes them from the AI Port, but pi-port doesn't send any yet. Paired cameras show
+  no motion-only events, motion-triggered recording only follows smart detections,
+  and motion alerts don't fire. pi-port already runs a motion detector on every
+  frame; the missing piece is the exact `EventSmartMotion` start/pulse/stop payload
+  Protect expects. See `docs/protect-aiport-controller.md`.
+- **Gap: no audio detection for paired cameras.** Protect also drops a paired camera's
+  own `EventSmartAudio` (smoke/CO alarm, glass break, etc.), and pi-port's feature
+  flags list no audio types, so those detections are turned off while the camera is
+  paired.
 - **Known:** an assigned ONVIF camera depends on the AI Port for its video (no
   recording while the AI Port is down), gets the main stream on every channel,
   and AAC instead of Opus audio.

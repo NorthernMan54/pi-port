@@ -1104,12 +1104,26 @@ def _better_thumbnail(best, d):
     return d["score"] > best["score"] + 0.05 or area(d["coord"]) > 1.1 * area(best["coord"])
 
 
+def _note_face_read(tr, d, now_ms):
+    """A face track becomes reportable ("nameable") with its first read of at least
+    FACE_MATCH_MIN_PX; until then it's tracked but held back, as Protect could never name or
+    group it (live 11:49 a 24 px face on Camera B showed as a face no one could identify).
+    Tracking the small reads keeps the regions around the person as they were: dropping them
+    nudged a person's box, and the 43 px read that followed was missed (the 14:33 clip). Its
+    event box starts at that first nameable read."""
+    if d["objectType"] != "face" or d.get("small") or tr.get("nameable"):
+        return
+    tr["nameable"] = True
+    tr["first_shown_ms"] = now_ms
+    tr["history"] = []
+
+
 def _capture_best(device_id, tr, d):
     """Keep the track's best-scoring moment: the full-res JPEG, the box and the
     time. On leave the thumbnails come from it, not from the frame several seconds after
     the object was last seen (which, for a face, no longer contains it)."""
     best = tr.get("best")
-    if d.get("seeded") or (best and not _better_thumbnail(best, d)):
+    if d.get("seeded") or d.get("small") or (best and not _better_thumbnail(best, d)):
         return
     mtime, data = d.get("frame") or _read_snapshot(device_id)
     if data is None:
@@ -1180,21 +1194,20 @@ def _enrich_detections(device_id, detections):
                 log.debug("enrichment: plate %r on vehicle for deviceID=%s (score=%.2f)",
                          p["text"], device_id, p["confidence"])
             for f in enricher.faces(img, [p["coord"] for p in people]):
-                # A face too small to match (FACE_MATCH_MIN_PX) isn't reported either: Protect
-                # could never name or group it (live 11:49 a 24 px face on Camera B showed
-                # as a face no one could identify). Its person is still reported.
-                if f.get("size_px", enrich.FACE_MATCH_MIN_PX) < enrich.FACE_MATCH_MIN_PX:
-                    log.debug("enrichment: %s px face on deviceID=%s under %d px, not reported",
-                              f.get("size_px"), device_id, enrich.FACE_MATCH_MIN_PX)
-                    continue
                 face = {"objectType": "face", "score": f["score"], "coord": f["coord"],
                         "extra": {"name": f["name"], "tag": f["name"]},
                         "frame": _snapshot_bytes.get(device_id), "size_px": f.get("size_px"),
                         "fresh_read": True, "parent_coord": list(people[f["parent"]]["coord"])}
+                # A face under FACE_MATCH_MIN_PX is too small to match: it gets no embedding
+                # and no match, and is tracked but not reported until a read of its track
+                # reaches the minimum (_note_face_read).
+                small = f.get("size_px", enrich.FACE_MATCH_MIN_PX) < enrich.FACE_MATCH_MIN_PX
+                if small:
+                    face["small"] = True
                 # A face whose SFace vector is short (enrich.FACE_EMBED_MIN_NORM) is reported
                 # without its embedding and isn't matched: a poor face. Protect enrols the
                 # embedding it's sent, and a poor one makes a bad reference.
-                if f["embedding"] is not None and not enrich.weak_embedding(f["embedding"]):
+                if f["embedding"] is not None and not small and not enrich.weak_embedding(f["embedding"]):
                     face["scored"] = {"faceEmbed": (f["embedding"], f["score"])}
                     db = _get_face_db()
                     m = db.match(f["embedding"], FACE_DB_THRESH) if db else None
@@ -2385,6 +2398,7 @@ def _motion_tick(ws, device_id):
                                                  if m[0] != tracker_id]
                         joining.append((tracker_id, tr))
                 _merge_extra(tr, d, device_id, tracker_id)
+                _note_face_read(tr, d, now_ms)
                 _capture_best(device_id, tr, d)
                 tr["seen_ms"] = now_ms
                 # Line Crossing: check this frame's movement against configured lines.
@@ -2452,6 +2466,7 @@ def _motion_tick(ws, device_id):
                 tr["prev_center"] = _protect_center(device_id, d["coord"])
                 _update_still(tr, now_ms)
                 _merge_extra(tr, d, device_id, tracker_id)
+                _note_face_read(tr, d, now_ms)
                 _capture_best(device_id, tr, d)
                 if how == "event":
                     event["finished"] = [m for m in event["finished"] if m[0] != tracker_id]
@@ -2479,6 +2494,7 @@ def _motion_tick(ws, device_id):
                 and d["objectType"] not in CONFIRM_WITH)
             _update_still(tracks[tracker_id], now_ms)
             _merge_extra(tracks[tracker_id], d, device_id, tracker_id)
+            _note_face_read(tracks[tracker_id], d, now_ms)
             _capture_best(device_id, tracks[tracker_id], d)
             if starting:
                 # Already there when the tracker started (a parked car): no event until it moves.
@@ -2541,9 +2557,12 @@ def _motion_tick(ws, device_id):
                     event["finished"].append((tid, tr))
 
         # 3b. A face or plate confirms as soon as a confirmed, active track of its parent
-        #     type is there (it was found inside that track's box).
+        #     type is there (it was found inside that track's box); a face only once a read
+        #     was big enough to name (_note_face_read).
         for tid, tr in tracks.items():
             parent = CONFIRM_WITH.get(tr["objectType"])
+            if tr["objectType"] == "face" and not tr.get("nameable"):
+                continue
             if parent and not tr.get("confirmed", True) and tr["miss_count"] == 0 and any(
                     p["objectType"] == parent and p.get("confirmed", True)
                     and not p.get("stationary_coord") for p in tracks.values()):

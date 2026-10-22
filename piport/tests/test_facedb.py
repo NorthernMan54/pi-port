@@ -200,9 +200,9 @@ class TestAvclientMatching(unittest.TestCase):
         self.assertNotIn("match", again[0]["scored"])
         self.assertIn("faceEmbed", again[0]["scored"])
 
-    def test_face_too_small_to_match_is_not_reported(self):
-        # Live 09:21 on Camera C: an 18 x 23 px face scored 0.299 against the same person, and
-        # live 11:49 a 24 px face on Camera B showed in Protect as a face no one could name.
+    def test_small_face_is_kept_without_embedding_or_match(self):
+        # Live 09:21 on Camera C: an 18 x 23 px face scored 0.299 against the same person. A
+        # small face is still tracked (avclient holds it back from Protect until nameable).
         ian = vec()
         db = facedb.parse(build({5: ("Ian", [ian])}))
 
@@ -222,11 +222,13 @@ class TestAvclientMatching(unittest.TestCase):
                     mock.patch.object(av, "_load_snapshot_bgr",
                                       lambda dev, m=mtime: (np.zeros((9, 9, 3)), m)):
                 av._enrich_cache.pop("D", None)
-                found[size] = av._enrich_detections("D", [dict(person)])
-        self.assertEqual(found[18], [])                                   # not reported
-        face, = found[minimum]                                            # at the minimum: is
-        self.assertIn("faceEmbed", face["scored"])
-        self.assertIn("match", face["scored"])
+                found[size], = av._enrich_detections("D", [dict(person)])
+        self.assertTrue(found[18]["small"])
+        self.assertNotIn("faceEmbed", found[18].get("scored", {}))
+        self.assertNotIn("match", found[18].get("scored", {}))
+        self.assertNotIn("small", found[minimum])                     # at the minimum: nameable
+        self.assertIn("faceEmbed", found[minimum]["scored"])
+        self.assertIn("match", found[minimum]["scored"])
 
 
     def _enrich_one(self, embedding, db):

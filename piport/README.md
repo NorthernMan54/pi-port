@@ -254,8 +254,10 @@ not the 640x640 detection buffer. The `smartDetect` capabilities gain `licensePl
 `lprEnhancedByAiKey`, `face`, `faceEnhancedByAiKey` only when the matching stage is available.
 Knobs: `AIPORT_VEHICLE_ATTRS` / `AIPORT_LPR` / `AIPORT_FACE` (`auto`|`0`|`1`),
 `AIPORT_LPR_THRESH`, `AIPORT_FACE_THRESH`, `AIPORT_FACE_MATCH_THRESH`,
-`AIPORT_FACE_MATCH_MIN_PX` (40, the face's shorter side: smaller faces are too small to match,
-so they aren't reported at all; Protect could never name them. Their person still is), and
+`AIPORT_FACE_MATCH_MIN_PX` (40, the face's shorter side: smaller faces are too small to match
+and get no `faceEmbed`; a face track is still tracked from its small reads but is reported only
+once a read reaches the minimum, with its thumbnail and embedding from those reads. A face that
+stays small is never reported; its person still is), and
 `AIPORT_FACES_DIR` (default `<state-dir>/faces`): one sub-directory per person, named after
 them, holding a few clear face photos; edits are picked up without a restart.
 

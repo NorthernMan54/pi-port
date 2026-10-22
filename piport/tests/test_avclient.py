@@ -485,6 +485,36 @@ class TestCameraEvent(Base):
         person_tid = face["person_tid"]
         self.assertEqual(av._motion_state["D"]["tracks"][person_tid]["face_tid"], fid)
 
+    def test_small_face_is_tracked_but_held_back_until_nameable(self):
+        # Live 11:49 on Camera B: a 24 px face showed in Protect as a face no one could name.
+        small = dict(self.FACE, small=True)
+        for _ in range(3):
+            self.tick(self.PERSON, small)
+        (fid, face), = self.face_tracks().items()          # tracked...
+        self.assertFalse(face["confirmed"])                 # ...but not reported
+        self.assertNotIn("best", face)                      # no thumbnail from a small read
+        sent = [d["objectType"] for fn, p in self.sent if fn == "EventSmartDetect"
+                for d in p["descriptors"]]
+        self.assertNotIn("face", sent)
+        self.tick(self.PERSON, dict(self.FACE, coord=[460, 230, 70, 70]))   # big enough now
+        face = self.face_tracks()[fid]                       # the same track
+        self.assertTrue(face["confirmed"] and face["nameable"])
+        self.assertEqual(face["best"]["coord"], [460, 230, 70, 70])
+        self.assertEqual(face["first_shown_ms"], 1_760_000_000_000 + self.clock_ms)   # starts here
+        self.tick(self.PERSON, small)                        # a later small read keeps it
+        self.assertEqual(self.face_tracks()[fid]["best"]["coord"], [460, 230, 70, 70])
+
+    def test_face_that_stays_small_is_never_reported(self):
+        for _ in range(3):
+            self.tick(self.PERSON, dict(self.FACE, small=True))
+        for _ in range(40):
+            self.tick()                                       # everyone leaves
+        self.assertEqual(self.face_tracks(), {})
+        sent = [d["objectType"] for fn, p in self.sent if fn == "EventSmartDetect"
+                for d in p["descriptors"]]
+        self.assertNotIn("face", sent)
+        self.assertIn("person", sent)
+
     def test_face_trailing_its_person_keeps_its_track(self):
         # Live 10:40 on Camera C: the snapshot's face lagged a fast-moving person's live box,
         # fell outside it, and opened a second face track.

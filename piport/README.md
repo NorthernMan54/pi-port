@@ -291,6 +291,17 @@ analysed, frames skipped (replaced by a newer one before a pass picked them up),
 the detector, and the average pass time; it's a WARNING when a camera analyses under 90% of the
 detection rate.
 
+**Host load** (`hoststats.py`, macOS and Linux; `AIPORT_HOST_STATS=0` turns it off) is logged
+once a minute beside them: the load average, CPU in cores for pi-port's own process tree
+(its ffmpeg pulls and helpers included), Frigate, OrbStack (macOS) or Docker containers
+(Linux) and everything else, from each process's CPU time over the minute; then what the
+hardware reports. On macOS that's a one-second `powermetrics` sample (root, as pi-port runs):
+cores and GPU busy, and CPU, GPU and ANE power. On Linux it's cores busy from `/proc/stat`,
+the RK3588 NPU's load (`/sys/kernel/debug/rknpu/load`, root) and a devfreq GPU's load where
+readable. E.g. `host over 60 s: load 4.1/5.0/5.7, CPU 3.2 of 8 cores (pi-port 1.75, Frigate
+0.60, OrbStack 0.24, other 0.81), cores 42% busy, GPU 20% busy, power CPU 4.1 W, GPU 1.2 W,
+ANE 0.8 W`.
+
 **Detection and report rates.** Detecting and reporting run at separate rates. Each camera's
 detector analyses up to `AIPORT_DETECT_FPS` frames per second (10 on macOS, where Core ML runs
 a frame in ~8 ms; elsewhere one frame per tick), each frame once, and tracking runs on every

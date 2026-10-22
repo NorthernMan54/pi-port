@@ -46,6 +46,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 import apple_fm
 import enrich
+import hoststats
 import onvif_push
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -4376,6 +4377,9 @@ def main():
         _STREAM_DIR = config.stream_dir(args.state_dir)
         STATE_DIR = args.state_dir
     _reset_stream_dir()
+    if hoststats.enabled():
+        # Once a minute beside the frame stats: CPU by pi-port/Frigate/OrbStack, GPU, ANE.
+        hoststats.start()
 
     mac_nosep = config.resolve_mac(args.iface, args.mac, cfg).lower()
     ip = config.resolve_ip(args.iface, cfg, args.bind_ip)

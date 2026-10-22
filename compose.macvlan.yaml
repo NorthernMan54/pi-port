@@ -28,6 +28,10 @@ services:
       AIPORT_NAME: "${AIPORT_NAME:-AI Port}"
       AIPORT_IFACE: "${AIPORT_IFACE:-eth0}"
       AIPORT_MAC: "FCECDA000001"   # must match mac_address below (protocol identity)
+      AIPORT_DEVICE_ID: "${AIPORT_DEVICE_ID:-}"  # unique per instance
+    command: ["--state-dir", "/data"]
+    volumes:
+      - piport-data:/data
     networks:
       lan:
         ipv4_address: 192.0.2.230   # <placeholder> -- a real free LAN address
@@ -45,3 +49,6 @@ networks:
       config:
         - subnet: 192.0.2.0/24    # <-- replace
           gateway: 192.0.2.1      # <-- replace
+
+volumes:
+  piport-data:

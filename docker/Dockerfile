@@ -52,7 +52,8 @@ RUN python3 -m venv "$VIRTUAL_ENV" \
  && case "$ACCEL" in \
         edgetpu) pip install --no-cache-dir ai-edge-litert ;; \
         cpu)     pip install --no-cache-dir onnxruntime ;; \
-    esac
+    esac \
+ && rm -f /tmp/requirements.txt
 
 WORKDIR /app
 COPY piport/ piport/

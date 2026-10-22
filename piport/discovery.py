@@ -212,7 +212,7 @@ def main():
 
         uptime_s = int(time.time() - start)
         resp = build_response(resp_version, resp_command, mac, ip_bytes,
-                               config.device_name(STATE_DIR),
+                               config.device_name(STATE_DIR, cfg.get("name")),
                                config.effective_fw_version(args.fw_version, STATE_DIR),
                                args.platform, args.sysid, uptime_s,
                                args.device_id)

@@ -26,6 +26,8 @@ import threading
 import time
 from urllib.parse import parse_qs, urlsplit
 
+from procutil import start_stderr_drain
+
 log = logging.getLogger("aiport-onvif")
 
 CLOCK_SYNC_INTERVAL_S = 5.0
@@ -212,6 +214,7 @@ class FlvPush:
 
     def _push_once(self, attempt):
         sock = proc = None
+        stderr_tail = lambda: ""
         sent = 0
         try:
             sock = socket.create_connection((self.host, self.port), timeout=self.timeout_s)
@@ -220,6 +223,7 @@ class FlvPush:
                 ffmpeg_push_cmd(self.ffmpeg_bin, self.source_url, self.stream_name,
                                 self.camera_audio),
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+            stderr_tail = start_stderr_drain(proc)
             log.info("push %s/%s -> %s:%d streamName=%s started (attempt %d, pid %d)",
                      self.device_id, self.channel, self.host, self.port, self.stream_name,
                      attempt, proc.pid)
@@ -243,9 +247,7 @@ class FlvPush:
             if sock:
                 sock.close()
         if not self._stop.is_set():
-            stderr = ""
-            if proc and proc.stderr:
-                stderr = proc.stderr.read().decode(errors="replace")[-300:]
+            stderr = stderr_tail()[-300:]
             log.warning("push %s/%s ended after %d bytes: %s%s", self.device_id, self.channel,
                         sent, reason, f" ffmpeg: {stderr.strip()}" if stderr.strip() else "")
 

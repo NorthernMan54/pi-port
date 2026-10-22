@@ -44,7 +44,7 @@
 # kernel driver, which this script does not install.
 #
 # The NPU model is deliberately not shipped in the repo (binary). It can come
-# from, in order: --rknn PATH, a local/submodule copy (models-rknn/ or
+# from, in order: --rknn PATH, a local copy (models-rknn/ or
 # rknn_convert/), --rknn-url URL, PIPORT_RKNN_URL, or the DEFAULT_RKNN_URL set
 # below (published as a separate AGPL-3.0 model repo/release -- see README.md).
 # rknn-toolkit2 can only convert ONNX -> RKNN on an x86_64 host, so a copy built
@@ -60,6 +60,8 @@ CFG="$PIPORT_DIR/aiport.cfg"
 RKNN_DEST="$PIPORT_DIR/models/yolov5s_relu.rknn"
 SYSTEMD_DIR="/etc/systemd/system"
 RKNNRT_URL="https://raw.githubusercontent.com/airockchip/rknn-toolkit2/v2.3.2/rknpu2/runtime/Linux/librknn_api/aarch64/librknnrt.so"
+# Pin the runtime blob too; the URL is a mutable tag on a third-party repo.
+RKNNRT_SHA256="d31fc19c85b85f6091b2bd0f6af9d962d5264a4e410bfb536402ec92bac738e8"
 
 # Known-good NPU model (RKNN 2.3.2/rk3588, 3 sigmoid heads); not committed --
 # it lives in the separate AGPL-3.0 model repo. Empty URL disables the download.
@@ -239,7 +241,7 @@ if [ "$ACCEL" = "rknn" ]; then
     # --no-cpu-model: the CPU yolov5n.onnx is for x86/arm64/macOS, not this NPU board.
     "$PY" "$REPO_ROOT/scripts/fetch_models.py" --no-cpu-model
 
-    # Source precedence: --rknn file > local/submodule copy > download, where
+    # Source precedence: --rknn file > local copy > download, where
     # the download URL is --rknn-url > PIPORT_RKNN_URL > DEFAULT_RKNN_URL.
     rknn_url="${RKNN_URL:-${PIPORT_RKNN_URL:-$DEFAULT_RKNN_URL}}"
     verified=0
@@ -251,7 +253,7 @@ if [ "$ACCEL" = "rknn" ]; then
         log "installed NPU model from $RKNN"
     fi
 
-    # (b) local/submodule copy: models-rknn/ (linked model repo) or a hand-built
+    # (b) local copy: models-rknn/ (linked model repo) or a hand-built
     # rknn_convert/ copy. Only if nothing is installed yet.
     if [ ! -f "$RKNN_DEST" ]; then
         if [ -f "$REPO_ROOT/.gitmodules" ] && command -v git >/dev/null 2>&1; then
@@ -343,6 +345,10 @@ if [ "$ACCEL" = "rknn" ]; then
     if ! curl -fL -o "$tmp" "$RKNNRT_URL"; then
         rm -f "$tmp"
         die "failed to download librknnrt.so from $RKNNRT_URL (offline?)"
+    fi
+    if ! verify_sha256 "$tmp" "$RKNNRT_SHA256"; then
+        rm -f "$tmp"
+        die "downloaded librknnrt.so failed sha256 verification"
     fi
     if [ -f "$lib" ] && cmp -s "$tmp" "$lib"; then
         log "system librknnrt.so already current ($lib)"

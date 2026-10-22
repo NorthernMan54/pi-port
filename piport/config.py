@@ -103,13 +103,21 @@ def get_bool(cfg, key):
 # (OnvifStreamControl streamUrl), the console's login password for this
 # device, and adoption tokens.
 _REDACTIONS = [
-    (re.compile(r"(\b[a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s@'\"]+@"), r"\1<redacted>@"),
-    (re.compile(r"([?&]token=)[^&\s'\"]+"), r"\1<redacted>"),
-    (re.compile(r"""(['"](?:password|[\w-]*token|adoptionCode)['"]\s*:\s*['"])[^'"]+""", re.I),
+    # URL userinfo, greedily through the last '@' so a password containing '@'
+    # cannot leave its tail in the log.
+    (re.compile(r"(\b[a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s'\"]+@"), r"\1<redacted>@"),
+    # Query/form credentials (RTSP URLs and snapshot/upload URLs).
+    (re.compile(r"([?&](?:password|passwd|username|user|token)=)[^&\s'\"]+", re.I),
      r"\1<redacted>"),
-    # "token: X", "token X already used": a long value right after the word.
-    (re.compile(r"(\btoken\b[^A-Za-z0-9<(]{1,12})[A-Za-z0-9_-]{12,}"), r"\1<redacted>"),
+    (re.compile(r"""(['"](?:password|passwd|newPassword|new_password|[\w-]*token|adoptionCode)['"]\s*:\s*['"])[^'"]+""", re.I),
+     r"\1<redacted>"),
+    # "token changed (old -> new)" before the generic token-value rule.
     (re.compile(r"(\btoken changed \()[^)]*"), r"\1<redacted>"),
+    # "token: X" / "newPassword: X" (colon or equals), including short values.
+    (re.compile(r"(\b(?:token|newPassword|new_password)\b\s*[:=]\s*)[^\s,;)}\]]+", re.I),
+     r"\1<redacted>"),
+    # A long token-like value after a space ("token FAKE... already used").
+    (re.compile(r"(\b(?:token|newPassword|new_password)\b[^A-Za-z0-9<(]{1,12})[A-Za-z0-9_+/.=-]{12,}"), r"\1<redacted>"),
 ]
 
 
@@ -292,9 +300,13 @@ def netmask_to_prefix(netmask):
         return None
     try:
         octets = [int(x) for x in str(netmask).split(".")]
-        if len(octets) != 4:
+        if len(octets) != 4 or any(o < 0 or o > 255 for o in octets):
             return None
-        return sum(bin(o).count("1") for o in octets)
+        value = sum(o << (8 * (3 - i)) for i, o in enumerate(octets))
+        inverted = (~value) & 0xFFFFFFFF
+        if inverted & (inverted + 1):  # non-contiguous mask
+            return None
+        return bin(value).count("1")
     except ValueError:
         return None
 
@@ -302,7 +314,8 @@ def netmask_to_prefix(netmask):
 def atomic_write_json(path, obj):
     """Write obj as JSON atomically (tmp + os.replace) so readers never see a torn write."""
     tmp = path + ".tmp"
-    with open(tmp, "w") as f:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
         json.dump(obj, f)
     os.replace(tmp, path)
 

@@ -5,12 +5,15 @@ x86_64) with a detector backend baked in at build time:
 
 | `ACCEL` | Detector | Notes |
 | --- | --- | --- |
-| `cpu` (default) | `onnxruntime` (YOLOv5n) | No accelerator; works on any x86_64/arm64 host |
-| `edgetpu` | Coral USB/PCIe (`ai-edge-litert` + `libedgetpu`) | SSDLite MobileDet, sha256-pinned; USB Coral verified on a Pi 5 |
+| `cpu` (image build default) | `onnxruntime` (YOLOv5n) | No accelerator; works on any x86_64/arm64 host |
+| `edgetpu` | Coral USB/PCIe (`ai-edge-litert` + `libedgetpu`) | SSDLite MobileDet, sha256-pinned; bridge stack default; USB Coral verified on a Pi 5 |
 | `none` | detection off | Protocol stack only |
 
 The RK3588 NPU backend is not offered in the image — use `scripts/install.sh`
-on that board.
+on that board. Coral device passthrough is wired into the bridge stack
+(`docker/docker-compose.yml`) only; the host/macvlan stacks are CPU-only unless
+you add `--device-cgroup-rule 'c 189:* rmw' -v /dev/bus/usb:/dev/bus/usb`
+yourself.
 
 There are two deployment shapes, for two different console locations:
 
@@ -25,6 +28,7 @@ There are two deployment shapes, for two different console locations:
 # from the repo root
 docker build -f docker/Dockerfile -t piport-cpu .
 docker run --rm --network host --cap-add NET_ADMIN \
+    -v piport-data:/data \
     -e AIPORT_CONSOLE_HOST=<console-ip> piport-cpu
 ```
 
@@ -71,11 +75,12 @@ Hikvision 4K ONVIF camera (video push, live view, recording, detection).
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `AIPORT_CONSOLE` | required | Console `host[:port]` (port defaults to 7442) |
-| `AIPORT_ACCEL` | `edgetpu` | Detector baked into the image: `edgetpu`, `cpu` or `none` |
-| `AIPORT_IP` / `AIPORT_SUBNET` | `172.30.10.10` / `172.30.10.0/24` | Container address; keep it fixed, the console stores it |
-| `AIPORT_HOSTNAME` | `piport` | Advertised hostname |
-| `AIPORT_DEBUG` | `false` | Debug logging |
+| `AIPORT_CONSOLE` | required | Container env: console `host[:port]` (port defaults to 7442) |
+| `AIPORT_HOSTNAME` | `piport` | Container env: advertised hostname |
+| `AIPORT_DEBUG` | `false` | Container env: debug logging |
+| `AIPORT_DETECTOR` | image `ACCEL` | Container env: detector backend override (`cpu`/`edgetpu`/`none`) |
+| `AIPORT_ACCEL` | `edgetpu` | Compose build arg: detector baked into the image |
+| `AIPORT_IP` / `AIPORT_SUBNET` | `172.30.10.10` / `172.30.10.0/24` | Compose interpolation: container address/subnet; keep the IP fixed, the console stores it |
 
 The trade-off: the AI Port lives on the Docker subnet, so only that host can
 reach it. A console on another machine cannot — use `scripts/install.sh` or the
@@ -86,9 +91,11 @@ LAN Compose stack there.
 The repo-root `compose.yaml` includes a `webui` service that runs
 `sysinfo_server.py` on `:8090` (`http://<host>:8090`): CPU per-core, memory,
 GPU/NPU when present, and the Coral's USB link speed. It has **no auth** — LAN
-use only. The instance create/destroy buttons are `instance_manager` (board)
-features; ignore them off-board. Remove the `webui` service if you do not want
-it. The bridge stack does not include the web UI.
+use only. Instance create/destroy is localhost-only by default (set
+`AIPORT_WEBUI_ALLOW_REMOTE=1` in the service to allow it from the LAN). The
+instance buttons are `instance_manager` (board) features; ignore them off-board.
+Remove the `webui` service if you do not want it. The bridge stack does not
+include the web UI.
 
 ## Importing into Komodo
 
@@ -194,9 +201,10 @@ The bridge stack keeps everything persistent in the `aiport-data` volume
   image rebuilds.
 
 `docker compose down -v` deletes the volume, i.e. the device identity. Remove the
-AI Port in Protect first. The LAN stack has no entrypoint wrapper: set
-`AIPORT_DEVICE_ID` / `AIPORT_MAC` explicitly if you need stable identity across
-container recreation.
+AI Port in Protect first. The LAN stacks mount the same `piport-data` volume at
+`/data` and pass `--state-dir /data`, so adoption and identity also survive
+`up -d --build`; set `AIPORT_DEVICE_ID` / `AIPORT_MAC` explicitly if you need a
+fixed identity without the entrypoint wrapper.
 
 ## Coral
 

@@ -380,11 +380,16 @@ def main():
             time.sleep(5)
             continue
         host_port = hosts[0]
-        if ":" in host_port:
-            host, port_s = host_port.rsplit(":", 1)
-            port = int(port_s)
-        else:
-            host, port = host_port, 7442
+        try:
+            if ":" in host_port:
+                host, port_s = host_port.rsplit(":", 1)
+                port = int(port_s)
+            else:
+                host, port = host_port, 7442
+        except (TypeError, ValueError):
+            log.warning("malformed adopt state host %r; retrying in 5s", host_port)
+            time.sleep(5)
+            continue
 
         send_token = token is not None and token not in used_tokens
         if token is not None:
@@ -394,9 +399,10 @@ def main():
                       "tokenless (fingerprint should already be pinned)", token)
         try:
             run(host, port, token, send_token, device_info, adopted=adopted)
+            log.warning("ucp4 connection closed cleanly by peer; reconnecting in 3s")
         except Exception as e:
             log.warning("connection ended: %r -- reconnecting in 3s", e)
-            time.sleep(3)
+        time.sleep(3)
 
 
 if __name__ == "__main__":

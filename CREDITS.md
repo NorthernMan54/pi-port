@@ -35,6 +35,10 @@ Third-party projects this repository references, derives from, or vendors. See
   installs its `libedgetpu1-std` package for the `edgetpu` backend.
 - **[ai-edge-litert](https://pypi.org/project/ai-edge-litert/)** (Apache-2.0) —
   Google's TFLite runtime, which loads the Edge TPU delegate.
+- **onnxruntime** (MIT), **numpy** (BSD-3-Clause), **requests** (Apache-2.0),
+  **websockets** (BSD-3-Clause), **paramiko** (LGPL-2.1) — Python runtime
+  dependencies. **ffmpeg** (LGPL-2.1-or-later or GPL depending on the build) is
+  the video pipeline.
 
 ## Non-free, not distributed
 

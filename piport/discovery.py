@@ -4,9 +4,11 @@
 """UBNT L2 discovery responder (UDP/10001) for the AI Port emulator.
 
 Classic UBNT discovery wire format. Sysid 0xa5f1 must map to catalog model
-"UVC AI Port" in the platform TLV. The controller scans multicast
-233.89.188.1:10001 (not broadcast), so bind 0.0.0.0, scope with
-SO_BINDTODEVICE, and join the group (which also programs the NIC filter).
+"UVC AI Port" for adoption; the discovery platform TLV (0x0C) advertises the
+SKU "UP-AI-Port" ([identity] discovery_platform). The controller scans multicast
+233.89.188.1:10001 (not broadcast), so bind 0.0.0.0, scope the socket to the
+interface where the OS supports SO_BINDTODEVICE, and join the group (which also
+programs the NIC filter).
 """
 import argparse
 import json
@@ -148,21 +150,32 @@ def main():
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     # Scope to this interface so one instance can't answer another's probes.
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE,
-                         args.iface.encode() + b"\0")
-    except OSError as e:
-        log.warning("SO_BINDTODEVICE(%s) failed: %s -- this instance may see/answer "
-                     "discovery probes meant for other instances on the same box",
-                     args.iface, e)
+    # SO_BINDTODEVICE is Linux-only; macOS/BSD simply leave the socket unscoped.
+    bind_device = getattr(socket, "SO_BINDTODEVICE", None)
+    if bind_device is None:
+        log.info("SO_BINDTODEVICE not available on this platform; discovery socket "
+                 "is not interface-scoped")
+    else:
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, bind_device, args.iface.encode() + b"\0")
+        except OSError as e:
+            log.warning("SO_BINDTODEVICE(%s) failed: %s -- this instance may see/answer "
+                         "discovery probes meant for other instances on the same box",
+                         args.iface, e)
     sock.bind(("0.0.0.0", DISCOVERY_PORT))
 
     # Join scoped to this interface; required to receive multicast and to program the NIC filter.
     try:
         if_index = socket.if_nametoindex(args.iface)
-        mreq = socket.inet_aton(MCAST_GROUP) + socket.inet_aton("0.0.0.0") + \
-            struct.pack("@i", if_index)
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        try:
+            # Linux: struct ip_mreqn (group, 0.0.0.0, ifindex).
+            mreq = socket.inet_aton(MCAST_GROUP) + socket.inet_aton("0.0.0.0") + \
+                struct.pack("@i", if_index)
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        except OSError:
+            # BSD/macOS: struct ip_mreq carries the interface address, not an index.
+            mreq = socket.inet_aton(MCAST_GROUP) + socket.inet_aton(ip)
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
         log.info("Joined multicast group %s on %s (ifindex %d)",
                   MCAST_GROUP, args.iface, if_index)
     except OSError as e:

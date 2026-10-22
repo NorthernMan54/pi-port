@@ -14,6 +14,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
+      args:
+        ACCEL: cpu
     image: piport-cpu
     container_name: piport-macvlan
     cap_add:

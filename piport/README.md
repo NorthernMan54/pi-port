@@ -1,10 +1,12 @@
-# Pi Port -- a DIY UniFi Protect "AI Port" on Orange Pi 5 Plus / RK3588
+# Pi Port -- the AI Port emulator (RK3588 · Raspberry Pi · x86 · macOS)
 
-`piport` emulates a **UniFi Protect AI Port** on an RK3588 board (Orange Pi 5 Plus): sysid
-`0xa5f1`, catalog platform string `"UVC AI Port"`. It answers the real discovery, adoption, and
-camera protocols well enough for a Protect console to adopt it and pair real cameras to it, and
-runs real object detection on the RK3588 NPU. It is an interoperability proof of concept, **not a
-product** and **not affiliated with or endorsed by Ubiquiti**. See "Scope and legal" below.
+`piport` emulates a **UniFi Protect AI Port**: sysid `0xa5f1`, catalog platform
+string `"UVC AI Port"` for adoption, discovery SKU `"UP-AI-Port"`. It runs on the
+RK3588 NPU, a Coral Edge TPU, CPU onnxruntime, or Core ML on Apple silicon. It
+answers the real discovery, adoption, and camera protocols well enough for a
+Protect console to adopt it and pair real cameras to it, and runs real object
+detection. It is an interoperability proof of concept, **not a product** and
+**not affiliated with or endorsed by Ubiquiti**. See "Scope and legal" below.
 
 ## Wire protocol (confirmed)
 
@@ -12,8 +14,10 @@ The AI Port shares firmware middleware with real UniFi cameras (`ubnt_ctlserver`
 `ubnt_avclient`), so its protocol is the known camera/chime protocol plus AI-Port-specific
 additions. All of the following was confirmed live against a real console.
 
-1. **UDP/10001 discovery** -- classic UBNT L2 discovery. The `platform` TLV (`0x0C`) must
-   equal the controller's catalog string `"UVC AI Port"`; sysid is `0xa5f1`.
+1. **UDP/10001 discovery** -- classic UBNT L2 discovery. The discovery platform TLV
+   (`0x0C`) advertises the SKU `"UP-AI-Port"` by default (`[identity]
+   discovery_platform`); the canonical `"UVC AI Port"` is the adoption/catalog
+   type. sysid is `0xa5f1`.
 2. **HTTPS control API on the device, port 443** (the shared camera firmware's
    `ubnt_ctlserver`, not AI Key's bespoke 8080):
 
@@ -59,11 +63,11 @@ additions. All of the following was confirmed live against a real console.
 | File | Role |
 |------|------|
 | `config.py` + `aiport.cfg` | Shared configuration and device-identity loader. All stages read the same file; CLI flags override cfg. |
-| `discovery.py` | UDP/10001 discovery responder, `platform="UVC AI Port"`, `sysid=0xa5f1`. |
+| `discovery.py` | UDP/10001 discovery responder, discovery platform `"UP-AI-Port"` (TLV `0x0C`), `sysid=0xa5f1`. |
 | `http_api.py` | HTTPS `:443`: `/api/1.2/manage`, `/api/1.2/login`, `/api/1.2/status`, `/api/1.2/snapshot`. |
 | `ucp4_client.py` | Generic `ucp4` device-management WebSocket client (adoption, `getInfo`). |
 | `avclient.py` | Classic per-camera avclient client: pairing, detection/classification, `EventSmartDetect` / `EventFeatureFlagsUpdated` pushes, snapshot upload. Most real behavior lives here. |
-| `detector.py` | YOLOv5 detector with a runtime-selected backend: `RKNNLite` (quantized YOLOv5s on the RK3588 NPU) or `onnxruntime` (CPU, `yolov5n.onnx`; x86_64/arm64). |
+| `detectors/` | Pluggable detection backends selected by `[hardware] detector`: `rknn` (RK3588 NPU), `edgetpu` (Coral USB/PCIe), `cpu` (onnxruntime; Core ML on Apple-silicon macOS). `postprocess.py` holds the shared YOLOv5 decode/NMS and COCO → person/vehicle/animal mapping. |
 | `run_all.py` | Launches all of the above together. |
 | `sysinfo_server.py` | Board system monitor / multi-instance web UI (CPU, memory, GPU, NPU); not part of the protocol. |
 | `instance_manager.py` | Manages multiple reboot-surviving emulator instances as systemd units (macvlan or physical). |
@@ -80,6 +84,7 @@ to its children. Only full-line `#` comments are supported (`configparser` ignor
 mac =
 hostname = piport
 platform = UVC AI Port
+discovery_platform = UP-AI-Port
 sysid = 0xa5f1
 fw_version = 5.1.12.67
 discovery_fw_version = aiport4G.mt8390.v5.1.12.67.emu.260904.0000
@@ -96,6 +101,9 @@ dns =
 [console]
 host =
 port = 7442
+[hardware]
+detector = auto
+detector_model =
 [logging]
 debug = false
 ```
@@ -105,10 +113,13 @@ debug = false
 | `[console] host` | IP of the Protect console **you own**; the avclient dials it when not yet adopted. Blank by default. `port` default 7442. |
 | `[identity] mac` | Empty derives a Ubiquiti-OUI MAC `FC:EC:DA:<iface last 3 octets>`. |
 | `[identity] platform` | Must match the controller's catalog string. |
+| `[identity] discovery_platform` | Discovery TLV `0x0C` SKU (`UP-AI-Port`); blank falls back to `platform`. |
 | `[identity] device_id` | Must be unique per emulated instance. |
 | `[identity] fw_version` / `discovery_fw_version` | Short version over ucp4/avclient/http / longer L2 discovery string. |
 | `[network] mode` | `dhcp` reads the live lease; `static` uses `ip`/`netmask`/`gateway`. `create --ip X.Y.Z.W` or `mode=static` makes `instance_manager.py` use `ip addr add` instead of `dhclient`. |
 | `[network] iface` / `parent_iface` | Blank = auto-detect (default-route interface). |
+| `[hardware] detector` | `auto` (default), `rknn`, `edgetpu`, `cpu` or `none`; `AIPORT_DETECTOR` overrides. |
+| `[hardware] detector_model` | Model file for that backend; blank = its default in `models/` (`AIPORT_MODEL_PATH` overrides). |
 | `[logging] debug` | Debug logs; any `--debug` overrides. |
 
 Env vars override the same keys after the file is read (`config.ENV_OVERRIDES`) --
@@ -126,13 +137,13 @@ One-shot installer (packages, venv, deps, model assets, `librknnrt` upgrade, sys
 sudo scripts/install.sh --console <UNVR-IP> [--parent-iface <iface>]
 ```
 
-Options: `--name NAME`, `--no-npu` (protocol stack only), `--rknn PATH`, `--rknn-url URL` /
-`--rknn-sha256 HEX`, `--webui-port N`. Run as root. The manual equivalent:
+Options: `--name NAME`, `--accel auto|rknn|edgetpu|cpu|none` (default `auto`; `--no-npu`
+is an alias for `none`), `--rknn PATH`, `--rknn-url URL` / `--rknn-sha256 HEX`,
+`--webui-port N`. Run as root. The manual equivalent:
 
 ```bash
 pip install -r requirements.txt
-pip install rknn-toolkit-lite2   # see "Object detection" below first
-
+pip install rknn-toolkit-lite2   # or ai-edge-litert (Coral) / onnxruntime (CPU)
 sudo python3 run_all.py --iface <your-iface> --fallback-host-port <console-ip>:7442
 ```
 
@@ -144,20 +155,32 @@ On macOS, `sudo scripts/piport_service.sh` runs it from settings in `~/.piport.e
 (`scripts/piport.env.example`) and restarts it on `touch ~/.piport-restart`, so a code or
 settings change needs neither a new terminal nor the password.
 
-## Object detection (NPU / CPU)
+## Object detection (NPU / CPU / Core ML / Edge TPU)
 
-The pipeline runs a real YOLOv5 model through `detector.py`, which picks a backend at
-runtime (`AIPORT_BACKEND=auto|rknn|onnx`, or infer from `AIPORT_MODEL_PATH`): the RK3588
-NPU via `rknnlite` (quantized YOLOv5s `.rknn`), or CPU via `onnxruntime` (Ultralytics
-`yolov5n.onnx`, x86_64/arm64). Model binaries are not committed; fetch the assets (ONNX,
-anchors, COCO labels, calibration subset) and optionally build `.rknn`:
+The pipeline runs a real COCO detector through `piport/detectors/`, chosen at runtime
+by `[hardware] detector` / `AIPORT_DETECTOR` (`auto|rknn|edgetpu|cpu|none`; `auto`
+takes the first backend whose runtime, hardware and model are present):
+
+- `rknn` — RK3588 NPU via `rknnlite` (quantized YOLOv5s `.rknn`).
+- `edgetpu` — Coral USB/PCIe via `ai-edge-litert` (SSDLite MobileDet, or a YOLOv5
+  Edge TPU export); see below.
+- `cpu` — `onnxruntime` (Ultralytics `yolov5n.onnx`; also accepts Rockchip's
+  `yolov5s_relu.onnx`), on x86_64/arm64 or Core ML on Apple-silicon macOS.
+
+`AIPORT_MODEL_PATH` / `[hardware] detector_model` overrides the model file; output
+layouts are auto-detected. Model binaries are not committed; fetch the assets and
+optionally build `.rknn`:
 
 ```bash
-python3 scripts/fetch_models.py            # CPU model + conversion assets
-python3 scripts/fetch_models.py --convert  # build .rknn (x86 host)
+python3 scripts/fetch_models.py                     # rknn assets (ONNX + labels/anchors)
+python3 scripts/fetch_models.py --backend cpu       # CPU/Core ML model
+python3 scripts/fetch_models.py --backend edgetpu   # Coral MobileDet model
+python3 scripts/fetch_models.py --convert           # build .rknn (x86 host)
 ```
 
 For a containerized CPU install (x86 servers / Raspberry Pi 4/5) see `docker/README.md`.
+macOS is bare metal only — Docker Desktop's VM can't do the L2 discovery the console
+needs; see the root README.
 
 **Video decode** picks a hardware backend automatically, or by `AIPORT_HWDEC`
 (`auto`|`rkmpp`|`v4l2m2m`|`videotoolbox`|`none`): `rkmpp` on the RK3588 (ffmpeg-rockchip), `v4l2m2m`
@@ -166,7 +189,7 @@ which also needs `/dev/vchiq`), `videotoolbox` on **macOS** for HEVC (`-hwaccel 
 M2 a 2688x1512 HEVC camera took ~5% of a core instead of ~21%; H.264 stays software, as
 VideoToolbox dropped pictures on a Protect-relayed H.264 stream), else software. The **Pi 5 has no H.264 hardware
 decoder** (HEVC only), so it always software-decodes H.264 -- and its CPU does that
-faster than the Pi 4's hardware block. See `docker/README.md` and `implementation.md`
+faster than the Pi 4's hardware block. See `docker/README.md` and the root README
 for the measured numbers and the known Pi 4 decoder limits.
 
 **Stalled pulls restart themselves.** ffmpeg gives up on an RTSP connection that sends
@@ -429,7 +452,7 @@ pip install onnx==1.16.1   # repin; rknn-toolkit2 may upgrade onnx
 ```
 
 `fetch_models.py` places `yolov5s_relu.rknn`, `anchors_yolov5.txt`, and `coco_80_labels_list.txt`
-in `models/` next to `detector.py`.
+in `models/`.
 
 - **System `librknnrt.so` upgrade (required).** The stock OS ships runtime 1.4.0 (2022), which
   cannot load models built by `rknn-toolkit2==2.3.2` (`Invalid RKNN model version 6`). Replace
@@ -437,7 +460,57 @@ in `models/` next to `detector.py`.
   `scripts/install.sh` does this. `RKNNLite().init_runtime()` should then log version 2.3.2.
 - **Explicit batch dimension.** `RKNNLite.inference()` needs `frame[np.newaxis, ...]` (shape
   `(1,H,W,3)`) or it fails with `"need 4dims input, but 3dims input buffer feed"`. Handled in
-  `detector.py`.
+  `detectors/rknn.py`.
+
+## Object detection (Coral Edge TPU, e.g. Raspberry Pi 5)
+
+`detectors/edgetpu.py` runs Google's SSDLite MobileDet COCO model (320x320 uint8, decode and NMS
+in-graph, the model Frigate ships) on a Coral via `ai-edge-litert` and the `libedgetpu` delegate;
+pycoral is not used (it has no wheels past Python 3.9). `scripts/install.sh --accel edgetpu` does
+the setup below.
+
+- **Runtime pairing.** Google's own `libedgetpu` apt repo stopped in 2021. feranick's maintained
+  `libedgetpu1-std` 16.0 (built against TF 2.19.1) works with `ai-edge-litert` 2.3.0 on Pi OS
+  trixie / Python 3.13 (verified on a Pi 5). `tflite-runtime` has no Python 3.13 wheels.
+- **`std`, not `max`.** The max-clock build runs the USB stick very hot.
+- **USB ids.** The Coral enumerates as `1a6e:089a` until libedgetpu uploads its firmware on first
+  open, then as `18d1:9302`.
+- **"Failed to load delegate" with no message** (verbose libedgetpu logs show `USB error -7
+  [GetDeviceDescriptor]`): the stick stopped answering on USB, typically after an earlier failed
+  open. Unplug and replug it; no driver install fixes this.
+- **USB 2 vs 3.** The Pi 5 has only two USB 3 ports. On USB 2 MobileDet takes ~33 ms per frame
+  (measured); USB 3 is faster (not measured here). Either is far below the 1.5 s detection tick.
+  The web UI shows the Coral's link speed.
+- **PCIe/M.2 Coral** additionally needs the `gasket`/`apex` kernel driver (and, on a Pi 5, the
+  4K-page kernel); not handled by the installer.
+- **No H.264 hardware decode on the Pi 5** (only HEVC), so camera streams are decoded on the CPU.
+
+## ONVIF cameras (`onvif_push.py`)
+
+For an assigned third-party camera Protect sends `OnvifStreamControl` (the camera's
+RTSP URL, `streaming` true/false) and, per channel, `ChangeVideoSettings` with an
+`extendedFlv` `avSerializer`: a `streamName` and `tcp://<console>:7550` as destination.
+Protect's own ingest for that camera stops; without the push the camera has no video.
+
+Each channel is `ffmpeg -c:v copy` (plus AAC audio) into FLV, rewritten by
+`rewrite_flv()` and sent over TCP:
+
+- FLV header flags byte `7`; after every tag a 16-byte trailer: `0`, a 24-bit
+  timescale (90000 video, 11025 otherwise), four reserved zero bytes, and the
+  elapsed time **in that timescale** (64-bit).
+- `onClockSync` (`streamClock`, `wallClock`) and `onMpma` script tags every 5 s,
+  the first only after 5 s -- Protect closes a push whose clock sync precedes the
+  first frames.
+
+The format follows unifi-cam-proxy's `clock_sync.py` (MIT), except the trailer units:
+it writes 10-microsecond units regardless of timescale, which Protect 7.2's media
+server reads as video 11% and audio 9x too fast and drops ("Video frame wc=... diff
+exceeds threshold" in `/srv/ms/logs/ms.err.00.log`); the browser live view then never
+starts. The `ChangeVideoSettings` reply reports the stream's probed resolution:
+Protect echoes back whatever was answered before, and the web player sizes its
+decoder from it.
+
+## Stream pipeline
 
 `avclient.py` runs one ffmpeg process per paired camera that pulls the RTSP stream and uses
 `filter_complex fps,split=2` for both outputs from a single decode: a full-res JPEG of every
@@ -523,8 +596,9 @@ same camera, and set its `start`, `expect` and `why`.
   still pending; only the single-object path has been re-confirmed live.
 - Line Crossing support is implemented, but its event and capability shapes have not been tested
   against a live controller.
-- The classifier is stock YOLOv5s (person/vehicle/animal), not Ubiquiti's second-pass classifier;
-  real Ubiquiti weights are not portable to this NPU.
+- The classifier is a stock COCO detector (YOLOv5 on NPU/CPU/Core ML, SSDLite
+  MobileDet on Coral), not Ubiquiti's second-pass classifier; real Ubiquiti
+  weights are not portable to this NPU.
 
 ## Scope and legal
 

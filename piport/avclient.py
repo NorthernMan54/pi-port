@@ -44,6 +44,7 @@ log = logging.getLogger("aiport-avclient")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 import enrich
+import onvif_push
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ADOPT_STATE_FILE = os.path.join(HERE, "adopt_state.json")
@@ -109,16 +110,38 @@ def _detect_hwdec():
     return None
 
 
-def _probe_codec(url, timeout=8):
-    """Video codec_name of the RTSP stream (e.g. 'h264', 'hevc'), or None if unknown."""
+def _parse_probe(out):
+    """ffprobe `codec_name,width,height,avg_frame_rate` csv -> dict; missing
+    fields are None."""
+    info = {"codec": None, "width": None, "height": None, "fps": None}
+    fields = out.strip().splitlines()[0].split(",") if out.strip() else []
+    if fields:
+        info["codec"] = fields[0].strip().lower() or None
+    try:
+        info["width"], info["height"] = int(fields[1]), int(fields[2])
+    except (IndexError, ValueError):
+        pass
+    try:
+        num, _, den = fields[3].partition("/")
+        fps = float(num) / float(den or 1)
+        info["fps"] = round(fps) if fps > 0 else None
+    except (IndexError, ValueError, ZeroDivisionError):
+        pass
+    return info
+
+
+def _probe_stream(url, timeout=8):
+    """Codec ('h264', 'hevc'), width, height and fps of the RTSP stream's first
+    video track; fields None if unknown."""
     try:
         out = subprocess.run(
             [_FFPROBE_BIN, "-v", "error", "-rtsp_transport", "tcp", "-select_streams", "v:0",
-             "-show_entries", "stream=codec_name", "-of", "csv=p=0", url],
-            capture_output=True, timeout=timeout, text=True).stdout.strip()
+             "-show_entries", "stream=codec_name,width,height,avg_frame_rate",
+             "-of", "csv=p=0", url],
+            capture_output=True, timeout=timeout, text=True).stdout
     except (OSError, subprocess.SubprocessError):
-        return None
-    return out.splitlines()[0].strip().lower() if out else None
+        out = ""
+    return _parse_probe(out)
 
 
 # An RTSP pull ffmpeg gives up on after this long with no data, so a dead relay connection
@@ -243,7 +266,7 @@ if TRACKER in ("", "norfair"):
 # A track is a true positive once the median of its last SCORE_HISTORY scores (0.0 for each
 # analysed frame it was missed in) reaches AIPORT_TRUE_THRESH -- Frigate's false-positive
 # filter (frigate/track/tracked_object.py, MIT). Every detection already needs
-# AIPORT_OBJ_THRESH (detector.py). Seen 2026-10-17: a tree stump on Camera C and a pot by
+# AIPORT_OBJ_THRESH (detectors/postprocess.py). Seen 2026-10-17: a tree stump on Camera C and a pot by
 # Camera A scored "animal" ~0.5-0.6 for a minute at a time; a passing sedan scored
 # 0.85 and 0.78 on its only two frames.
 SCORE_HISTORY = 10
@@ -356,8 +379,8 @@ _GATE_STRIDE = 8  # sample every Nth pixel -> 80x80 grayscale for the diff
 # Paired camera's smartDetectZones row id -- zonesStatus's key must match it (not always "1").
 SMART_DETECT_ZONE_ID = "1"
 
-# RK3588 NPU YOLOv5s (detector.py); ffmpeg decodes to 640x640 raw RGB, latest frame only.
-_latest_frame = {}   # deviceID -> HxWx3 uint8 numpy array (640x640, RGB)
+# Detector frames (detectors/), latest only: ffmpeg decodes to the detector frame size as raw RGB.
+_latest_frame = {}   # deviceID -> HxWx3 uint8 numpy array (RGB)
 _latest_frame_seq = {}  # deviceID -> number of the frame in _latest_frame (1 = first of the pull)
 # deviceID -> recent (seq, full-res JPEG) of the same frames, numbered alike: a track's best
 # frame is the one it was detected in, not the next snapshot (a passing bus had moved on).
@@ -379,6 +402,7 @@ _stream_dims = {}    # deviceID -> (width, height) of the real camera stream
 # deviceID -> capacity points of each stream UiStreamControl started. Kept apart from
 # _active_streams, which briefly drops a device while its ffmpeg restarts.
 _stream_points = {}
+_stream_probe = {}   # deviceID -> {"codec", "width", "height", "fps"} from ffprobe at pull start
 # deviceID -> exclusion polygons in the normalized 0-1000 space.
 _exclude_zones = {}
 # Prototype app exposes `zones` (not excludeZones): when non-default, a detection must be inside one.
@@ -398,7 +422,9 @@ SNAPSHOT_FALLBACK_WINDOW_S = 60
 _recent_snapshot_announcements = collections.deque(maxlen=32)
 # deviceID -> last announced per-object coord, so a filename-less fallback can still crop.
 _last_object_coord_by_device = {}
-DETECT_IMG_SIZE = 640  # must match detector.py's IMG_SIZE
+# Side of the square frames ffmpeg feeds the detector; _get_detector() sets it from
+# the loaded backend's input_size (640 RKNN/CPU, typically 320 Edge TPU).
+DETECT_IMG_SIZE = 640
 # Per-object snapshot: square crop centered on the detection, ffmpeg-scaled to this size.
 SMART_SNAPSHOT_SIZE = 512
 SMART_SNAPSHOT_MARGIN = 1.6
@@ -412,14 +438,24 @@ _snapshot_bytes = {}  # deviceID -> (mtime, JPEG bytes) of the latest full-res s
 # Records still holding a best-frame JPEG; older ones drop their bytes (memory bound).
 BEST_FRAME_RECORDS_MAX = 40
 _enrich_cache = {}    # deviceID -> (snapshot mtime, plate/face detections read from it)
+# Third-party (ONVIF) cameras: Protect hands their video ingest to the AI Port,
+# which must push each channel to :7550 (see onvif_push.py).
+_onvif = onvif_push.PushManager(ffmpeg_bin=FFMPEG_BIN)
+# [hardware] detector / detector_model, set by main(); see detectors/__init__.py. The env
+# defaults also serve replay.py and the tests, which don't run main().
+DETECTOR_BACKEND = (os.environ.get("AIPORT_DETECTOR") or os.environ.get("AIPORT_BACKEND")
+                    or "auto").strip().lower()
+DETECTOR_MODEL = os.environ.get("AIPORT_MODEL_PATH") or None
 
 
 def _get_detector():
-    global _detector
+    global _detector, DETECT_IMG_SIZE
     with _detector_lock:
         if _detector is None:
-            from detector import Detector
-            _detector = Detector()
+            import detectors
+            _detector = detectors.create(DETECTOR_BACKEND, DETECTOR_MODEL)
+            # Streams started from here on decode at the backend's input size.
+            DETECT_IMG_SIZE = _detector.input_size
         return _detector
 
 
@@ -597,17 +633,24 @@ def _detect_filter_graph(width=DETECT_IMG_SIZE, height=None):
     return f"[0:v]fps={DETECT_FPS},split=2[jpg][detin];[detin]scale={width}:{height}[det]"
 
 
-# One ffmpeg pulls RTSP and splits post-decode into a full-res JPEG and a 640x640 RGB
+# One ffmpeg pulls RTSP and splits post-decode into a full-res JPEG and an RGB
 # copy of each detection frame; decoding twice was wasteful (CPU-side NAL parsing
 # dominates, not the NPU). Both outputs come after one fps filter, so frame n of
 # each is the same picture.
-def _start_stream(device_id, ip, port, uri, width=None, height=None):
+def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
+    """Pull from Protect's relay (ip/port/uri), or from `url` directly -- an
+    ONVIF camera's own RTSP URL."""
     _stop_stream(device_id)
     os.makedirs(_STREAM_DIR, exist_ok=True)
     _stream_dims[device_id] = (width or DETECT_IMG_SIZE, height or DETECT_IMG_SIZE)
-    url = f"rtsp://{ip}:{port}/{uri}"
+    url = url or f"rtsp://{ip}:{port}/{uri}"
     out_path = os.path.join(_STREAM_DIR, f"{device_id}.jpg")
-    codec = _probe_codec(url)
+    probe = _probe_stream(url)
+    _stream_probe[device_id] = probe
+    if probe["width"] and probe["height"]:
+        # What the stream really is beats what the controller announced.
+        _stream_dims[device_id] = (probe["width"], probe["height"])
+    codec = probe["codec"]
     hwdec_args = _hwdec_args(codec)
     encode_args = ["-c:v", "mjpeg_rkmpp"] if FFMPEG_BIN != "ffmpeg" else ["-c:v", "mjpeg"]
     det_w, det_h = _detect_dims(width, height)
@@ -696,7 +739,7 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None):
                         device_id, count, backoff)
             time.sleep(backoff)
             if device_id not in _active_streams:
-                _start_stream(device_id, ip, port, uri, width, height)
+                _start_stream(device_id, ip, port, uri, width, height, url=url)
 
     threading.Thread(target=_jpeg_reader, daemon=True).start()
     threading.Thread(target=_reader, daemon=True).start()
@@ -883,7 +926,7 @@ def _classify_frame_detections(device_id):
         seq = _latest_frame_seq.get(device_id)
         if frame is not None:
             _analysed_frame_time[device_id] = _latest_frame_time.get(device_id) or _now_ms()
-    if frame is None:
+    if frame is None or DETECTOR_BACKEND == "none":
         return []
     try:
         detector = _get_detector()
@@ -1465,7 +1508,7 @@ def _process_line_crossings(ws, device_id, tracker_id, tr, new_center):
 
 def _dedupe_detections(detections, iou_thresh=0.4):
     """Collapse same-type detections that heavily overlap into one (highest
-    score wins). Per-class NMS in detector.py uses NMS_THRESH 0.45, but two
+    score wins). Per-class NMS in detectors/postprocess.py uses NMS_THRESH 0.45, but two
     boxes for ONE object can still survive it (e.g. a full-body box plus a
     partial/torso box with IoU just under the gate) -- observed live as two
     `person detected` ticks 1ms apart at scores 0.67/0.51 for the same person.
@@ -2577,8 +2620,11 @@ def _motion_tick(ws, device_id):
             _log_empty_motion(device_id)
 
 
-def _stop_motion_detector(device_id, preserve_tracks=False):
+def _stop_motion_detector(device_id, preserve_tracks=False, ws=None):
     """Stop this device's poll loop.
+
+    ws: the live avclient connection, needed to emit `leave` for open tracks
+    (without one those leaves fail and are only logged).
 
     preserve_tracks=True keeps `_motion_state` (open tracks, prev_center) so a
     UiStreamControl refresh does not silently abandon an in-flight track. Only a
@@ -2595,7 +2641,7 @@ def _stop_motion_detector(device_id, preserve_tracks=False):
         # leaves an orphaned event on the controller).
         for tracker_id, tr in open_tracks:
             try:
-                _send_smart_detect_event(None, device_id, edge_type="leave",
+                _send_smart_detect_event(ws, device_id, edge_type="leave",
                                           event_id=tr["event_id"], stationary=True,
                                           object_type=tr["objectType"], coord=tr["coord"],
                                           confidence=tr["score"],
@@ -3615,7 +3661,7 @@ def handle_function(ws, msg, device_info):
         else:
             if device_id:
                 _stop_stream(device_id)
-                _stop_motion_detector(device_id)
+                _stop_motion_detector(device_id, ws=ws)
                 _stream_points.pop(device_id, None)
             reply_status = "stopped"
         # usedPoints MUST be on every reply (start and stop): without it Protect sets
@@ -3631,8 +3677,39 @@ def handle_function(ws, msg, device_info):
                 _send_feature_flags_event(ws, device_id)
         return
     if fn == "OnvifStreamControl":
-        reply_status = "started" if payload.get("streaming") else "stopped"
-        send_msg(ws, "OnvifStreamControl", {"status": reply_status}, in_response_to=msg_id)
+        # Assigning an ONVIF camera: we pull its RTSP for detection and push its
+        # video to Protect (channels arrive via ChangeVideoSettings with this deviceID).
+        device_id = payload.get("deviceID")
+        url = payload.get("streamUrl")
+        reply_status = "stopped"
+        if device_id and payload.get("streaming") and url:
+            try:
+                _onvif.set_source(device_id, url, audio=payload.get("audio", True),
+                                  width=payload.get("width"), height=payload.get("height"),
+                                  fps=payload.get("fps"))
+                _stream_restart_count.pop(device_id, None)
+                _start_stream(device_id, None, None, None, payload.get("width"),
+                              payload.get("height"), url=url)
+                _start_motion_detector(ws, device_id, None, None, None, preserve_tracks=True)
+                # Counted, health-watched and stall-checked like a UiStreamControl camera.
+                _stream_points[device_id] = _stream_points_for(
+                    payload.get("width"), payload.get("height"), payload.get("fps"))
+                _stream_started_at[device_id] = time.monotonic()
+                _start_status_watch()
+                reply_status = "started"
+            except Exception:
+                log.exception("failed to start ONVIF camera deviceID=%s", device_id)
+        elif device_id:
+            _onvif.clear_device(device_id)
+            _stop_stream(device_id)
+            _stop_motion_detector(device_id, ws=ws)
+            _stream_points.pop(device_id, None)
+        send_msg(ws, "OnvifStreamControl", {"status": reply_status, "usedPoints": _used_points()},
+                 in_response_to=msg_id)
+        if device_id and reply_status == "started":
+            _send_status_event(ws, device_id, plug=True, streaming=True,
+                               smart_ready=True, audio_ready=True)
+            _send_feature_flags_event(ws, device_id)
         return
     if fn == "GetStreamList":
         # Protect asks on every connect; a non-empty list makes it send ResetAIPortStreams
@@ -3661,8 +3738,29 @@ def handle_function(ws, msg, device_info):
             send_msg(ws, fn, {}, in_response_to=msg_id)
         return
     if fn == "ChangeVideoSettings":
-        # A query, not a push: the controller builds its channel list from `.video`/`.audio`,
-        # so `{}` blocks provisioning.
+        # With a deviceID it configures an ONVIF camera's channel pushes (streamName +
+        # :7550 destination per videoN). Either way the reply is also read as a query:
+        # the controller builds its channel list from `.video`/`.audio`, so `{}` blocks
+        # provisioning.
+        onvif_src = None
+        if payload.get("deviceID") and isinstance(payload.get("video"), dict):
+            _onvif.configure(payload["deviceID"], payload["video"])
+            onvif_src = _onvif.source(payload["deviceID"])
+        if onvif_src:
+            # Every channel carries the camera's main stream, so report its real
+            # geometry -- probed, since Protect echoes back whatever we answered
+            # before. A wrong size breaks the web player (it sizes its decoder from it).
+            probe = _stream_probe.get(payload["deviceID"]) or {}
+            channel = {"enabled": True,
+                       "width": probe.get("width") or onvif_src["width"] or 1920,
+                       "height": probe.get("height") or onvif_src["height"] or 1080,
+                       "fps": probe.get("fps") or onvif_src["fps"] or 15,
+                       "bitrate": 8000000}
+            send_msg(ws, "ChangeVideoSettings", {
+                "video": {k: dict(channel) for k in payload["video"]},
+                "audio": {"enabled": True, "volume": 100},
+            }, in_response_to=msg_id)
+            return
         send_msg(ws, "ChangeVideoSettings", {
             "video": {
                 "video1": {"enabled": True, "width": 1920, "height": 1080,
@@ -3744,6 +3842,7 @@ def handle_function(ws, msg, device_info):
         # Un-adopt signal: the controller doesn't close the WS afterward, so tear down here.
         log.info("ResetToDefaults received -- treating as un-adopt: clearing "
                   "adopt state and tearing down streams")
+        _onvif.stop_all()
         _stop_all_streams()
         _exclude_zones.clear()
         _detect_zones.clear()
@@ -3908,6 +4007,27 @@ def run(host, port, device_info, token=None):
             handle_function(ws, msg, device_info)
 
 
+def _init_detector(cfg):
+    """Load the configured detector up front so ffmpeg is started at its input
+    size. A failure is logged, not fatal: the device still pairs and relays
+    snapshots, and classification retries the load each tick."""
+    global DETECTOR_BACKEND, DETECTOR_MODEL
+    # AIPORT_BACKEND is the pre-modular name (auto|rknn|onnx); keep it working.
+    DETECTOR_BACKEND = (os.environ.get("AIPORT_DETECTOR")
+                        or os.environ.get("AIPORT_BACKEND")
+                        or cfg.get("detector") or "auto")
+    DETECTOR_MODEL = os.environ.get("AIPORT_MODEL_PATH") or cfg.get("detector_model") or None
+    if DETECTOR_BACKEND.strip().lower() == "none":
+        DETECTOR_BACKEND = "none"
+        log.info("detector backend 'none': object detection disabled")
+        return
+    try:
+        _get_detector()
+    except Exception:
+        log.exception("detector backend %r failed to load; detection disabled until it does",
+                      DETECTOR_BACKEND)
+
+
 def main():
     cfg = config.load_config_and_logging(sys.argv[1:])
     ap = argparse.ArgumentParser(description=__doc__)
@@ -3977,6 +4097,8 @@ def main():
 
     # Single-use token: present on first connect after adopt, omitted on later reconnects.
     used_tokens = set()
+
+    _init_detector(cfg)
 
     pinned = config.pinned_fw_version(STATE_DIR)
     if pinned:

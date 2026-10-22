@@ -9,17 +9,20 @@ server.key
 
 # Runtime scratch / generated device state
 /piport/instances/
+/piport/.venv/
 adopt_state.json
 adopt_state.json.tmp
 fw_version.json
 device_name
 run_all.log
+*.bak-preinstall
 
 # Model binaries and conversion build artifacts (regenerated per README)
 *.bin
 *.img
 *.onnx
 *.rknn
+*.tflite
 /rknn_convert/.venv/
 /rknn_convert/*.whl
 /rknn_convert/bus.jpg
@@ -32,3 +35,6 @@ __pycache__/
 # Windows metadata
 *:Zone.Identifier
 /venv
+
+# Docker compose local settings
+docker/.env

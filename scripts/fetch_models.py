@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 hutchx86
-"""Fetch the YOLOv5 model assets this project uses, and optionally convert to RKNN.
+"""Fetch the model assets a detector backend needs (see piport/detectors/).
 
-Downloads the open Rockchip YOLOv5s model (ONNX + anchors + COCO labels +
-calibration subset) for the RK3588 NPU detector and the small Ultralytics
-YOLOv5n ONNX for the CPU (onnxruntime) detector. Model binaries are not stored
-in this repo (see README).
+  rknn     the open Rockchip YOLOv5s model (ONNX + anchors + COCO labels +
+           calibration subset) for the .rknn conversion workspace
+  edgetpu  Google's SSDLite MobileDet COCO Edge TPU model (the one Frigate ships)
+  cpu      the official Ultralytics YOLOv5n ONNX
 
-  python3 scripts/fetch_models.py            # download assets (incl. the CPU model)
-  python3 scripts/fetch_models.py --convert  # also build the .rknn (needs rknn-toolkit2, x86)
-  python3 scripts/fetch_models.py --no-cpu-model   # RK3588 board: skip yolov5n.onnx
-  python3 scripts/fetch_models.py --face-models-only   # YuNet/SFace for face detection
+Model binaries are not stored in this repo (see README).
+
+  python3 scripts/fetch_models.py                      # rknn assets (default)
+  python3 scripts/fetch_models.py --backend edgetpu    # Coral model
+  python3 scripts/fetch_models.py --backend cpu        # CPU/Core ML model
+  python3 scripts/fetch_models.py --convert            # also build the .rknn (needs rknn-toolkit2, x86)
+  python3 scripts/fetch_models.py --no-cpu-model       # RK3588 board: skip yolov5n.onnx
+  python3 scripts/fetch_models.py --face-models-only   # YuNet/SFace for face detection (enrich.py)
 """
 import argparse
 import hashlib
@@ -37,6 +41,24 @@ FACE_MODELS = {
         "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
 }
 UA = {"User-Agent": "piport-fetch-models"}
+
+# Single-file models per backend: dest name -> (url, sha256). Pinned digests;
+# a mismatch deletes the download and aborts.
+BACKEND_MODELS = {
+    "edgetpu": {
+        # Google Coral test_data (Apache-2.0), 320x320 uint8, in-graph NMS.
+        "ssdlite_mobiledet_coco_qat_postprocess_edgetpu.tflite": (
+            "https://github.com/google-coral/test_data/raw/release-frogfish/"
+            "ssdlite_mobiledet_coco_qat_postprocess_edgetpu.tflite",
+            "4a2be2bbb614e576d56dcb914fa52752bf0f13411512710d355d97faa1b35641"),
+    },
+    "cpu": {
+        # Ultralytics release (AGPL-3.0), decode baked in -> one [1,N,85] output.
+        "yolov5n.onnx": (
+            "https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5n.onnx",
+            "04f0e55c26f58d17145b36045780fe1250d5bd2187543e11568e5141d05b3262"),
+    },
+}
 
 # target dirs, keyed by short name
 DIRS = {
@@ -65,15 +87,23 @@ def download(url, dest, force=False):
     print(f"got {dest}")
 
 
-def _verify_sha256(path, expected):
+def verify_sha256(path, expected):
     digest = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             digest.update(chunk)
     got = digest.hexdigest()
     if got != expected:
-        sys.exit(f"error: {path} sha256 {got} != expected {expected}")
+        os.remove(path)
+        sys.exit(f"error: {path} sha256 {got} != expected {expected} (removed)")
     print(f"verified {path}")
+
+
+def fetch_backend_model(backend, force=False):
+    for name, (url, sha256) in BACKEND_MODELS[backend].items():
+        dest = os.path.join(DIRS["models"], name)
+        download(url, dest, force)
+        verify_sha256(dest, sha256)
 
 
 def main():
@@ -81,6 +111,8 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--convert", action="store_true",
                     help="run rknn_convert/convert.py to build yolov5s_relu.rknn")
+    ap.add_argument("--backend", choices=["rknn", *BACKEND_MODELS], default="rknn",
+                    help="which detector backend's assets to fetch (default: rknn)")
     ap.add_argument("--force", action="store_true", help="re-download existing files")
     ap.add_argument("--no-cpu-model", action="store_true",
                     help="skip the CPU yolov5n.onnx (the RK3588 installer does not use it)")
@@ -89,14 +121,20 @@ def main():
     ap.add_argument("--face-models-only", action="store_true",
                     help="fetch only the face models, nothing else")
     args = ap.parse_args()
+    if args.convert and args.backend != "rknn":
+        ap.error("--convert only applies to --backend rknn")
 
     if args.face_models or args.face_models_only:
         for url, sha in FACE_MODELS.items():
             path = os.path.join(DIRS["models"], url.rsplit("/", 1)[1])
             download(url, path, args.force)
-            _verify_sha256(path, sha)
+            verify_sha256(path, sha)
         if args.face_models_only:
             return
+
+    if args.backend != "rknn":
+        fetch_backend_model(args.backend, args.force)
+        return
 
     for url, targets in ASSETS.items():
         name = url.rsplit("/", 1)[1]
@@ -111,7 +149,7 @@ def main():
     if not args.no_cpu_model:
         npath = os.path.join(DIRS["models"], "yolov5n.onnx")
         download(YOLOV5N_URL, npath, args.force)
-        _verify_sha256(npath, YOLOV5N_SHA256)
+        verify_sha256(npath, YOLOV5N_SHA256)
 
     subset_list = os.path.join(DIRS["rknn_convert"], "coco_subset_20.txt")
     with open(subset_list) as f:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 hutchx86
-"""Second-stage enrichment on top of detector.py's person/vehicle/animal boxes.
+"""Second-stage enrichment on top of the detector's person/vehicle/animal boxes.
 
   * vehicle type + colour -> descriptor ``attributes`` ({val, confidence} per key,
     shape from the Protect backend decompile; values are best guesses)

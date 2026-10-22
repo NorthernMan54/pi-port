@@ -6,8 +6,11 @@ numpy
 # Detector backends are installed separately, one per platform:
 #   * RK3588 NPU (Orange Pi 5 Plus): pip install rknn-toolkit-lite2
 #     (see piport/README.md for the matching librknnrt.so upgrade it requires)
-#   * CPU (x86_64 / arm64: Pi 4/5, any server): pip install onnxruntime
-# detector.py selects whichever backend is present (AIPORT_BACKEND to force).
+#   * Coral Edge TPU (USB/PCIe): pip install ai-edge-litert
+#     (plus libedgetpu1-std -- scripts/install.sh or docker/ installs it)
+#   * CPU/Core ML (x86_64 / arm64, Apple-silicon macOS): pip install onnxruntime
+# detectors/ selects whichever backend is configured/present ([hardware] detector
+# or AIPORT_DETECTOR; AIPORT_BACKEND is the legacy spelling).
 #
 # Optional enrichment (enrich.py), any onnxruntime host:
 #   pip install opencv-python-headless fast-alpr   # license plates (fast-alpr) + faces (OpenCV)

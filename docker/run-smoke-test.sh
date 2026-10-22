@@ -26,7 +26,7 @@ trap cleanup EXIT
 command -v docker >/dev/null 2>&1 || { echo "ERROR: docker not found" >&2; exit 1; }
 
 echo "== docker build -t $IMAGE . (context $ROOT) =="
-docker build "${BUILD_ARGS[@]}" -f docker/Dockerfile -t "$IMAGE" .
+docker build "${BUILD_ARGS[@]}" --build-arg ACCEL=cpu -f docker/Dockerfile -t "$IMAGE" .
 
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 echo "== starting $NAME (host networking) =="
@@ -84,10 +84,10 @@ for marker in "Started 4 components" "discovery probes" "HTTPS control API liste
 done
 
 # The detector must report the CPU backend + the downloaded model.
-if grep -q "Detector initialized (backend=onnx" "$LOG"; then
-    echo "log marker OK: detector onnx backend"
+if grep -q "using detector backend 'cpu'" "$LOG" || grep -q "CPU detector initialized" "$LOG"; then
+    echo "log marker OK: detector cpu backend"
 else
-    echo "WARN: no detector-init log line (detector is lazy -- initializes on first camera)"
+    echo "WARN: no detector-init log line (detector failed to load -- see logs)"
 fi
 
 if [ "$fail" -eq 0 ]; then

@@ -219,6 +219,17 @@ class TestCheck(unittest.TestCase):
         events[0]["objects"][1]["snapshot"] = [684, 276, 21, 53]
         self.assertEqual(replay.check({"distinct_face_snapshots": True}, events), [])
 
+    def test_vehicle_attributes(self):
+        # 15:13 side door: a black SUV went out as car/truck and blue.
+        events = [self.ev({"tracker": 3, "type": "vehicle", "vehicle_type": "truck", "color": "blue"},
+                          {"tracker": 5, "type": "vehicle", "vehicle_type": "suv", "color": "black"})]
+        self.assertEqual(replay.check({"vehicle_type": "suv", "color": "black"}, events),
+                         ["vehicle #3 vehicle type truck, expected suv",
+                          "vehicle #3 color blue, expected black"])
+        self.assertEqual(replay.check({"vehicle_type": ["suv", "truck"]}, events), [])
+        self.assertEqual(replay.check({"color": "black"}, [self.ev()]),
+                         ["no vehicle to check color against"])
+
     def test_face_embed_sent(self):
         events = [self.ev({"tracker": 44, "type": "face", "face_embed": True})]
         self.assertEqual(replay.check({"no_face_embed": True}, events),
@@ -233,6 +244,16 @@ class TestCheck(unittest.TestCase):
                        "trackerIDAttrMap": {"4": {"objectType": "face", "faceEmbed": [0.1]}}})]
         (face,) = replay.summarize(sent)[0]["objects"]
         self.assertEqual((face["snapshot"], face["face_embed"]), ([1, 2, 3, 4], True))
+
+    def test_summary_records_vehicle_attributes(self):
+        sent = [(2.0, {"eventId": 8, "edgeType": "leave", "descriptors": [
+                    {"trackerID": 3, "objectType": "vehicle", "confidenceLevel": 80}],
+                       "trackerIDAttrMap": {"3": {"objectType": "vehicle",
+                                                  "vehicleType": {"val": "suv", "confidence": 70},
+                                                  "color": {"val": "black", "confidence": 40},
+                                                  "matchedName": "ABCD123"}}})]
+        (car,) = replay.summarize(sent)[0]["objects"]
+        self.assertEqual((car["vehicle_type"], car["color"], car["plate"]), ("suv", "black", "ABCD123"))
 
 
 class TestRecordClipLogScan(unittest.TestCase):

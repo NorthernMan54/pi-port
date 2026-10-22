@@ -239,9 +239,21 @@ and the vehicle-attribute values follow Protect's label vocabulary:**
 
 | Stage | Models | Emitted as |
 |-------|--------|------------|
-| Vehicle type + colour | YOLO class + HSV colour vote (no extra model) | `attributes: {vehicleType: {val, confidence}, color: {val, confidence}}` on vehicle descriptors (shape from the Protect backend; value vocabulary unconfirmed) |
+| Vehicle type + colour | Apple's on-device model on a track's best crops (macOS 27+), else the YOLO class + HSV colour vote | `attributes: {vehicleType: {val, confidence}, color: {val, confidence}}` on vehicle descriptors (shape from the Protect backend; value vocabulary unconfirmed) |
 | License plates | `fast-alpr` (YOLOv9 plate detector + CCT OCR, MIT) on the full-res snapshot inside each vehicle box | plate text in the vehicle descriptor's `name` (Protect's `parseSmartDetectTrackPayload` reads it there; `recognizeTracks` recognises moving vehicles with a `name`); per track, a per-character vote over the largest group of similar reads, once 3 agree (see below) |
 | Faces | YuNet (MIT) inside each person box; SFace (Apache-2.0) embedding | its own `face` track carrying `faceEmbed` (128 floats, best-scoring face kept), which `recognizeTracks` passes to Protect's face service; an optional local-gallery match also sets `name`/`tag` on the face and parent person |
+
+**Vehicle type and colour on macOS 27+** come from Apple's on-device foundation model
+(`apple_fm.py`, `apple/vehicle_attrs.swift`): up to 3 of a vehicle track's best crops, at least
+100 px each way and 1.5 s apart, are classified in the background, and the answers are voted
+(weighted by box area) into Protect's vocabulary, including `suv` and `van`, which COCO lacks.
+A camper or towed trailer gets no type. On 40 crops from the saved clips it got 72% of types
+and 85% of colours right, against 85% and 78% for CLIP ViT-L/14 and 58% and 48% for ViT-B/32;
+it costs pi-port ~40 MB (the model is the system's) and 1-3 s a crop, off the detection path.
+The model lives in the logged-in user's session, so pi-port, running as root, starts the
+helper as `SUDO_USER` (`launchctl asuser`). The helper is built with `swiftc` into
+`apple/build/` on first use. Without the model (older macOS, Apple Intelligence off, no
+command line tools), or with `AIPORT_VEHICLE_FM=0`, the YOLO class and HSV colour stay.
 
 A plate narrower than `AIPORT_LPR_MIN_PX` (60 snapshot pixels) isn't read at all: on
 re-read clips every read under 75 px was wrong and from 80 px nearly all were right. As in

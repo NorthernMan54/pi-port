@@ -27,6 +27,9 @@ the sidecar's "env" (AIPORT_* settings, read at import) and "args" (e.g. ["--sta
     "objects": {"vehicle": 1, "person": [2, 3]}  tracks of each type, over all events
     "distinct_face_snapshots": true           no two face tracks have the same face thumbnail
     "no_face_embed": true                     no faceEmbed is sent
+    "vehicle_type": "suv", "color": "black", "plate": "ABC123"
+                                              every reported vehicle's final attributes (a value
+                                              or a list of accepted values)
 and "why": what the clip guards against. A clip still running after --clip-timeout seconds
 (default 300; a sidecar's "timeout" overrides it) is killed and reported as FAIL timed out.
 """
@@ -182,6 +185,20 @@ def replay(av, frames, settings=None, start_ms=0, settle_s=5.0, startup=False, s
                 return snap["cur"][1], snap["cur"][0]
             snap["cur"], snap["next"] = snap["next"], None
 
+    jpeg_cache = {}
+
+    def read_snapshot(device_id):
+        """The current snapshot as (mtime, JPEG bytes), as live best frames are captured from
+        the snapshot file; (None, None) without --faces."""
+        img, mtime = load_snapshot(device_id)
+        if img is None:
+            return None, None
+        if mtime not in jpeg_cache:
+            import cv2
+            jpeg_cache.clear()
+            jpeg_cache[mtime] = cv2.imencode(".jpg", img)[1].tobytes()
+        return mtime, jpeg_cache[mtime]
+
     class _ClipTime:
         """avclient's `time`, with the monotonic clock following the clip (the motion
         gate's reference frame advances on it)."""
@@ -203,6 +220,8 @@ def replay(av, frames, settings=None, start_ms=0, settle_s=5.0, startup=False, s
         "_STREAM_DIR": tempfile.mkdtemp(prefix="%s%d-stream-" % (REPLAY_DIR_PREFIX, os.getpid())),
         "STATE_DIR": tempfile.mkdtemp(prefix="%s%d-state-" % (REPLAY_DIR_PREFIX, os.getpid())),
         "_load_snapshot_bgr": load_snapshot,
+        "_read_snapshot": read_snapshot,
+        "VEHICLE_FM_SYNC": True,   # the model answers before the clip moves on
     }
     if not startup:
         patches["STARTUP_WINDOW_MS"] = -1
@@ -300,6 +319,12 @@ def summarize(sent):
                 o = ev["objects"].get(int(tid))
                 if o is not None:
                     o["face_embed"] = "faceEmbed" in attrs
+                    if attrs.get("objectType") == "vehicle":
+                        for key, field in (("vehicleType", "vehicle_type"), ("color", "color")):
+                            if isinstance(attrs.get(key), dict):
+                                o[field] = attrs[key].get("val")
+                        if attrs.get("matchedName"):
+                            o["plate"] = attrs["matchedName"]
     return [dict(ev, objects=list(ev["objects"].values())) for ev in events.values()]
 
 
@@ -329,6 +354,18 @@ def check(expect, events):
         sent = [o["tracker"] for o in objects if o.get("face_embed")]
         if sent:
             bad.append("faceEmbed sent for face(s) %s" % sent)
+    vehicles = [o for o in objects if o["type"] == "vehicle"]
+    for field in ("vehicle_type", "color", "plate"):
+        if field not in expect:
+            continue
+        want = expect[field] if isinstance(expect[field], list) else [expect[field]]
+        got = [(o["tracker"], o.get(field)) for o in vehicles]
+        if not got:
+            bad.append("no vehicle to check %s against" % field)
+        for tracker, value in got:
+            if value not in want:
+                bad.append("vehicle #%s %s %s, expected %s"
+                           % (tracker, field.replace("_", " "), value, " or ".join(want)))
     return bad
 
 

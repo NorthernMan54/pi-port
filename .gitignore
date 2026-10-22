@@ -38,3 +38,6 @@ __pycache__/
 
 # Docker compose local settings
 docker/.env
+
+# Apple vehicle-attribute helper, built on first use
+/piport/apple/build/

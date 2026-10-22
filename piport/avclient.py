@@ -20,6 +20,7 @@ import json
 import logging
 import math
 import os
+import queue
 import shutil
 import ssl
 import statistics
@@ -43,6 +44,7 @@ log = logging.getLogger("aiport-avclient")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
+import apple_fm
 import enrich
 import onvif_push
 
@@ -1120,6 +1122,134 @@ def _note_face_read(tr, d, now_ms):
     tr["history"] = []
 
 
+# Vehicle type and colour from Apple's on-device model (apple_fm): a vehicle track's best crop
+# is sent to it in the background, up to VEHICLE_FM_MAX_CROPS times, VEHICLE_FM_GAP_MS apart,
+# once at least VEHICLE_FM_MIN_PX wide and high (a car entering at the frame's edge showed
+# only its roof, which the model called blue); the answers are voted (weighted by box area) and
+# replace the per-frame YOLO class and HSV colour. Live 15:13 a black SUV went out as
+# car/truck and blue; the model called it "suv black". Without the model (not macOS 27,
+# Apple Intelligence off, no swiftc) the per-frame values stay. AIPORT_VEHICLE_FM=0 turns it off.
+VEHICLE_FM = apple_fm.enabled()
+VEHICLE_FM_MAX_CROPS = 3
+VEHICLE_FM_GAP_MS = 1500
+VEHICLE_FM_MIN_PX = 100
+VEHICLE_FM_SYNC = False   # replay.py classifies inline, so results land before the leave
+_fm_classifier = None
+_fm_queue = None
+
+
+def _fm_vote(votes):
+    """{"vehicleType": {...} or None, "color": {...}} from [(type, colour, weight)]: each
+    field's answer with the most weight, its share as the confidence. A "trailer" type maps
+    to None (no Protect type: the key is dropped). Fields nobody answered are left out."""
+    out = {}
+    for key, idx in (("vehicleType", 0), ("color", 1)):
+        weight = collections.Counter()
+        for vote in votes:
+            if vote[idx]:
+                weight[vote[idx]] += vote[2]
+        if not weight:
+            continue
+        best = max(weight, key=lambda v: weight[v])
+        share = int(round(100 * weight[best] / sum(weight.values())))
+        out[key] = None if best == "trailer" else {"val": best, "confidence": share}
+    return out
+
+
+def _apply_fm_attrs(tr):
+    """Put the model's voted type/colour over the track's per-frame attributes."""
+    fm = tr.get("fm_attrs")
+    if not fm:
+        return
+    extra = tr.setdefault("extra", {})
+    attrs = dict(extra.get("attributes") or {})
+    for key, value in fm.items():
+        if value is None:
+            attrs.pop(key, None)
+        else:
+            attrs[key] = value
+    extra["attributes"] = attrs
+
+
+def _fm_job(device_id, tr, jpeg, coord, locked=False):
+    """Classify one crop of a vehicle track's best frame and record the vote. `locked`: the
+    caller already holds _motion_lock (the inline replay path)."""
+    global _fm_classifier
+    import cv2
+    import numpy as np
+    img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        return
+    x1, y1, x2, y2 = enrich._expand_px(coord, img.shape[1], img.shape[0], margin=1.1)
+    crop = img[y1:y2, x1:x2]
+    if crop.size == 0:
+        return
+    if _fm_classifier is None:
+        _fm_classifier = apple_fm.VehicleClassifier()
+    fd, path = tempfile.mkstemp(suffix=".jpg", dir=_tmp_dir())
+    try:
+        os.close(fd)
+        os.chmod(path, 0o644)   # the helper runs as the logged-in user, not root
+        cv2.imwrite(path, crop)
+        result = _fm_classifier.classify(path)
+    finally:
+        os.remove(path)
+    if result is None:
+        return
+    vtype, color, ms = result
+    log.info("Apple vehicle attributes for deviceID=%s: %s %s (%s ms, %d px)", device_id,
+             vtype, color, ms, crop.shape[1])
+
+    def record():
+        tr.setdefault("fm_votes", []).append((vtype, color, crop.shape[0] * crop.shape[1]))
+        tr["fm_attrs"] = _fm_vote(tr["fm_votes"])
+        _apply_fm_attrs(tr)
+    if locked:
+        record()
+    else:
+        with _motion_lock:
+            record()
+
+
+def _fm_worker():
+    while True:
+        job = _fm_queue.get()
+        try:
+            _fm_job(*job)
+        except Exception:
+            log.exception("Apple vehicle attributes failed for deviceID=%s", job[0])
+
+
+def _request_fm(device_id, tr):
+    """Queue the track's new best frame for the model, within the per-track limits."""
+    global _fm_queue
+    if _fm_classifier is not None and _fm_classifier.available is False:
+        return
+    best = tr.get("best") or {}
+    if not best.get("jpeg") or tr.get("fm_sent", 0) >= VEHICLE_FM_MAX_CROPS:
+        return
+    now = _frame_wall_ms(device_id)
+    if now - tr.get("fm_last_ms", now - VEHICLE_FM_GAP_MS) < VEHICLE_FM_GAP_MS:
+        return
+    width, height = _stream_dims.get(device_id, (DETECT_IMG_SIZE, DETECT_IMG_SIZE))
+    if min(best["coord"][2] * width, best["coord"][3] * height) / CAMERA_COORD_END < VEHICLE_FM_MIN_PX:
+        return
+    tr["fm_sent"] = tr.get("fm_sent", 0) + 1
+    tr["fm_last_ms"] = now
+    job = (device_id, tr, best["jpeg"], list(best["coord"]))
+    if VEHICLE_FM_SYNC:
+        _fm_job(*job, locked=True)
+        return
+    if _fm_queue is None:
+        _fm_queue = queue.Queue(maxsize=20)
+        threading.Thread(target=_fm_worker, name="apple-vehicle-attrs", daemon=True).start()
+    try:
+        _fm_queue.put_nowait(job)
+    except queue.Full:
+        log.debug("Apple vehicle attributes: queue full, skipping a crop for deviceID=%s",
+                  device_id)
+
+
 def _capture_best(device_id, tr, d):
     """Keep the track's best-scoring moment: the full-res JPEG, the box and the
     time. On leave the thumbnails come from it, not from the frame several seconds after
@@ -1132,6 +1262,8 @@ def _capture_best(device_id, tr, d):
         return
     tr["best"] = {"jpeg": data, "coord": list(d["coord"]), "score": d["score"],
                   "wall": _frame_wall_ms(device_id)}
+    if VEHICLE_FM and tr.get("objectType") == "vehicle":
+        _request_fm(device_id, tr)
 
 
 # A plate can't change on a vehicle that isn't moving, and a confident read won't improve.
@@ -1391,6 +1523,7 @@ def _merge_extra(tr, d, device_id=None, tracker_id=None):
         tr.setdefault("zoned", False)
     out = tr.setdefault("extra", {})
     out.update({k: v for k, v in (d.get("extra") or {}).items() if v not in ("", None)})
+    _apply_fm_attrs(tr)   # the model's vote, when there is one, beats this frame's guess
     if d.get("fresh_read") and "faceEmbed" in (d.get("scored") or {}):
         tr["embed_reads"] = tr.get("embed_reads", 0) + 1
     scores = tr.setdefault("extra_scores", {})

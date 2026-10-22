@@ -28,6 +28,10 @@ record_clip = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(record_clip)
 
 
+def _time_now():
+    return time.time()
+
+
 class BrightBoxDetector:
     """Finds the white pixels in a frame and reports them as one person."""
 
@@ -166,6 +170,22 @@ class TestReplay(unittest.TestCase):
                 json.dump({"expect": {"events": 0}, "timeout": 90}, f)
             replay.check_clips([self.dir], out=out, timeout=7)
         self.assertEqual(limits, [7, 90])   # a sidecar's "timeout" wins
+
+    def test_sweep_removes_dirs_of_dead_replays_only(self):
+        # A replay killed by --check's timeout never ran its finally: its temp dirs stayed.
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        names = ["piport-replay-%d-stream-a" % dead.pid, "piport-replay-%d-state-b" % os.getpid(),
+                 "piport-replay-0y6kuh8l", "piport-replay-state-ilec8hea", "other-dir"]
+        for n in names:
+            os.mkdir(os.path.join(tmp, n))
+        old = _time_now() - 2 * replay.LEGACY_DIR_MAX_AGE_S
+        os.utime(os.path.join(tmp, "piport-replay-0y6kuh8l"), (old, old))
+        removed = replay.sweep_replay_dirs(tmp)
+        self.assertEqual(sorted(removed), sorted([names[0], names[2]]))
+        self.assertEqual(sorted(os.listdir(tmp)), sorted(names[1:2] + names[3:]))   # live, new
 
     def test_run_clip_kills_the_whole_process_group(self):
         # The replay's ffmpeg was left running after only the replay was killed.

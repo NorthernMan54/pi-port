@@ -118,12 +118,55 @@ def snapshot_frames(av, path):
         proc.wait()
 
 
+REPLAY_DIR_PREFIX = "piport-replay-"
+LEGACY_DIR_MAX_AGE_S = 3600
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def sweep_replay_dirs(tmp=None):
+    """Remove temp dirs left by replays that died without cleaning up (killed by --check's
+    timeout, or by hand: their finally never ran). A dir is named after its replay's pid
+    and removed once that process is gone; an older unnumbered one, after an hour."""
+    tmp = tmp or tempfile.gettempdir()
+    try:
+        names = os.listdir(tmp)
+    except OSError:
+        return []
+    removed = []
+    for name in names:
+        if not name.startswith(REPLAY_DIR_PREFIX):
+            continue
+        path = os.path.join(tmp, name)
+        pid = name[len(REPLAY_DIR_PREFIX):].split("-", 1)[0]
+        if pid.isdigit():
+            stale = not _pid_alive(int(pid))
+        else:
+            try:
+                stale = _time.time() - os.path.getmtime(path) > LEGACY_DIR_MAX_AGE_S
+            except OSError:
+                continue
+        if stale:
+            shutil.rmtree(path, ignore_errors=True)
+            removed.append(name)
+    return removed
+
+
 def replay(av, frames, settings=None, start_ms=0, settle_s=5.0, startup=False, snapshots=None):
     """Run frames (at av.DETECT_FPS) through the tracker. Returns [(t_s, payload)] for every
     EventSmartDetect sent. After the clip, `settle_s` of empty frames let open tracks close.
     startup=False skips the live 15 s startup window, in which objects already in view are
     parked silently; True keeps it (a clip that starts with a parked car). avclient's
     globals are restored afterwards."""
+    sweep_replay_dirs()
     settings = settings or {}
     sent, now = [], [0.0]
     snap = {"next": None, "cur": (None, None), "it": iter(snapshots) if snapshots else None}
@@ -156,8 +199,9 @@ def replay(av, frames, settings=None, start_ms=0, settle_s=5.0, startup=False, s
         "_frame_jpeg": lambda *a, **k: None,     # no JPEG pipe offline
         "_BOX_DELAY_DEFAULT_MS": 0,
         "_BOX_DELAY_MS": {},
-        "_STREAM_DIR": tempfile.mkdtemp(prefix="piport-replay-"),  # never the live one
-        "STATE_DIR": tempfile.mkdtemp(prefix="piport-replay-state-"),  # no face DB, no crops
+        # Never the live ones; named after this process so a later sweep knows when it's gone.
+        "_STREAM_DIR": tempfile.mkdtemp(prefix="%s%d-stream-" % (REPLAY_DIR_PREFIX, os.getpid())),
+        "STATE_DIR": tempfile.mkdtemp(prefix="%s%d-state-" % (REPLAY_DIR_PREFIX, os.getpid())),
         "_load_snapshot_bgr": load_snapshot,
     }
     if not startup:

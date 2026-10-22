@@ -2647,19 +2647,22 @@ class TestTmpDir(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_reset_empties_only_the_tmp_folder(self):
-        for path in (os.path.join(self.root, "D.jpg"), os.path.join(av._tmp_dir(), "tmpab.jpg")):
+    def test_reset_empties_the_whole_stream_dir(self):
+        # A restart leaves nothing behind: scratch files and the snapshot of a camera that
+        # is no longer paired (a paired camera's is rewritten once its stream starts).
+        for path in (os.path.join(self.root, "GONE.jpg"), os.path.join(av._tmp_dir(), "tmpab.jpg")):
             open(path, "wb").close()
-        av._reset_tmp_dir()
+        av._reset_stream_dir()
+        self.assertEqual(os.listdir(self.root), ["tmp"])
         self.assertEqual(os.listdir(av._tmp_dir()), [])
-        self.assertEqual(sorted(os.listdir(self.root)), ["D.jpg", "tmp"])
 
     def test_reset_creates_the_folder(self):
-        av._reset_tmp_dir()
+        shutil.rmtree(self.root)
+        av._reset_stream_dir()
         self.assertTrue(os.path.isdir(av._tmp_dir()))
 
     def test_write_snapshot_leaves_no_temp(self):
-        av._reset_tmp_dir()
+        av._reset_stream_dir()
         path = os.path.join(self.root, "D.jpg")
         av._write_snapshot(path, b"one")
         av._write_snapshot(path, b"two")

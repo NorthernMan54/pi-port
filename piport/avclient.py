@@ -563,7 +563,8 @@ def _jpeg_frames(stream):
 
 def _tmp_dir():
     """This instance's scratch folder, inside its own stream dir (one per --state-dir, so
-    AI Ports sharing a host never touch each other's files); emptied at startup. Made on
+    AI Ports sharing a host never touch each other's files); emptied at startup with the
+    rest of that dir (_reset_stream_dir). Made on
     use: macOS's periodic /tmp cleanup can remove it while pi-port runs."""
     path = os.path.join(_STREAM_DIR, "tmp")
     os.makedirs(path, exist_ok=True)
@@ -583,10 +584,11 @@ def _write_snapshot(path, data):
         raise
 
 
-def _reset_tmp_dir():
-    """Empty this instance's scratch folder: whatever a crash left there (a half-written
-    snapshot, a crop input) is never needed again."""
-    shutil.rmtree(_tmp_dir(), ignore_errors=True)
+def _reset_stream_dir():
+    """Empty this instance's stream dir at startup: its scratch folder (whatever a crash left
+    there: a half-written snapshot, a crop input) and every camera's snapshot, including those
+    of cameras no longer paired. A paired camera's is rewritten once its stream starts."""
+    shutil.rmtree(_STREAM_DIR, ignore_errors=True)
     _tmp_dir()
 
 
@@ -4114,7 +4116,7 @@ def main():
         # RAM-only handoff; http_api.py derives the same dir from --state-dir.
         _STREAM_DIR = config.stream_dir(args.state_dir)
         STATE_DIR = args.state_dir
-    _reset_tmp_dir()
+    _reset_stream_dir()
 
     mac_nosep = config.resolve_mac(args.iface, args.mac, cfg).lower()
     ip = config.resolve_ip(args.iface, cfg, args.bind_ip)

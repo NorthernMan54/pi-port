@@ -200,8 +200,9 @@ class TestAvclientMatching(unittest.TestCase):
         self.assertNotIn("match", again[0]["scored"])
         self.assertIn("faceEmbed", again[0]["scored"])
 
-    def test_small_face_is_reported_without_embedding_or_match(self):
-        # Live 09:21 on Camera C: an 18 x 23 px face scored 0.299 against the same person.
+    def test_face_too_small_to_match_is_not_reported(self):
+        # Live 09:21 on Camera C: an 18 x 23 px face scored 0.299 against the same person, and
+        # live 11:49 a 24 px face on Camera B showed in Protect as a face no one could name.
         ian = vec()
         db = facedb.parse(build({5: ("Ian", [ian])}))
 
@@ -211,16 +212,21 @@ class TestAvclientMatching(unittest.TestCase):
                 return []
             def faces(self, img, coords):
                 return [{"coord": [10, 10, 20, 20], "score": 0.9, "name": "", "similarity": 0.0,
-                         "embedding": list(ian), "parent": 0, "size_px": 18}]
+                         "embedding": list(ian), "parent": 0, "size_px": size}]
         person = {"objectType": "person", "score": 0.9, "coord": [0, 0, 100, 300]}
-        with mock.patch.object(av, "_get_enricher", lambda: Enricher()), \
-                mock.patch.object(av, "_get_face_db", lambda: db), \
-                mock.patch.object(av, "_load_snapshot_bgr", lambda dev: (np.zeros((9, 9, 3)), 2.0)):
-            av._enrich_cache.pop("D", None)
-            faces = av._enrich_detections("D", [dict(person)])
-        self.assertEqual(faces[0]["objectType"], "face")   # still reported...
-        self.assertNotIn("faceEmbed", faces[0].get("scored", {}))   # ...without its embedding
-        self.assertNotIn("match", faces[0].get("scored", {}))
+        found = {}
+        minimum = av.enrich.FACE_MATCH_MIN_PX
+        for size, mtime in ((18, 2.0), (minimum, 2.5)):
+            with mock.patch.object(av, "_get_enricher", lambda: Enricher()), \
+                    mock.patch.object(av, "_get_face_db", lambda: db), \
+                    mock.patch.object(av, "_load_snapshot_bgr",
+                                      lambda dev, m=mtime: (np.zeros((9, 9, 3)), m)):
+                av._enrich_cache.pop("D", None)
+                found[size] = av._enrich_detections("D", [dict(person)])
+        self.assertEqual(found[18], [])                                   # not reported
+        face, = found[minimum]                                            # at the minimum: is
+        self.assertIn("faceEmbed", face["scored"])
+        self.assertIn("match", face["scored"])
 
 
     def _enrich_one(self, embedding, db):

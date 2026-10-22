@@ -1180,16 +1180,21 @@ def _enrich_detections(device_id, detections):
                 log.debug("enrichment: plate %r on vehicle for deviceID=%s (score=%.2f)",
                          p["text"], device_id, p["confidence"])
             for f in enricher.faces(img, [p["coord"] for p in people]):
+                # A face too small to match (FACE_MATCH_MIN_PX) isn't reported either: Protect
+                # could never name or group it (live 11:49 a 24 px face on Camera B showed
+                # as a face no one could identify). Its person is still reported.
+                if f.get("size_px", enrich.FACE_MATCH_MIN_PX) < enrich.FACE_MATCH_MIN_PX:
+                    log.debug("enrichment: %s px face on deviceID=%s under %d px, not reported",
+                              f.get("size_px"), device_id, enrich.FACE_MATCH_MIN_PX)
+                    continue
                 face = {"objectType": "face", "score": f["score"], "coord": f["coord"],
                         "extra": {"name": f["name"], "tag": f["name"]},
                         "frame": _snapshot_bytes.get(device_id), "size_px": f.get("size_px"),
                         "fresh_read": True, "parent_coord": list(people[f["parent"]]["coord"])}
-                # A face under FACE_MATCH_MIN_PX is reported without its embedding: Protect
-                # enrols the embedding it's sent, and one from an 18 px face made a reference
-                # the same person later scored 0.299 against. It isn't matched either.
-                # Nor is one whose SFace vector is short (enrich.FACE_EMBED_MIN_NORM): a poor face.
-                small = f.get("size_px", enrich.FACE_MATCH_MIN_PX) < enrich.FACE_MATCH_MIN_PX
-                if f["embedding"] is not None and not small and not enrich.weak_embedding(f["embedding"]):
+                # A face whose SFace vector is short (enrich.FACE_EMBED_MIN_NORM) is reported
+                # without its embedding and isn't matched: a poor face. Protect enrols the
+                # embedding it's sent, and a poor one makes a bad reference.
+                if f["embedding"] is not None and not enrich.weak_embedding(f["embedding"]):
                     face["scored"] = {"faceEmbed": (f["embedding"], f["score"])}
                     db = _get_face_db()
                     m = db.match(f["embedding"], FACE_DB_THRESH) if db else None

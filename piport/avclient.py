@@ -1156,54 +1156,101 @@ def _fm_vote(votes):
     return out
 
 
-def _apply_fm_attrs(tr):
-    """Put the model's voted type/colour over the track's per-frame attributes."""
-    fm = tr.get("fm_attrs")
-    if not fm:
-        return
-    extra = tr.setdefault("extra", {})
-    attrs = dict(extra.get("attributes") or {})
+VEHICLE_FM_AGREE = 2        # answers that must agree before a box shows a type or colour
+VEHICLE_FM_HOLD_MS = 2500   # a vehicle track waits this long to close for a pending answer
+VEHICLE_FM_EDGE = 5         # a crop within this of the picture's edge (0-1000) is cut off...
+VEHICLE_FM_EDGE_WEIGHT = 0.25   # ...and counts this much: live 16:11 a school bus cut off at
+                                # the left edge came back "van", at a bigger size than the
+                                # "bus" crop after it
+VEHICLE_FM_REUSE_IOU = 0.6  # a vehicle re-detected where one was classified takes its answers
+VEHICLE_FM_REUSE_MS = 30 * 60 * 1000   # (live: a parked trailer was re-asked every few minutes)
+_fm_cache = {}              # deviceID -> [(coord, votes, wall ms)], newest last
+_fm_cache_lock = threading.Lock()
+
+
+def _fm_agreed(votes):
+    """The fields of _fm_vote whose answer at least VEHICLE_FM_AGREE answers give: what a box
+    may show. Live 16:11 a bus's first, dark crop said "black"; the box showed it until the
+    leave, though the next answer said yellow."""
+    vote = _fm_vote(votes)
+    out = {}
+    for key, idx in (("vehicleType", 0), ("color", 1)):
+        if key not in vote:
+            continue
+        answer = "trailer" if vote[key] is None else vote[key]["val"]
+        if sum(1 for v in votes if v[idx] == answer) >= VEHICLE_FM_AGREE:
+            out[key] = vote[key]
+    return out
+
+
+def _fm_active():
+    return VEHICLE_FM and not (_fm_classifier is not None and _fm_classifier.available is False)
+
+
+def _vehicle_attrs(tr, leaving):
+    """A vehicle track's attributes as sent. With the model on: a box (enter/moving) carries
+    only the type/colour enough answers agree on, nothing before; a leave carries the full vote,
+    or the per-frame guesses when the model never answered. Without it, the per-frame guesses."""
+    attrs = dict((tr.get("extra") or {}).get("attributes") or {})
+    if not _fm_active():
+        return attrs
+    votes = tr.get("fm_votes") or []
+    if leaving and not votes:
+        return attrs
+    fm = _fm_vote(votes) if leaving else _fm_agreed(votes)
+    if not leaving:
+        attrs.pop("vehicleType", None)
+        attrs.pop("color", None)
     for key, value in fm.items():
         if value is None:
             attrs.pop(key, None)
         else:
             attrs[key] = value
-    extra["attributes"] = attrs
+    return attrs
+
+
+def _fm_cut_off(coord):
+    x, y, w, h = coord
+    e = VEHICLE_FM_EDGE
+    return x <= e or y <= e or x + w >= CAMERA_COORD_END - e or y + h >= CAMERA_COORD_END - e
+
+
+def _fm_remember(device_id, coord, votes):
+    with _fm_cache_lock:
+        entries = [c for c in _fm_cache.get(device_id, []) if _iou(c[0], coord) < VEHICLE_FM_REUSE_IOU]
+        entries.append((list(coord), list(votes), _frame_wall_ms(device_id)))
+        _fm_cache[device_id] = entries[-20:]
+
+
+def _fm_recall(device_id, coord):
+    """Answers for a vehicle classified at this spot within VEHICLE_FM_REUSE_MS, or None."""
+    now = _frame_wall_ms(device_id)
+    with _fm_cache_lock:
+        for c_coord, votes, when in reversed(_fm_cache.get(device_id, [])):
+            if now - when <= VEHICLE_FM_REUSE_MS and _iou(c_coord, coord) >= VEHICLE_FM_REUSE_IOU:
+                return list(votes)
+    return None
 
 
 def _fm_job(device_id, tr, jpeg, coord, locked=False):
     """Classify one crop of a vehicle track's best frame and record the vote. `locked`: the
     caller already holds _motion_lock (the inline replay path)."""
-    global _fm_classifier
-    import cv2
-    import numpy as np
-    img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
-    if img is None:
-        return
-    x1, y1, x2, y2 = enrich._expand_px(coord, img.shape[1], img.shape[0], margin=1.1)
-    crop = img[y1:y2, x1:x2]
-    if crop.size == 0:
-        return
-    if _fm_classifier is None:
-        _fm_classifier = apple_fm.VehicleClassifier()
-    fd, path = tempfile.mkstemp(suffix=".jpg", dir=_tmp_dir())
     try:
-        os.close(fd)
-        os.chmod(path, 0o644)   # the helper runs as the logged-in user, not root
-        cv2.imwrite(path, crop)
-        result = _fm_classifier.classify(path)
-    finally:
-        os.remove(path)
-    if result is None:
-        return
-    vtype, color, ms = result
-    log.info("Apple vehicle attributes for deviceID=%s: %s %s (%s ms, %d px)", device_id,
-             vtype, color, ms, crop.shape[1])
+        result, size = _fm_classify(jpeg, coord)
+    except Exception:
+        result, size = None, 0
+        log.exception("Apple vehicle attributes failed for deviceID=%s", device_id)
 
     def record():
-        tr.setdefault("fm_votes", []).append((vtype, color, crop.shape[0] * crop.shape[1]))
-        tr["fm_attrs"] = _fm_vote(tr["fm_votes"])
-        _apply_fm_attrs(tr)
+        tr["fm_pending"] = max(0, tr.get("fm_pending", 0) - 1)
+        if result is None:
+            return
+        vtype, color, ms = result
+        weight = size * (VEHICLE_FM_EDGE_WEIGHT if _fm_cut_off(coord) else 1.0)
+        tr.setdefault("fm_votes", []).append((vtype, color, weight))
+        log.info("Apple vehicle attributes for deviceID=%s: %s %s (%s ms, %d px%s)", device_id,
+                 vtype, color, ms, int(size ** 0.5), ", cut off" if _fm_cut_off(coord) else "")
+        _fm_remember(device_id, coord, tr["fm_votes"])
     if locked:
         record()
     else:
@@ -1211,23 +1258,51 @@ def _fm_job(device_id, tr, jpeg, coord, locked=False):
             record()
 
 
+def _fm_classify(jpeg, coord):
+    """(model result or None, crop area in px) for one crop of a JPEG frame."""
+    global _fm_classifier
+    import cv2
+    import numpy as np
+    img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        return None, 0
+    x1, y1, x2, y2 = enrich._expand_px(coord, img.shape[1], img.shape[0], margin=1.1)
+    crop = img[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None, 0
+    if _fm_classifier is None:
+        _fm_classifier = apple_fm.VehicleClassifier()
+    fd, path = tempfile.mkstemp(suffix=".jpg", dir=_tmp_dir())
+    try:
+        os.close(fd)
+        os.chmod(path, 0o644)   # the helper runs as the logged-in user, not root
+        cv2.imwrite(path, crop)
+        return _fm_classifier.classify(path), crop.shape[0] * crop.shape[1]
+    finally:
+        os.remove(path)
+
+
 def _fm_worker():
     while True:
-        job = _fm_queue.get()
-        try:
-            _fm_job(*job)
-        except Exception:
-            log.exception("Apple vehicle attributes failed for deviceID=%s", job[0])
+        _fm_job(*_fm_queue.get())
 
 
 def _request_fm(device_id, tr):
-    """Queue the track's new best frame for the model, within the per-track limits."""
+    """Queue the track's new best frame for the model, within the per-track limits; a vehicle
+    where one was recently classified takes those answers instead."""
     global _fm_queue
-    if _fm_classifier is not None and _fm_classifier.available is False:
+    if not _fm_active():
         return
     best = tr.get("best") or {}
     if not best.get("jpeg") or tr.get("fm_sent", 0) >= VEHICLE_FM_MAX_CROPS:
         return
+    if not tr.get("fm_votes") and not tr.get("fm_sent"):
+        votes = _fm_recall(device_id, best["coord"])
+        if votes:
+            tr["fm_votes"], tr["fm_sent"] = votes, VEHICLE_FM_MAX_CROPS
+            log.debug("Apple vehicle attributes for deviceID=%s: reused for a vehicle in the "
+                      "same spot", device_id)
+            return
     now = _frame_wall_ms(device_id)
     if now - tr.get("fm_last_ms", now - VEHICLE_FM_GAP_MS) < VEHICLE_FM_GAP_MS:
         return
@@ -1236,6 +1311,7 @@ def _request_fm(device_id, tr):
         return
     tr["fm_sent"] = tr.get("fm_sent", 0) + 1
     tr["fm_last_ms"] = now
+    tr["fm_pending"] = tr.get("fm_pending", 0) + 1
     job = (device_id, tr, best["jpeg"], list(best["coord"]))
     if VEHICLE_FM_SYNC:
         _fm_job(*job, locked=True)
@@ -1246,8 +1322,17 @@ def _request_fm(device_id, tr):
     try:
         _fm_queue.put_nowait(job)
     except queue.Full:
+        tr["fm_pending"] -= 1
         log.debug("Apple vehicle attributes: queue full, skipping a crop for deviceID=%s",
                   device_id)
+
+
+def _fm_hold(tr, now_ms):
+    """True while a vehicle track that would close waits for a pending model answer, up to
+    VEHICLE_FM_HOLD_MS: live 16:11 a bus's "bus yellow" arrived 2 s after its leave."""
+    if not tr.get("fm_pending"):
+        return False
+    return now_ms - tr.setdefault("fm_hold_ms", now_ms) < VEHICLE_FM_HOLD_MS
 
 
 def _capture_best(device_id, tr, d):
@@ -1523,7 +1608,6 @@ def _merge_extra(tr, d, device_id=None, tracker_id=None):
         tr.setdefault("zoned", False)
     out = tr.setdefault("extra", {})
     out.update({k: v for k, v in (d.get("extra") or {}).items() if v not in ("", None)})
-    _apply_fm_attrs(tr)   # the model's vote, when there is one, beats this frame's guess
     if d.get("fresh_read") and "faceEmbed" in (d.get("scored") or {}):
         tr["embed_reads"] = tr.get("embed_reads", 0) + 1
     scores = tr.setdefault("extra_scores", {})
@@ -1911,6 +1995,8 @@ def _track_args(tracker_id, tr, hold_embed=True):
             or (not hold_embed and extra.get("matchedId") is not None)):
         # held until decided; and a named face's leave carries its match, not its embedding
         extra = {k: v for k, v in extra.items() if k != "faceEmbed"}
+    if tr["objectType"] == "vehicle" and extra is not None:
+        extra = dict(extra, attributes=_vehicle_attrs(tr, leaving=not hold_embed))
     return {"tracker_id": tracker_id, "object_type": tr["objectType"],
             "coord": tr.get("smooth") or tr["coord"],
             "confidence": tr["score"], "first_shown_ms": tr["first_shown_ms"],
@@ -2142,8 +2228,9 @@ def _tracker_attrs(tracker_id, tr, faces_by_person):
         entry["matchedId"], entry["matchedName"] = extra["matchedId"], extra.get("matchedName")
     if tr["objectType"] == "vehicle":
         for key in ("vehicleType", "color"):
-            if key in (extra.get("attributes") or {}):
-                entry[key] = extra["attributes"][key]
+            attrs = _vehicle_attrs(tr, leaving=True)
+            if key in attrs:
+                entry[key] = attrs[key]
         if extra.get("name"):
             entry["matchedName"] = extra["name"]
     return entry
@@ -2584,6 +2671,8 @@ def _motion_tick(ws, device_id):
                           "tolerating brief gap, track still open", tr["miss_count"],
                           tolerance, tracker_id, device_id)
                 continue
+            if tr["objectType"] == "vehicle" and _fm_hold(tr, now_ms):
+                continue   # its model answer is on the way: the leave should carry it
             # Missed enough consecutive ticks -- this track is genuinely gone.
             log.info("real motion tick: no detection for %d consecutive ticks, closing smartDetectZone "
                       "track for deviceID=%s tracker_id=%s (last seen: %s score=%.2f)",

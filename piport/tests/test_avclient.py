@@ -50,6 +50,10 @@ class Base(unittest.TestCase):
         av._latest_frame_time.clear()
         av._analysed_frame_time.clear()
         av._stream_started_monotonic_ms.clear()
+        # Apple's vehicle model has its own tests (test_apple_fm); here it would ask the real one.
+        patcher = mock.patch.object(av, "VEHICLE_FM", False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.sent = []
         self._orig_send = av.send_msg
         av.send_msg = lambda ws, fn, payload, **kw: self.sent.append((fn, payload))

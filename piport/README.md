@@ -256,7 +256,10 @@ RTSP URL, `streaming` true/false) and, per channel, `ChangeVideoSettings` with a
 Protect's own ingest for that camera stops; without the push the camera has no video.
 
 Each channel is `ffmpeg -c:v copy` (plus AAC audio) into FLV, rewritten by
-`rewrite_flv()` and sent over TCP:
+`rewrite_flv()` and sent over TCP. **H.264 only:** an HEVC source is muxed by
+ffmpeg as Enhanced RTMP (an `hvc1` FourCC), which `ms` refuses (live view resets,
+the push is closed after a few hundred bytes); `rewrite_flv()` raises
+`UnsupportedCodec` for it and the push logs that once. Set the camera to H.264.
 
 - FLV header flags byte `7`; after every tag a 16-byte trailer: `0`, a 24-bit
   timescale (90000 video, 11025 otherwise), four reserved zero bytes, and the

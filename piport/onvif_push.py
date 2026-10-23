@@ -83,6 +83,40 @@ _MPMA = {
 }
 
 
+class UnsupportedCodec(ValueError):
+    """The source's FLV video codec is not H.264.
+
+    Protect's extendedFlv ingest (ms) only takes AVC here. ffmpeg's FLV muxer
+    writes HEVC as Enhanced RTMP: byte0 0x90/0x91/0xA1 with an `hvc1` FourCC
+    after it and an hvcC record, which ms does not ingest at all -- it reports
+    videoCodec=VUNK, resets live view and closes the push. UniFi's own HEVC
+    flavour uses FLV codec id 8 plus a `0x68 0x01` VPS/SPS/PPS config tag, which
+    this module does not emit.
+    """
+
+    def __init__(self, codec):
+        self.codec = codec
+        super().__init__(
+            f"unsupported video codec ({codec}): Protect only ingests H.264 "
+            f"here -- an H.265/HEVC camera must be set to H.264")
+
+
+def video_codec(payload):
+    """Codec label for a FLV video-tag payload; 'h264' is the one we can push.
+
+    Classic tags carry the codec id in the low nibble (7 = AVC). FFmpeg muxes
+    HEVC/AV1/VP9 as Enhanced RTMP instead: byte0 has 0x80 set and a FourCC
+    follows ('hvc1', ...), so there is no codec id nibble at all.
+    """
+    if not payload:
+        return "empty"
+    if payload[0] & 0x80:
+        fourcc = bytes(payload[1:5]).decode("latin-1", "replace")
+        return "hevc (enhanced flv)" if fourcc in ("hvc1", "hev1") else fourcc
+    codec_id = payload[0] & 0x0F
+    return "h264" if codec_id == 7 else f"FLV codec id {codec_id}"
+
+
 def _read_exact(read, n):
     buf = b""
     while len(buf) < n:
@@ -124,9 +158,14 @@ def rewrite_flv(read, write, clock=time.time):
             write(script_tag("onMpma", _MPMA, 0))
             write(timing_trailer(False, now - start))
         body = _read_exact(read, size + 4)  # payload + PreviousTagSize
-        write(tag_header + body)
         if len(body) < size + 4:
+            write(tag_header + body)
             return
+        if tag_type == _TAG_VIDEO and size:
+            codec = video_codec(body)
+            if codec != "h264":
+                raise UnsupportedCodec(codec)
+        write(tag_header + body)
         write(timing_trailer(tag_type == _TAG_VIDEO, now - start))
 
 
@@ -182,6 +221,7 @@ class FlvPush:
         self.ffmpeg_bin = ffmpeg_bin
         self._stop = threading.Event()
         self._proc = None
+        self._codec_error_logged = None
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name=f"push-{device_id}-{channel}")
 
@@ -216,6 +256,7 @@ class FlvPush:
         sock = proc = None
         stderr_tail = lambda: ""
         sent = 0
+        codec_error = None
         try:
             sock = socket.create_connection((self.host, self.port), timeout=self.timeout_s)
             sock.settimeout(30)
@@ -235,6 +276,9 @@ class FlvPush:
 
             rewrite_flv(proc.stdout.read, write)
             reason = "ffmpeg output ended"
+        except UnsupportedCodec as exc:
+            codec_error = exc.codec
+            reason = str(exc)
         except (OSError, ValueError) as exc:
             reason = repr(exc)
         finally:
@@ -248,8 +292,19 @@ class FlvPush:
                 sock.close()
         if not self._stop.is_set():
             stderr = stderr_tail()[-300:]
-            log.warning("push %s/%s ended after %d bytes: %s%s", self.device_id, self.channel,
-                        sent, reason, f" ffmpeg: {stderr.strip()}" if stderr.strip() else "")
+            msg = ("push %s/%s ended after %d bytes: %s%s", self.device_id, self.channel,
+                   sent, reason, f" ffmpeg: {stderr.strip()}" if stderr.strip() else "")
+            if codec_error is None:
+                self._codec_error_logged = None
+                log.warning(*msg)
+            elif self._codec_error_logged != codec_error:
+                # Deterministic and retried every retryInterval: say it once at
+                # error level, not once a second (a camera-side codec change
+                # still recovers, since each attempt re-reads the stream).
+                self._codec_error_logged = codec_error
+                log.error(*msg)
+            else:
+                log.debug(*msg)
 
 
 class PushManager:

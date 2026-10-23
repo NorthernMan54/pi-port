@@ -372,6 +372,12 @@ Limits:
 
 - **If the AI Port stops, the camera stops recording.** Protect no longer pulls
   it; unassign the camera (or remove the AI Port) to hand ingest back.
+- **H.264 only.** Video is copied, not re-encoded. An H.265/HEVC camera is muxed
+  by ffmpeg as Enhanced RTMP (an `hvc1` FourCC), which Protect's `ms` does not
+  ingest: live view resets and the push is closed after a few hundred bytes,
+  retried every second. Set the camera's stream to H.264. UniFi's own HEVC
+  framing (FLV codec id 8 with a `0x68 0x01` VPS/SPS/PPS tag) is not
+  implemented; such a stream is now refused with one clear error.
 - Every channel carries the camera's main stream (no lower-resolution
   channels); the resolution reported to Protect is probed from the stream.
 - Audio is AAC 32 kHz mono (silent if the camera has none). Protect asks for

@@ -1606,6 +1606,12 @@ class TestFrameStats(Base):
         self.assertIn("600 delivered (10.0/s), 300 analysed (5.0/s), 300 skipped", line)
         self.assertIn("falling behind", line)
 
+    def test_line_gives_the_box_delay(self):
+        with mock.patch.dict(av._BOX_DELAY_MS, {"FS": 1600}), self.assertLogs(av.log, "INFO") as logs:
+            self.run_minute(1, 600)
+        line = [m for m in logs.output if "frames for deviceID=FS" in m][0]
+        self.assertIn("ms a pass, box delay 1600 ms", line)
+
     def test_frame_without_a_number_is_ignored(self):
         # Live 12:39: a first pass with no frame number yet crashed every camera's loop.
         av._note_frame("FS", None, 0.02, now=1000.0)

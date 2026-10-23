@@ -2957,7 +2957,8 @@ def _stop_motion_detector(device_id, preserve_tracks=False, ws=None):
 # Per-camera frame accounting, logged once a minute: frames ffmpeg delivered (from its frame
 # numbers), frames analysed, frames skipped (replaced by a newer one before a pass picked them
 # up), inference runs (the rest were gated off as static) and the average pass time. A camera
-# analysing under FRAME_RATE_WARN of DETECT_FPS is falling behind.
+# analysing under FRAME_RATE_WARN of DETECT_FPS is falling behind. The line ends with the
+# camera's box delay (AIPORT_BOX_DELAY_MS), which back-dates its boxes.
 FRAME_STATS_S = 60.0
 FRAME_RATE_WARN = 0.9
 _frame_stats = {}     # deviceID -> {"t0", "first_seq", "last_seq", "analysed", "busy_s"}
@@ -2988,9 +2989,9 @@ def _note_frame(device_id, seq, busy_s, now=None):
     behind = fps_done < FRAME_RATE_WARN * DETECT_FPS
     (log.warning if behind else log.info)(
         "frames for deviceID=%s over %.0f s: %d delivered (%.1f/s), %d analysed (%.1f/s), %d "
-        "skipped, %d with inference, %.0f ms a pass%s", device_id, elapsed, delivered, fps_in,
-        analysed, fps_done, max(0, delivered - analysed), inferred,
-        1000 * st["busy_s"] / max(analysed, 1),
+        "skipped, %d with inference, %.0f ms a pass, box delay %d ms%s", device_id, elapsed,
+        delivered, fps_in, analysed, fps_done, max(0, delivered - analysed), inferred,
+        1000 * st["busy_s"] / max(analysed, 1), _box_delay_ms(device_id),
         " -- falling behind the %d fps detection rate" % DETECT_FPS if behind else "")
     _frame_stats[device_id] = {"t0": now, "first_seq": seq, "last_seq": seq, "analysed": 0,
                                "busy_s": 0.0, "inferred0": _inferred[device_id]}

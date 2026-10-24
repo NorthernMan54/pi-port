@@ -1,6 +1,7 @@
 # Plan: porting Frigate's detection pipeline into pi-port
 
-Status: proposal, no code changed yet (2026-10-17).
+Status: done. Proposed 2026-10-17; steps 0 to 6 are in the code (Norfair is optional,
+`AIPORT_TRACKER`). Kept as the record of what was ported from Frigate and why.
 Source: Frigate at `~/Code/frigate` (commit `add310d63`, MIT licence). Code copied or closely
 adapted from it keeps Frigate's copyright and MIT notice in the file header; pi-port stays
 AGPL-3.0.

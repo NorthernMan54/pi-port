@@ -1,5 +1,8 @@
 # Camera-clock experiment
 
+Status: done (2026-10-18). Protect places boxes by `clockWall` only, so the camera's clock
+doesn't help; the experiment's code is off unless `AIPORT_CAMERA_CLOCK` names a camera.
+
 Can Protect place boxes from the camera's own clock instead of a fixed `AIPORT_BOX_DELAY_MS`?
 
 ## What we know

@@ -1,6 +1,7 @@
 # Frame timestamps and video time sync: changes required in pi-port
 
-Status: proposed (2026-10-20), not implemented. Companion to
+Status: proposed (2026-10-20). Changes 1 to 3 are not in the code: a trial of change 3
+(frame times from the stream's timestamps) was rolled back on 2026-10-23. Companion to
 [protect-timesync.md](protect-timesync.md), which covers putting pi-port's clock on
 Protect's time. That one isn't needed while the pi-port host is NTP-synced (see
 "Order" below). Change 3 here removes per-frame jitter. Change 4 (RTCP) was tested on a

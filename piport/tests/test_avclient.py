@@ -326,6 +326,21 @@ class TestProtectCanvas(Base):
         av._exclude_zones["B"] = [[(900, 200), (1000, 200), (1000, 300), (900, 300)]]
         self.assertFalse(av._is_excluded("B", person))  # covers the head, not the feet
 
+    def test_lens_filter_drops_a_full_height_box_in_the_corner(self):
+        # Live 2026-10-23 night: a web on the backyard camera's lens, [768, 3, 231, 949].
+        web = [768, 3, 231, 949]
+        with mock.patch.object(av, "_LENS_FILTER", set()):
+            self.assertFalse(av._on_lens("B", "person", web))
+        with mock.patch.object(av, "_LENS_FILTER", {"ALL"}):
+            self.assertTrue(av._on_lens("B", "person", web))
+            self.assertTrue(av._on_lens("B", "person", [2, 5, 300, 990]))     # left corner
+            self.assertFalse(av._on_lens("B", "vehicle", web))
+            self.assertFalse(av._on_lens("B", "person", [768, 3, 231, 700]))   # shorter
+            self.assertFalse(av._on_lens("B", "person", [768, 60, 231, 930]))  # below the top
+            self.assertFalse(av._on_lens("B", "person", [400, 3, 231, 949]))   # off the sides
+        with mock.patch.object(av, "_LENS_FILTER", {"OTHER"}):
+            self.assertFalse(av._on_lens("B", "person", web))
+
     def test_ultrawide_letterboxed(self):
         av._stream_dims["U"] = (3200, 1200)
         x, y, w, h = av._to_protect("U", [0, 0, 1000, 1000])

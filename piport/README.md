@@ -477,6 +477,11 @@ camera like the box delay: `10,02000000000B=100` (10 by default, as in Frigate).
 the old average diff (`AIPORT_MOTION_GATE_THRESH`) is the fallback. Tracks that are already
 open always classify, so a stationary object keeps its track and can close normally.
 
+`AIPORT_LENS_FILTER` drops a person box that touches the top and a side of the picture and
+spans at least `AIPORT_LENS_MIN_HEIGHT` of its height (900 of 1000 by default): something on
+the lens, such as a spider web, which one night gave a camera 218 person events. It takes
+deviceIDs or `all`; unset, it is off.
+
 **Conversion must run on a separate x86_64 build host.** `rknn-toolkit-lite2` is the on-device,
 inference-only API (aarch64-only wheels for Python <= 3.12); it can only run an already-converted
 `.rknn`. Conversion needs full `rknn-toolkit2`, matching the on-Pi version. Two pins avoid known

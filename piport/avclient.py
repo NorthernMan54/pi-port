@@ -843,6 +843,27 @@ def _is_excluded(device_id, coord):
     return any(_point_in_polygon(cx, cy, poly) for poly in polygons)
 
 
+# Something on the lens: live 2026-10-23 18:58 to 04:15 a spider web on the backyard camera
+# gave 218 person events, every box against the right edge and the top and nearly the full
+# height ([768, 3, 231, 949] in 0-1000 image space). A person box touching the top and a
+# side and spanning LENS_MIN_HEIGHT of the frame is dropped on the cameras named in
+# AIPORT_LENS_FILTER (deviceIDs, or "all"; unset = off).
+LENS_EDGE = 10
+LENS_MIN_HEIGHT = int(os.environ.get("AIPORT_LENS_MIN_HEIGHT", "900"))
+_LENS_FILTER = {v.strip().upper() for v in os.environ.get("AIPORT_LENS_FILTER", "").split(",")
+                if v.strip()}
+
+
+def _on_lens(device_id, object_type, coord):
+    if not _LENS_FILTER or object_type != "person":
+        return False
+    if "ALL" not in _LENS_FILTER and str(device_id).upper() not in _LENS_FILTER:
+        return False
+    x, y, w, h = coord
+    return (y <= LENS_EDGE and h >= LENS_MIN_HEIGHT
+            and (x <= LENS_EDGE or x + w >= CAMERA_COORD_END - LENS_EDGE))
+
+
 # A detection counts in a zone listing what it confirms with (a plate rides its vehicle).
 ZONE_TYPE_ALIASES = {"licensePlate": ("licensePlate", "vehicle")}
 
@@ -993,6 +1014,9 @@ def _classify_frame_detections(device_id):
             continue
         if _is_excluded(device_id, coord):
             _log_dropped(device_id, r, "excluded by configured excludeZones")
+            continue
+        if _on_lens(device_id, r["objectType"], coord):
+            _log_dropped(device_id, r, "on the lens (AIPORT_LENS_FILTER)")
             continue
         d = {"objectType": r["objectType"], "score": r["score"], "coord": coord}
         if r.get("clipped"):

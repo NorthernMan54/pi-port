@@ -383,8 +383,21 @@ MOTION_GATE = os.environ.get("AIPORT_MOTION_GATE", "1").strip().lower() not in (
     "0", "false", "no", "off")
 MOTION_GATE_THRESH = float(os.environ.get("AIPORT_MOTION_GATE_THRESH", "0.02"))
 _GATE_STRIDE = 8  # sample every Nth pixel -> 80x80 grayscale for the diff
-# Paired camera's smartDetectZones row id -- zonesStatus's key must match it (not always "1").
+# The zone id reported when a track has none of its own (no zones set up, or it was never
+# seen inside one, e.g. a parked object). Otherwise each track reports the zones it's in:
+# live 2026-10-24 a web on Backyard's lens, whose feet fell in the yard zone (2), showed in
+# Protect as "Deck" (zone 1) because every detection was reported as zone 1.
 SMART_DETECT_ZONE_ID = "1"
+
+
+def _track_zones(zone_ids):
+    return list(zone_ids) if zone_ids else [int(SMART_DETECT_ZONE_ID)]
+
+
+def _zones_status(zone_lists, level, status):
+    """zonesStatus for every zone the message's tracks name."""
+    ids = list(dict.fromkeys(z for zones in zone_lists for z in _track_zones(zones)))
+    return {str(z): {"level": level, "status": status} for z in ids}
 
 # Detector frames (detectors/), latest only: ffmpeg decodes to the detector frame size as raw RGB.
 _latest_frame = {}   # deviceID -> HxWx3 uint8 numpy array (RGB)
@@ -414,6 +427,8 @@ _stream_probe = {}   # deviceID -> {"codec", "width", "height", "fps"} from ffpr
 _exclude_zones = {}
 # Prototype app exposes `zones` (not excludeZones): when non-default, a detection must be inside one.
 _detect_zones = {}
+# deviceID -> each detection zone's id (Protect's key), parallel to _detect_zones.
+_detect_zone_ids = {}
 # deviceID -> each detection zone's objectTypes (None = any), parallel to _detect_zones.
 _detect_zone_types = {}
 # deviceID -> Line Crossing segments parsed from ChangeSmartDetectSettings.lines.
@@ -829,6 +844,19 @@ def _zone_allows(types, object_type):
     if types is None or object_type is None:
         return True
     return any(t in types for t in ZONE_TYPE_ALIASES.get(object_type, (object_type,)))
+
+
+def _zones_of(device_id, coord, object_type=None):
+    """Ids of the zones listing object_type that hold the detection's bottom-centre; [] if
+    none (or no zones set up)."""
+    polygons = _detect_zones.get(device_id)
+    if not polygons:
+        return []
+    types = _detect_zone_types.get(device_id) or [None] * len(polygons)
+    ids = _detect_zone_ids.get(device_id) or list(range(1, len(polygons) + 1))
+    cx, cy = _protect_foot(device_id, coord)
+    return [zid for poly, t, zid in zip(polygons, types, ids)
+            if _zone_allows(t, object_type) and _point_in_polygon(cx, cy, poly)]
 
 
 def _is_outside_detect_zones(device_id, coord, object_type=None):
@@ -1628,6 +1656,8 @@ def _merge_extra(tr, d, device_id=None, tracker_id=None):
     changes; other scored keys (a face's `faceEmbed`) keep the best-scoring read; other
     keys (attributes, names) take the newest value and are never cleared by a
     tick that lacks them."""
+    if d.get("zone_ids"):
+        tr["zone_ids"] = list(d["zone_ids"])   # the zones it's in now; kept through gaps
     if d.get("in_zone", True):
         tr["zoned"] = True        # latched: it has been in a zone listing its type
     else:
@@ -1680,6 +1710,17 @@ def _iou(box_a, box_b):
     inter = iw * ih
     union = aw * ah + bw * bh - inter
     return inter / union if union > 0 else 0.0
+
+
+def _parse_zone_ids(zones_field):
+    """Each zone's id (Protect's key for it, an int when numeric), in _parse_zones' order.
+    Protect labels an event with the ids its descriptors name (zone:<camera>:<id>)."""
+    out = []
+    for key, zone in (zones_field or {}).items():
+        coord = zone.get("coord") or []
+        if len(coord) >= 6 and len(coord) % 2 == 0:
+            out.append(int(key) if str(key).isdigit() else key)
+    return out
 
 
 def _parse_zone_types(zones_field):
@@ -2026,7 +2067,7 @@ def _track_args(tracker_id, tr, hold_embed=True):
     return {"tracker_id": tracker_id, "object_type": tr["objectType"],
             "coord": tr.get("smooth") or tr["coord"],
             "confidence": tr["score"], "first_shown_ms": tr["first_shown_ms"],
-            "descriptor_extra": extra, "best": tr.get("best"),
+            "descriptor_extra": extra, "best": tr.get("best"), "zones": tr.get("zone_ids"),
             "still": still, "idle_since_ms": tr.get("still_since_ms") if still else None}
 
 
@@ -2209,6 +2250,9 @@ def _link_faces(tracks, device_id):
             person["face_tid"] = fid
         # A face is in a zone when its person's feet are in one listing faces (the face box's
         # own bottom is the chin).
+        face_zones = _zones_of(device_id, person["coord"], "face")
+        if face_zones:
+            face["zone_ids"] = face_zones
         if not face.get("zoned") and person.get("zoned", True) and not _is_outside_detect_zones(
                 device_id, person["coord"], "face"):
             face["zoned"] = True
@@ -2240,7 +2284,7 @@ def _associate_faces(members):
 
 def _tracker_attrs(tracker_id, tr, faces_by_person):
     """trackerIDAttrMap entry for one participant (attributeSchema keys)."""
-    entry = {"objectType": tr["objectType"], "zone": [int(SMART_DETECT_ZONE_ID)]}
+    entry = {"objectType": tr["objectType"], "zone": _track_zones(tr.get("zone_ids"))}
     extra = tr.get("extra") or {}
     # A named face's leave carries its match, not its embedding: live 11:18 Protect kept
     # group:face_186 (Alex) through the event, then clustered the leave's faceEmbed itself into
@@ -2305,7 +2349,8 @@ def _send_multi_leave(ws, device_id, event_id, members, fallback):
         "smartDetectSnapshotFullFoV": fullfov,
         "smartDetectSnapshotFullFoVHeight": fov_h, "smartDetectSnapshotFullFoVWidth": fov_w,
         "smartDetectSnapshots": snapshots, "trackerIDAttrMap": attr_map,
-        "zonesStatus": {SMART_DETECT_ZONE_ID: {"level": level, "status": "leave"}},
+        "zonesStatus": _zones_status([tr.get("zone_ids") for _tid, tr in members], level,
+                                     "leave"),
     }
     pending = {"seen": False}
     names = [fullfov] + [x["smartDetectSnapshot"] for x in snapshots]
@@ -2604,8 +2649,9 @@ def _motion_tick(ws, device_id):
         # named Alex, and it never made the event.
         for d in detections:
             if "in_zone" not in d:
-                d["in_zone"] = bool(d.get("seeded")) or not _is_outside_detect_zones(
-                    device_id, d["coord"], d["objectType"])
+                d["zone_ids"] = _zones_of(device_id, d["coord"], d["objectType"])
+                d["in_zone"] = bool(d.get("seeded")) or bool(d["zone_ids"]) \
+                    or not _detect_zones.get(device_id)
 
         # 1. Which detection belongs to which track: Norfair (AIPORT_TRACKER=norfair) or
         #    the built-in IoU + nearest-neighbour matcher.
@@ -3471,7 +3517,7 @@ def _leave_track_attrs(t):
     event (multi leave, attributes here) was found by "truck" and "black", while one-vehicle
     events with the same attributes only on the descriptor were not."""
     extra = t["descriptor_extra"] or {}
-    entry = {"objectType": t["object_type"], "zone": [int(SMART_DETECT_ZONE_ID)]}
+    entry = {"objectType": t["object_type"], "zone": _track_zones(t.get("zones"))}
     if t["object_type"] in ("face", "person"):
         entry.update({k: extra[k] for k in ("matchedId", "matchedName")
                       if extra.get(k) is not None})
@@ -3486,7 +3532,7 @@ def _leave_track_attrs(t):
 def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, stationary=False,
                               object_type="person", coord=None, confidence=95,
                               first_shown_ms=None, tracker_id=1, descriptor_extra=None, best=None,
-                              also_leaving=None, still=False, idle_since_ms=None):
+                              also_leaving=None, still=False, idle_since_ms=None, zones=None):
     # Real EventSmartDetect shape; deviceID is our addition (required by AI-Port event routing).
     # also_leaving: further tracks closing on the same tick (dicts with this function's
     # per-track arguments). Real devices batch them into one leave with one snapshot
@@ -3496,7 +3542,7 @@ def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, statio
     tracks = [{"tracker_id": tracker_id, "object_type": object_type, "coord": coord,
                "confidence": confidence, "first_shown_ms": first_shown_ms,
                "descriptor_extra": descriptor_extra, "best": best, "still": still,
-               "idle_since_ms": idle_since_ms}, *(also_leaving or [])]
+               "idle_since_ms": idle_since_ms, "zones": zones}, *(also_leaving or [])]
     for t in tracks:
         # Placeholder box is only a fallback; tracks open on real detections.
         t["real_coord"] = ([int(round(v)) for v in _to_protect(device_id, t["coord"])]
@@ -3534,8 +3580,9 @@ def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, statio
             "stationary": stationary or bool(t.get("still")),
             "tag": "",
             "trackerID": t["tracker_id"],
-            # Naming the zone makes ds create a smartDetectZone (vs smartDetectLine) event.
-            "zones": [int(SMART_DETECT_ZONE_ID)],
+            # Naming the zone makes ds create a smartDetectZone (vs smartDetectLine) event; Protect
+            # labels the event with these zone ids.
+            "zones": _track_zones(t.get("zones")),
             # Enrichment fields: attributes, plate text in name, faceEmbed, name/tag (enrich.py).
             **(t["descriptor_extra"] or {}),
         } for t in tracks],
@@ -3548,7 +3595,7 @@ def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, statio
         "smartDetectSnapshotFullFoVHeight": 0,
         "smartDetectSnapshotFullFoVWidth": 0,
         "smartDetectSnapshots": [],
-        "zonesStatus": {SMART_DETECT_ZONE_ID: {"level": zone_level, "status": zone_status}},
+        "zonesStatus": _zones_status([t.get("zones") for t in tracks], zone_level, zone_status),
     }
     # Other *Status fields omitted: the real capture had only zonesStatus, and those detectors aren't implemented.
     if edge_type == "leave":
@@ -4134,6 +4181,7 @@ def handle_function(ws, msg, device_info):
             if "zones" in payload:
                 _detect_zones[device_id] = _parse_zones(payload.get("zones"))
                 _detect_zone_types[device_id] = _parse_zone_types(payload.get("zones"))
+                _detect_zone_ids[device_id] = _parse_zone_ids(payload.get("zones"))
             if "lines" in payload:
                 _lines[device_id] = _parse_lines(payload.get("lines"))
             log.info("ChangeSmartDetectSettings: deviceID=%s now has %d excludeZones "
@@ -4153,6 +4201,7 @@ def handle_function(ws, msg, device_info):
         _exclude_zones.clear()
         _detect_zones.clear()
         _detect_zone_types.clear()
+        _detect_zone_ids.clear()
         _lines.clear()
         _clear_adopt_state()
         if msg.get("responseExpected"):

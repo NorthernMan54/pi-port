@@ -38,6 +38,7 @@ class Base(unittest.TestCase):
         av._lines.clear()
         av._detect_zones.clear()
         av._detect_zone_types.clear()
+        av._detect_zone_ids.clear()
         av._exclude_zones.clear()
         av._snapshot_filename_to_device.clear()
         av._recent_snapshot_announcements.clear()
@@ -155,6 +156,7 @@ class TestZoneFiltering(Base):
         av.handle_function(None, {"functionName": "ChangeSmartDetectSettings", "messageId": 1,
                                   "payload": {"deviceID": "Z", "zones": zones}}, {})
         self.assertEqual(av._detect_zone_types["Z"], [["vehicle"], None])
+        self.assertEqual(av._detect_zone_ids["Z"], [1, 2])          # Protect's keys
         av.handle_function(None, {"functionName": "ChangeSmartDetectSettings", "messageId": 2,
                                   "payload": {"deviceID": "Z", "isLprCamera": 0}}, {})
         self.assertEqual(len(av._detect_zones["Z"]), 2)  # live 11:47: this wiped the zones
@@ -591,6 +593,29 @@ class TestCameraEvent(Base):
         self.assertEqual(len(av._motion_state["D"]["tracks"]), 1)
         self.assertTrue(self.events())
         self.assertTrue(all(e[0] == "moving" for e in self.events()))
+
+    def test_events_name_the_zone_the_person_is_in(self):
+        # Live 2026-10-24: a lens web whose feet fell in Backyard's yard zone (2) showed in
+        # Protect as "Deck" (zone 1): every detection was reported as zone 1.
+        av._detect_zones["D"] = [[(0, 0), (1000, 0), (1000, 300), (0, 300)],        # 1 Deck
+                                 [(0, 300), (1000, 300), (1000, 1000), (0, 1000)]]  # 2 yard
+        av._detect_zone_types["D"] = [["person"], ["person"]]
+        av._detect_zone_ids["D"] = [1, 2]
+        self.tick(self.person_at(400))                       # feet at y 800: the yard
+        enter = next(p for fn, p in self.sent if fn == "EventSmartDetect" and p["edgeType"] == "enter")
+        self.assertEqual(enter["descriptors"][0]["zones"], [2])
+        self.assertEqual(list(enter["zonesStatus"]), ["2"])
+        for _ in range(40):
+            self.tick()
+        leave = next(p for fn, p in self.sent if fn == "EventSmartDetect" and p["edgeType"] == "leave")
+        self.assertEqual(list(leave["zonesStatus"]), ["2"])
+        self.assertEqual([v["zone"] for v in leave["trackerIDAttrMap"].values()], [[2]])
+
+    def test_without_zones_events_name_zone_1(self):
+        self.tick(self.person_at(400))
+        enter = next(p for fn, p in self.sent if fn == "EventSmartDetect" and p["edgeType"] == "enter")
+        self.assertEqual(enter["descriptors"][0]["zones"], [1])
+        self.assertEqual(list(enter["zonesStatus"]), ["1"])
 
     def test_person_never_in_a_zone_is_never_reported(self):
         self.zone_left_half()

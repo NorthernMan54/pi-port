@@ -22,6 +22,7 @@ import avclient as av  # noqa: E402
 import replay  # noqa: E402
 
 _FFMPEG = shutil.which(av.FFMPEG_BIN)
+_CV2 = importlib.util.find_spec("cv2") is not None   # the Frigate motion gate, regions, stationary
 _spec = importlib.util.spec_from_file_location(
     "record_clip", os.path.join(os.path.dirname(_ROOT), "scripts", "record_clip.py"))
 record_clip = importlib.util.module_from_spec(_spec)
@@ -68,6 +69,7 @@ class TestReplay(unittest.TestCase):
         return replay.replay(av, replay.clip_frames(av, self.clip), settings or {"width": 320,
                                                                                  "height": 180})
 
+    @unittest.skipUnless(_CV2, "OpenCV not installed: the average-diff gate misses the test box")
     def test_crossing_box_is_one_event(self):
         sent = self.run_replay()
         edges = [p["edgeType"] for _, p in sent]
@@ -87,6 +89,7 @@ class TestReplay(unittest.TestCase):
                                delta=0.15)   # back-filled from the first frame
         self.assertAlmostEqual(events[0]["end_s"], 2.5 + av.MOTION_MISS_TOLERANCE_S, delta=0.5)
 
+    @unittest.skipUnless(_CV2, "OpenCV not installed: the average-diff gate misses the test box")
     def test_boxes_move_right(self):
         sent = self.run_replay()
         xs = [p["descriptors"][0]["coord"][0] for _, p in sent if p["edgeType"] == "moving"]
@@ -98,6 +101,7 @@ class TestReplay(unittest.TestCase):
             "zones": {"1": {"coord": [0, 900, 100, 900, 100, 1000, 0, 1000]}}}}
         self.assertEqual(self.run_replay(settings), [])
 
+    @unittest.skipUnless(_CV2, "OpenCV not installed: the average-diff gate misses the test box")
     def test_event_start_msec_from_sidecar(self):
         settings = {"width": 320, "height": 180, "smartDetect": {"eventStartMSec": 1000}}
         events = replay.summarize(self.run_replay(settings))
@@ -110,6 +114,7 @@ class TestReplay(unittest.TestCase):
                           av._STREAM_DIR), before)
         self.assertNotIn(replay.DEVICE, av._motion_state)
 
+    @unittest.skipUnless(_CV2, "OpenCV not installed: the average-diff gate misses the test box")
     def test_cli_json_with_sidecar(self):
         with open(os.path.join(self.dir, "walk.json"), "w") as f:
             json.dump({"width": 320, "height": 180, "start": "2026-10-17T13:54:00-04:00"}, f)

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """regions.py (Frigate's region clustering and merging) and avclient's region detection."""
+import importlib.util
 import os
 import sys
 import unittest
@@ -13,6 +14,8 @@ import numpy as np  # noqa: E402
 
 import avclient as av  # noqa: E402
 import regions  # noqa: E402
+
+_CV2 = importlib.util.find_spec("cv2") is not None   # the Frigate motion gate, regions, stationary
 
 SHAPE = (720, 1280, 3)
 
@@ -117,6 +120,7 @@ class TestRegionDetection(unittest.TestCase):
             f[y:y + 24, x:x + 10] = 255   # a distant person, ~0.03% of the frame
         av._latest_frame["R"] = f
 
+    @unittest.skipUnless(_CV2, "OpenCV not installed (the motion gate)")
     def test_distant_person_found_in_a_region_at_native_size(self):
         for _ in range(20):
             self.frame()

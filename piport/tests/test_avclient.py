@@ -3,6 +3,7 @@
 """Unit tests for avclient.py's pure logic: geometry, zone/line
 parsing + crossing, snapshots. No sockets/device; ffmpeg tests skipped if absent.
 """
+import importlib.util
 import json
 import os
 import shutil
@@ -23,6 +24,7 @@ import avclient as av  # noqa: E402
 import config  # noqa: E402
 
 _FFMPEG = shutil.which(av.FFMPEG_BIN) or (av.FFMPEG_BIN if os.path.exists(av.FFMPEG_BIN) else None)
+_CV2 = importlib.util.find_spec("cv2") is not None   # the Frigate motion gate, regions, stationary
 
 SQUARE = [(0, 0), (10, 0), (10, 10), (0, 10)]  # note: normalized 0-1000 in real use
 
@@ -869,6 +871,7 @@ class TestCameraEvent(Base):
         av._latest_frame["D"] = frame
         self.addCleanup(av._latest_frame.pop, "D", None)
 
+    @unittest.skipUnless(_CV2, "OpenCV not installed (stationary.py)")
     def test_jittering_boxes_dont_move_a_parked_car_its_pixels_stay(self):
         # Live 2026-10-17 12:25 (Camera A): boxes on a parked car shrank onto its lower half.
         self._scene(car_at=388)
@@ -1600,6 +1603,7 @@ class TestMultiLeave(Base):
         self.assertEqual(av._associate_faces(members), {})
 
 
+@unittest.skipUnless(_CV2, "OpenCV not installed")
 class TestMotionContourArea(Base):
     """AIPORT_MOTION_CONTOUR_AREA sets the smallest motion blob per camera."""
 
@@ -2564,6 +2568,7 @@ except Exception:  # numpy is a project dep but keep the suite runnable without 
 
 
 @unittest.skipIf(_np is None, "numpy unavailable")
+@unittest.skipUnless(_CV2, "OpenCV not installed (the motion gate falls back to an average diff)")
 class MotionGate(unittest.TestCase):
     """_scene_changed asks Frigate's motion detector (motion.py) whether this frame moved."""
 

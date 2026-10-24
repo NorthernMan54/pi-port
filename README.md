@@ -467,6 +467,10 @@ CPU); `cpu` forces CPU and `coreml` requests Core ML (CPU with a warning if abse
   cd piport && python3 -m unittest discover -s tests
   ```
 
+  Tests needing OpenCV, ffmpeg, Norfair or macOS skip without them. The enrichment check
+  on real images runs when `AIPORT_ENRICH_SAMPLES` names a folder holding `plate.png` and
+  `lena.jpg`, with fast-alpr and the face models installed.
+
 - Container smoke test (no console/camera required):
 
   ```bash

@@ -282,9 +282,12 @@ once a read reaches the minimum, with its thumbnail and embedding from those rea
 stays small is never reported; its person still is), `AIPORT_FACE_EMBED_MIN_PX` (60: a
 smaller read is still matched against Protect's face DB here, but its `faceEmbed` isn't sent;
 unnamed, Protect would run its own looser search on it, which put 43-48 px reads on the wrong
-person), and
+person), `AIPORT_FACE_EMBED_MIN_NORM` (7.0: a read whose SFace vector is shorter than this,
+as blurred faces and faces looking down or away are, isn't sent or matched either),
 `AIPORT_FACES_DIR` (default `<state-dir>/faces`): one sub-directory per person, named after
-them, holding a few clear face photos; edits are picked up without a restart.
+them, holding a few clear face photos; edits are picked up without a restart, and
+`AIPORT_FACES_SEEN_DIR` (default `<state-dir>/faces-seen`): each closed face track's best crop,
+the last 500 kept, to pick gallery photos from.
 
 Protect also sends `UpdateFaceDBRequest` with a URL for its known-faces database (named
 groups, for on-device matching). `avclient.py` downloads it to `<state-dir>/facedb/known.db`

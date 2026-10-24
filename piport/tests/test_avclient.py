@@ -611,6 +611,23 @@ class TestCameraEvent(Base):
         self.assertEqual(list(leave["zonesStatus"]), ["2"])
         self.assertEqual([v["zone"] for v in leave["trackerIDAttrMap"].values()], [[2]])
 
+    def test_leave_names_every_zone_the_person_was_in(self):
+        # Live 10:10 on the backyard camera: a walk from the yard onto the Deck closed as Deck only.
+        av._detect_zones["D"] = [[(0, 0), (1000, 0), (1000, 500), (0, 500)],        # 1 Deck
+                                 [(0, 500), (1000, 500), (1000, 1000), (0, 1000)]]  # 2 yard
+        av._detect_zone_types["D"] = [["person"], ["person"]]
+        av._detect_zone_ids["D"] = [1, 2]
+        for y in range(300, -200, -40):   # feet from y 900 (yard) to 460 (Deck)
+            self.tick(dict(self.PERSON, coord=[400, y, 100, 600]))
+        moves = [p["descriptors"][0]["zones"] for fn, p in self.sent
+                 if fn == "EventSmartDetect" and p["edgeType"] in ("enter", "moving")]
+        self.assertEqual((moves[0], moves[-1]), ([2], [1]))
+        for _ in range(40):
+            self.tick()
+        leave = next(p for fn, p in self.sent if fn == "EventSmartDetect" and p["edgeType"] == "leave")
+        self.assertEqual(list(leave["zonesStatus"]), ["2", "1"])
+        self.assertEqual([v["zone"] for v in leave["trackerIDAttrMap"].values()], [[2, 1]])
+
     def test_without_zones_events_name_zone_1(self):
         self.tick(self.person_at(400))
         enter = next(p for fn, p in self.sent if fn == "EventSmartDetect" and p["edgeType"] == "enter")

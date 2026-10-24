@@ -394,6 +394,13 @@ def _track_zones(zone_ids):
     return list(zone_ids) if zone_ids else [int(SMART_DETECT_ZONE_ID)]
 
 
+def _zones_visited(tr):
+    """Every zone a track has been in, in order of first visit (its current zones if
+    none were collected). A leave closes the event, so it names them all: live 10:10 on the
+    backyard camera a walk from the yard (2) through zone 3 onto the Deck closed as Deck only."""
+    return tr.get("zones_seen") or tr.get("zone_ids")
+
+
 def _zones_status(zone_lists, level, status):
     """zonesStatus for every zone the message's tracks name."""
     ids = list(dict.fromkeys(z for zones in zone_lists for z in _track_zones(zones)))
@@ -1658,6 +1665,8 @@ def _merge_extra(tr, d, device_id=None, tracker_id=None):
     tick that lacks them."""
     if d.get("zone_ids"):
         tr["zone_ids"] = list(d["zone_ids"])   # the zones it's in now; kept through gaps
+        seen = tr.setdefault("zones_seen", [])
+        seen.extend(z for z in d["zone_ids"] if z not in seen)
     if d.get("in_zone", True):
         tr["zoned"] = True        # latched: it has been in a zone listing its type
     else:
@@ -2068,7 +2077,7 @@ def _track_args(tracker_id, tr, hold_embed=True):
             "coord": tr.get("smooth") or tr["coord"],
             "confidence": tr["score"], "first_shown_ms": tr["first_shown_ms"],
             "descriptor_extra": extra, "best": tr.get("best"), "zones": tr.get("zone_ids"),
-            "still": still, "idle_since_ms": tr.get("still_since_ms") if still else None}
+            "zones_seen": _zones_visited(tr), "still": still, "idle_since_ms": tr.get("still_since_ms") if still else None}
 
 
 # Playback places boxes by clockWall, and a track only shows once it confirms (Protect's
@@ -2284,7 +2293,7 @@ def _associate_faces(members):
 
 def _tracker_attrs(tracker_id, tr, faces_by_person):
     """trackerIDAttrMap entry for one participant (attributeSchema keys)."""
-    entry = {"objectType": tr["objectType"], "zone": _track_zones(tr.get("zone_ids"))}
+    entry = {"objectType": tr["objectType"], "zone": _track_zones(_zones_visited(tr))}
     extra = tr.get("extra") or {}
     # A named face's leave carries its match, not its embedding: live 11:18 Protect kept
     # group:face_186 (Alex) through the event, then clustered the leave's faceEmbed itself into
@@ -2349,7 +2358,7 @@ def _send_multi_leave(ws, device_id, event_id, members, fallback):
         "smartDetectSnapshotFullFoV": fullfov,
         "smartDetectSnapshotFullFoVHeight": fov_h, "smartDetectSnapshotFullFoVWidth": fov_w,
         "smartDetectSnapshots": snapshots, "trackerIDAttrMap": attr_map,
-        "zonesStatus": _zones_status([tr.get("zone_ids") for _tid, tr in members], level,
+        "zonesStatus": _zones_status([_zones_visited(tr) for _tid, tr in members], level,
                                      "leave"),
     }
     pending = {"seen": False}
@@ -3517,7 +3526,8 @@ def _leave_track_attrs(t):
     event (multi leave, attributes here) was found by "truck" and "black", while one-vehicle
     events with the same attributes only on the descriptor were not."""
     extra = t["descriptor_extra"] or {}
-    entry = {"objectType": t["object_type"], "zone": _track_zones(t.get("zones"))}
+    entry = {"objectType": t["object_type"],
+             "zone": _track_zones(t.get("zones_seen") or t.get("zones"))}
     if t["object_type"] in ("face", "person"):
         entry.update({k: extra[k] for k in ("matchedId", "matchedName")
                       if extra.get(k) is not None})
@@ -3532,7 +3542,8 @@ def _leave_track_attrs(t):
 def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, stationary=False,
                               object_type="person", coord=None, confidence=95,
                               first_shown_ms=None, tracker_id=1, descriptor_extra=None, best=None,
-                              also_leaving=None, still=False, idle_since_ms=None, zones=None):
+                              also_leaving=None, still=False, idle_since_ms=None, zones=None,
+                              zones_seen=None):
     # Real EventSmartDetect shape; deviceID is our addition (required by AI-Port event routing).
     # also_leaving: further tracks closing on the same tick (dicts with this function's
     # per-track arguments). Real devices batch them into one leave with one snapshot
@@ -3542,7 +3553,8 @@ def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, statio
     tracks = [{"tracker_id": tracker_id, "object_type": object_type, "coord": coord,
                "confidence": confidence, "first_shown_ms": first_shown_ms,
                "descriptor_extra": descriptor_extra, "best": best, "still": still,
-               "idle_since_ms": idle_since_ms, "zones": zones}, *(also_leaving or [])]
+               "idle_since_ms": idle_since_ms, "zones": zones, "zones_seen": zones_seen},
+              *(also_leaving or [])]
     for t in tracks:
         # Placeholder box is only a fallback; tracks open on real detections.
         t["real_coord"] = ([int(round(v)) for v in _to_protect(device_id, t["coord"])]
@@ -3595,7 +3607,10 @@ def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, statio
         "smartDetectSnapshotFullFoVHeight": 0,
         "smartDetectSnapshotFullFoVWidth": 0,
         "smartDetectSnapshots": [],
-        "zonesStatus": _zones_status([t.get("zones") for t in tracks], zone_level, zone_status),
+        # A leave names every zone each track was in (_zones_visited); other edges, where it is now.
+        "zonesStatus": _zones_status([(t.get("zones_seen") if edge_type == "leave" else None)
+                                      or t.get("zones") for t in tracks],
+                                     zone_level, zone_status),
     }
     # Other *Status fields omitted: the real capture had only zonesStatus, and those detectors aren't implemented.
     if edge_type == "leave":

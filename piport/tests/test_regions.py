@@ -12,6 +12,8 @@ if _ROOT not in sys.path:
 
 import numpy as np  # noqa: E402
 
+os.environ.setdefault("AIPORT_TICK_S", "0.33")       # tests assume macOS's tick and
+os.environ.setdefault("AIPORT_DETECT_FPS", "10")    # detection rate on every platform
 import avclient as av  # noqa: E402
 import regions  # noqa: E402
 

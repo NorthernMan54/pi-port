@@ -10,6 +10,8 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+os.environ.setdefault("AIPORT_TICK_S", "0.33")       # tests assume macOS's tick and
+os.environ.setdefault("AIPORT_DETECT_FPS", "10")    # detection rate on every platform
 try:
     import cv2
     import numpy as np

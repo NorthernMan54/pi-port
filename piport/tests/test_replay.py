@@ -18,6 +18,8 @@ _ROOT = os.path.dirname(_HERE)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+os.environ.setdefault("AIPORT_TICK_S", "0.33")       # tests assume macOS's tick and
+os.environ.setdefault("AIPORT_DETECT_FPS", "10")    # detection rate on every platform
 import avclient as av  # noqa: E402
 import replay  # noqa: E402
 

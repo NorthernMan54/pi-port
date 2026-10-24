@@ -15,6 +15,8 @@ if _ROOT not in sys.path:
 
 import facedb  # noqa: E402
 
+os.environ.setdefault("AIPORT_TICK_S", "0.33")       # tests assume macOS's tick and
+os.environ.setdefault("AIPORT_DETECT_FPS", "10")    # detection rate on every platform
 try:
     import avclient as av
 except Exception:  # pragma: no cover

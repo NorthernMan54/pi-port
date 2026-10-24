@@ -88,6 +88,8 @@ class TestCoordHelpers(unittest.TestCase):
                          (0, 0, 100, 100))
 
 
+os.environ.setdefault("AIPORT_TICK_S", "0.33")       # tests assume macOS's tick and
+os.environ.setdefault("AIPORT_DETECT_FPS", "10")    # detection rate on every platform
 try:
     import avclient
     _AV_ERR = None

@@ -329,7 +329,7 @@ class TestProtectCanvas(Base):
         self.assertFalse(av._is_excluded("B", person))  # covers the head, not the feet
 
     def test_lens_filter_drops_a_full_height_box_in_the_corner(self):
-        # Live 2026-10-23 night: a web on the backyard camera's lens, [768, 3, 231, 949].
+        # Live 2026-10-23 night: a web on Camera C's lens, [768, 3, 231, 949].
         web = [768, 3, 231, 949]
         with mock.patch.object(av, "_LENS_FILTER", set()):
             self.assertFalse(av._on_lens("B", "person", web))
@@ -612,13 +612,13 @@ class TestCameraEvent(Base):
         self.assertTrue(all(e[0] == "moving" for e in self.events()))
 
     def test_events_name_the_zone_the_person_is_in(self):
-        # Live 2026-10-24: a lens web whose feet fell in Backyard's yard zone (2) showed in
-        # Protect as "Deck" (zone 1): every detection was reported as zone 1.
-        av._detect_zones["D"] = [[(0, 0), (1000, 0), (1000, 300), (0, 300)],        # 1 Deck
-                                 [(0, 300), (1000, 300), (1000, 1000), (0, 1000)]]  # 2 yard
+        # Live 2026-10-24: a lens web whose feet fell in Camera C's lower zone (2) showed in
+        # Protect under its upper zone (1): every detection was reported as zone 1.
+        av._detect_zones["D"] = [[(0, 0), (1000, 0), (1000, 300), (0, 300)],        # 1 upper
+                                 [(0, 300), (1000, 300), (1000, 1000), (0, 1000)]]  # 2 lower
         av._detect_zone_types["D"] = [["person"], ["person"]]
         av._detect_zone_ids["D"] = [1, 2]
-        self.tick(self.person_at(400))                       # feet at y 800: the yard
+        self.tick(self.person_at(400))                       # feet at y 800: the lower zone
         enter = next(p for fn, p in self.sent if fn == "EventSmartDetect" and p["edgeType"] == "enter")
         self.assertEqual(enter["descriptors"][0]["zones"], [2])
         self.assertEqual(list(enter["zonesStatus"]), ["2"])
@@ -629,12 +629,12 @@ class TestCameraEvent(Base):
         self.assertEqual([v["zone"] for v in leave["trackerIDAttrMap"].values()], [[2]])
 
     def test_leave_names_every_zone_the_person_was_in(self):
-        # Live 10:10 on the backyard camera: a walk from the yard onto the Deck closed as Deck only.
-        av._detect_zones["D"] = [[(0, 0), (1000, 0), (1000, 500), (0, 500)],        # 1 Deck
-                                 [(0, 500), (1000, 500), (1000, 1000), (0, 1000)]]  # 2 yard
+        # Live 10:10 on Camera C: a walk from the lower zone into the upper one closed as zone 1 only.
+        av._detect_zones["D"] = [[(0, 0), (1000, 0), (1000, 500), (0, 500)],        # 1 upper
+                                 [(0, 500), (1000, 500), (1000, 1000), (0, 1000)]]  # 2 lower
         av._detect_zone_types["D"] = [["person"], ["person"]]
         av._detect_zone_ids["D"] = [1, 2]
-        for y in range(300, -200, -40):   # feet from y 900 (yard) to 460 (Deck)
+        for y in range(300, -200, -40):   # feet from y 900 (zone 2) to 460 (zone 1)
             self.tick(dict(self.PERSON, coord=[400, y, 100, 600]))
         moves = [p["descriptors"][0]["zones"] for fn, p in self.sent
                  if fn == "EventSmartDetect" and p["edgeType"] in ("enter", "moving")]

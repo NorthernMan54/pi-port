@@ -111,7 +111,7 @@ class TestMergeExtra(unittest.TestCase):
         self.assertAlmostEqual(tr["extra_scores"]["name"], (0.90 + 0.89 + 0.88) / 3)
 
     def test_plate_vote_is_per_character(self):
-        # Side Door 14:38 at 40 px: the same plate read with a different wrong letter each time.
+        # Camera D 14:38 at 40 px: the same plate read with a different wrong letter each time.
         reads = [("DEPM782", 0.88), ("DEFM782", 0.87), ("DEPM732", 0.88)]
         text, conf, agreeing = avclient._plate_rep(reads)
         self.assertEqual((text, agreeing), ("DEPM782", 3))

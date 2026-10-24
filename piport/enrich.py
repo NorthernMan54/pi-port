@@ -67,7 +67,7 @@ def weak_embedding(embedding):
     return embedding is None or float(np.linalg.norm(np.asarray(embedding, dtype=np.float64))) < FACE_EMBED_MIN_NORM
 PLATE_SCORE_THRESH = float(os.environ.get("AIPORT_LPR_THRESH", "0.5"))
 # Plates narrower than this (snapshot pixels) aren't read: re-reading the 14:38 clips, every
-# Camera B read under 75 px was wrong, from 80 px all but one were right, and Side Door's
+# Camera B read under 75 px was wrong, from 80 px all but one were right, and Camera D's
 # 40 px plate came out as DEPM782 and DEFM782 by turns. AIPORT_LPR_MIN_PX overrides it.
 PLATE_MIN_PX = int(os.environ.get("AIPORT_LPR_MIN_PX") or 60)
 # Plate/face crops are expanded by this factor around the parent box: the

@@ -225,7 +225,7 @@ class TestCheck(unittest.TestCase):
         self.assertEqual(replay.check({"distinct_face_snapshots": True}, events), [])
 
     def test_vehicle_attributes(self):
-        # 15:13 side door: a black SUV went out as car/truck and blue.
+        # 15:13 Camera D: a black SUV went out as car/truck and blue.
         events = [self.ev({"tracker": 3, "type": "vehicle", "vehicle_type": "truck", "color": "blue"},
                           {"tracker": 5, "type": "vehicle", "vehicle_type": "suv", "color": "black"})]
         self.assertEqual(replay.check({"vehicle_type": "suv", "color": "black"}, events),

@@ -385,8 +385,8 @@ MOTION_GATE_THRESH = float(os.environ.get("AIPORT_MOTION_GATE_THRESH", "0.02"))
 _GATE_STRIDE = 8  # sample every Nth pixel -> 80x80 grayscale for the diff
 # The zone id reported when a track has none of its own (no zones set up, or it was never
 # seen inside one, e.g. a parked object). Otherwise each track reports the zones it's in:
-# live 2026-10-24 a web on Backyard's lens, whose feet fell in the yard zone (2), showed in
-# Protect as "Deck" (zone 1) because every detection was reported as zone 1.
+# live 2026-10-24 a web on Camera C's lens, whose feet fell in its lower zone (2), showed in
+# Protect under the upper zone's name (zone 1) because every detection was reported as zone 1.
 SMART_DETECT_ZONE_ID = "1"
 
 
@@ -396,8 +396,8 @@ def _track_zones(zone_ids):
 
 def _zones_visited(tr):
     """Every zone a track has been in, in order of first visit (its current zones if
-    none were collected). A leave closes the event, so it names them all: live 10:10 on the
-    backyard camera a walk from the yard (2) through zone 3 onto the Deck closed as Deck only."""
+    none were collected). A leave closes the event, so it names them all: live 10:10 on
+    Camera C a walk from zone 2 through zone 3 into zone 1 closed as zone 1 only."""
     return tr.get("zones_seen") or tr.get("zone_ids")
 
 
@@ -843,7 +843,7 @@ def _is_excluded(device_id, coord):
     return any(_point_in_polygon(cx, cy, poly) for poly in polygons)
 
 
-# Something on the lens: live 2026-10-23 18:58 to 04:15 a spider web on the backyard camera
+# Something on the lens: live 2026-10-23 18:58 to 04:15 a spider web on Camera C
 # gave 218 person events, every box against the right edge and the top and nearly the full
 # height ([768, 3, 231, 949] in 0-1000 image space). A person box touching the top and a
 # side and spanning LENS_MIN_HEIGHT of the frame is dropped on the cameras named in
@@ -1492,7 +1492,7 @@ def _enrich_detections(device_id, detections):
                 # embedding it's sent, and a poor one makes a bad reference.
                 # Only a read of FACE_EMBED_MIN_PX or more sends its embedding: unnamed, it goes
                 # to Protect's own face search, which put 43-48 px reads on the wrong person
-                # (live 14:39 Alice as Sean, 18:41 Sean as Alice). Smaller ones are still
+                # (live 14:39 and 18:41, one person as another and back). Smaller ones are still
                 # matched here and reported.
                 if f["embedding"] is not None and not small and not enrich.weak_embedding(f["embedding"]):
                     face["scored"] = {}

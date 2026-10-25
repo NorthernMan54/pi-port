@@ -2728,6 +2728,84 @@ class TestFrameJpegs(unittest.TestCase):
         av._capture_best("D", tr, out[0])
         self.assertEqual(tr["best"]["jpeg"], b"seven")
 
+    def test_parked_objects_alone_dont_wait_for_the_jpeg(self):
+        import numpy as _np
+        av._latest_frame["D"] = _np.zeros((640, 640, 3), _np.uint8)
+        av._latest_frame_seq["D"] = 7
+        det = mock.Mock()
+        det.detect.return_value = []
+        seeded = [{"objectType": "vehicle", "score": 0.9, "box": [10, 10, 100, 200], "seeded": 1}]
+        with mock.patch.object(av, "_get_detector", return_value=det), \
+                mock.patch.object(av, "REGIONS", True), \
+                mock.patch.object(av, "_detect_regions", return_value=seeded), \
+                mock.patch.object(av, "_frame_jpeg") as frame_jpeg:
+            out = av._classify_frame_detections("D")
+        self.assertEqual(out[0]["seeded"], 1)
+        frame_jpeg.assert_not_called()
+
+    def test_frames_between_jpegs_have_none(self):
+        self.addCleanup(av._frame_jpeg_every.clear)
+        av._frame_jpeg_every["D"] = 2
+        av._frame_jpegs["D"] = [(5, b"five"), (7, b"seven")]
+        self.assertEqual(av._frame_jpeg("D", 7, timeout=0), b"seven")
+        start = time.monotonic()
+        self.assertIsNone(av._frame_jpeg("D", 8, timeout=2))  # never encoded: no wait
+        self.assertLess(time.monotonic() - start, 0.5)
+
+    def test_a_frame_without_a_jpeg_keeps_the_best_one(self):
+        tr = {}
+        av._capture_best("D", tr, {"score": 0.6, "coord": [100, 200, 100, 300], "frame": (1, b"a")})
+        with mock.patch.object(av, "_read_snapshot", return_value=(0, b"snap")):
+            av._capture_best("D", tr, {"score": 0.9, "coord": [100, 200, 100, 300]})
+        self.assertEqual(tr["best"]["jpeg"], b"a")
+        with mock.patch.object(av, "_read_snapshot", return_value=(0, b"snap")):
+            av._capture_best("D", {}, {"score": 0.9, "coord": [100, 200, 100, 300]})
+
+
+class TestPullVideoArgs(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(av._hw_scale_failed.clear)
+
+    def _args(self, codec, device_id=None):
+        with mock.patch.object(av, "HW_SCALE", True), \
+                mock.patch.object(av.sys, "platform", "darwin"), \
+                mock.patch.object(av, "_detect_hwdec", return_value="videotoolbox"), \
+                mock.patch.object(av, "FRAME_JPEG_EVERY", 2):
+            return av._pull_video_args(codec, 1280, 720, device_id)
+
+    def test_hevc_is_scaled_on_the_gpu_it_was_decoded_on(self):
+        pre, graph, hw, every = self._args("hevc")
+        self.assertEqual(pre, ["-hwaccel", "videotoolbox",
+                               "-hwaccel_output_format", "videotoolbox_vld"])
+        self.assertEqual(hw, "vt")
+        self.assertIn("[detin]scale_vt=1280:720,hwdownload,format=nv12[det]", graph)
+        self.assertIn("[jpgin]select=not(mod(n\\,2)),hwdownload,format=nv12[jpg]", graph)
+        self.assertEqual(every, 2)
+
+    def test_software_decoded_h264_is_uploaded_for_scaling(self):
+        pre, graph, hw, _ = self._args("h264")
+        self.assertEqual(pre, ["-init_hw_device", "videotoolbox=vt", "-filter_hw_device", "vt"])
+        self.assertEqual(hw, "vt_upload")
+        self.assertIn("format=nv12,hwupload,scale_vt=1280:720,hwdownload", graph)
+        self.assertIn("[jpgin]select=not(mod(n\\,2))[jpg]", graph)
+
+    def test_a_camera_that_failed_on_the_gpu_scales_on_the_cpu(self):
+        av._hw_scale_failed.add("D")
+        pre, graph, hw, _ = self._args("hevc", "D")
+        self.assertEqual(pre, ["-hwaccel", "videotoolbox"])
+        self.assertIsNone(hw)
+        self.assertIn("[detin]scale=1280:720[det]", graph)
+
+    def test_off_elsewhere_and_every_frame_without_a_rate(self):
+        with mock.patch.object(av, "HW_SCALE", True), \
+                mock.patch.object(av.sys, "platform", "linux"), \
+                mock.patch.object(av, "_detect_hwdec", return_value=None):
+            pre, graph, hw, _ = av._pull_video_args("h264", 640, 640)
+        self.assertEqual((pre, hw), ([], None))
+        self.assertEqual(av._detect_filter_graph(640, 640),
+                         "[0:v]fps=%d,split=2[jpgin][detin];[jpgin]null[jpg];"
+                         "[detin]scale=640:640[det]" % av.DETECT_FPS)
+
 
 class TestTmpDir(unittest.TestCase):
     def setUp(self):

@@ -559,12 +559,17 @@ decoder from it.
 ## Stream pipeline
 
 `avclient.py` runs one ffmpeg process per paired camera that pulls the RTSP stream and uses
-`filter_complex fps,split=2` for both outputs from a single decode: a full-res JPEG of every
-detection frame (an `image2pipe` on a second pipe; best frames come from it, and every 1-2 s it
-becomes the snapshot file) and the same frames as 640x640 raw RGB on stdout for classification
-(no image-decode library needed). The JPEGs cost ~8% of a core per 2560x1440 camera at 5 fps
-on an M2; they're made at the detection rate (`AIPORT_DETECT_FPS`), so expect about twice
-that at macOS's default 10. Files live in a RAM/temp stream dir unique to each `--state-dir`
+`filter_complex fps,split=2` for both outputs from a single decode: a full-res JPEG of the
+detection frames (an `image2pipe` on a second pipe; best frames come from it, and every 1-2 s it
+becomes the snapshot file) and every detection frame as raw RGB on stdout for classification
+(no image-decode library needed). JPEGs are made for every Nth detection frame, about
+`AIPORT_FRAME_JPEG_FPS` a second (5 by default): at 10 a second they cost a 2560x1440 camera's
+ffmpeg about a quarter of a core on an M2, more than decoding and scaling together. A track's
+best frame is picked from the frames that have one. On macOS the detection frames are scaled
+on the GPU (VideoToolbox `scale_vt`; `AIPORT_HW_SCALE=0` scales on the CPU): an HEVC stream
+stays on the GPU from decode to scale, a software-decoded H.264 stream is uploaded for it.
+A camera whose pull dies before its first frame with GPU scaling falls back to the CPU.
+Files live in a RAM/temp stream dir unique to each `--state-dir`
 (`<tmp>/aiport-streams/<hash>/`), so several AI Ports can share a host; its `tmp/` folder
 holds the in-flight files (snapshot rewrites, crop inputs) and is emptied at startup, so a
 crash leaves nothing behind. A background loop classifies the latest frame every 1.5s (`MOTION_POLL_INTERVAL_S`): a

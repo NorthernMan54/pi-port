@@ -73,16 +73,26 @@ def probe_size(path):
         return None
 
 
+def probe_codec(path):
+    """The clip's video codec ('h264', 'hevc'), or None."""
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=codec_name", "-of", "csv=p=0", path], capture_output=True, text=True)
+    return out.stdout.strip().lower() or None
+
+
 def clip_frames(av, path, width=None, height=None):
-    """Detector frames of the clip, exactly as a live camera produces them (width/height:
-    the stream's size, which sets the detector frame's shape when regions are on)."""
+    """Detector frames of the clip, exactly as a live camera produces them: the same decoder,
+    GPU scaling and filter graph (width/height: the stream's size, which sets the detector
+    frame's shape when regions are on)."""
     if not (width and height):
         width, height = probe_size(path) or (None, None)
     det_w, det_h = av._detect_dims(width, height)
-    cmd = [av.FFMPEG_BIN, "-loglevel", "error", "-i", path,
-           "-filter_complex", av._detect_filter_graph(det_w, det_h),
-           "-map", "[jpg]", "-f", "null", os.devnull,
-           "-map", "[det]", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
+    pre_args, graph, _, _ = av._pull_video_args(probe_codec(path), det_w, det_h)
+    cmd = [av.FFMPEG_BIN, "-loglevel", "error", *pre_args, "-i", path,
+           "-filter_complex", graph,
+           "-map", "[jpg]", "-fps_mode", "passthrough", "-f", "null", os.devnull,
+           "-map", "[det]", "-fps_mode", "passthrough", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
     import numpy as np
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
     frame_bytes = det_w * det_h * 3

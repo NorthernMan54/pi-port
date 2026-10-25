@@ -425,6 +425,12 @@ _frame_lock = threading.Lock()
 _frame_cond = threading.Condition(_frame_lock)  # notified when a frame or its JPEG arrives
 FRAME_JPEG_KEEP_S = 2.0
 FRAME_JPEG_WAIT_S = 0.5  # how long a detection waits for its frame's JPEG
+# Full-res JPEGs a second of the detection frames (AIPORT_FRAME_JPEG_FPS, 5 by default): one
+# for every Nth detection frame, so a track's best frame is picked from those. Encoding one
+# for every frame at 10 fps cost each camera's ffmpeg about a quarter of a core.
+FRAME_JPEG_FPS = float(os.environ.get("AIPORT_FRAME_JPEG_FPS") or 5)
+FRAME_JPEG_EVERY = max(1, round(DETECT_FPS / FRAME_JPEG_FPS)) if FRAME_JPEG_FPS > 0 else 1
+_frame_jpeg_every = {}  # deviceID -> N of the running pull (a JPEG for detection frame 1, N+1, ...)
 _stream_dims = {}    # deviceID -> (width, height) of the real camera stream
 # deviceID -> capacity points of each stream UiStreamControl started. Kept apart from
 # _active_streams, which briefly drops a device while its ffmpeg restarts.
@@ -530,6 +536,7 @@ def _stop_stream(device_id):
         _latest_frame.pop(device_id, None)
         _latest_frame_seq.pop(device_id, None)
         _frame_jpegs.pop(device_id, None)
+        _frame_jpeg_every.pop(device_id, None)
         _latest_frame_time.pop(device_id, None)
         _analysed_frame_time.pop(device_id, None)
     _motion_detectors.pop(device_id, None)  # a new stream starts a new background
@@ -626,6 +633,8 @@ def _frame_jpeg(device_id, seq, timeout=FRAME_JPEG_WAIT_S):
     waiting briefly for the encoder to catch up; None once it is gone or never comes."""
     deadline = time.monotonic() + timeout
     with _frame_cond:
+        if (seq - 1) % _frame_jpeg_every.get(device_id, 1):
+            return None  # no JPEG is made of this frame
         while True:
             jpegs = _frame_jpegs.get(device_id) or ()
             for s, data in jpegs:
@@ -657,11 +666,49 @@ def _detect_dims(width=None, height=None):
     return (max(2, int(round(width * scale / 2)) * 2), max(2, int(round(height * scale / 2)) * 2))
 
 
-def _detect_filter_graph(width=DETECT_IMG_SIZE, height=None):
-    """ffmpeg filter graph for the detection pipeline: [jpg] full-res frames, [det] the same
-    frames scaled for the detector. replay.py runs clips through this same graph."""
+# Scaling detector frames on the GPU (AIPORT_HW_SCALE, on by default on macOS): VideoToolbox's
+# scale_vt instead of ffmpeg's CPU scaler. A VideoToolbox-decoded stream stays on the GPU until
+# it is scaled; a software-decoded one is uploaded for it. Measured on a 2560x1440 camera at
+# 10 fps: the detector branch went from ~12% of a core to ~2% (HEVC) and ~6% (H.264).
+HW_SCALE = os.environ.get("AIPORT_HW_SCALE", "1" if sys.platform == "darwin" else "0"
+                          ).strip().lower() not in ("0", "false", "no", "off")
+_hw_scale_failed = set()  # deviceIDs whose pull died with GPU scaling before any frame
+
+
+def _hw_scale_mode(hwdec_args, device_id=None):
+    """'vt' (decoded on the GPU), 'vt_upload' (decoded in software) or None (CPU scaling)."""
+    if not HW_SCALE or sys.platform != "darwin" or device_id in _hw_scale_failed:
+        return None
+    return "vt" if "videotoolbox" in hwdec_args else "vt_upload"
+
+
+def _pull_video_args(codec, det_w, det_h, device_id=None):
+    """(ffmpeg args before -i, filter graph, GPU scaling mode, JPEG every Nth frame) for a
+    stream of this codec. replay.py builds its pull from this too."""
+    hwdec = _hwdec_args(codec)
+    hw = _hw_scale_mode(hwdec, device_id)
+    pre = list(hwdec)
+    if hw == "vt":
+        pre += ["-hwaccel_output_format", "videotoolbox_vld"]
+    elif hw == "vt_upload":
+        pre += ["-init_hw_device", "videotoolbox=vt", "-filter_hw_device", "vt"]
+    return pre, _detect_filter_graph(det_w, det_h, hw, FRAME_JPEG_EVERY), hw, FRAME_JPEG_EVERY
+
+
+def _detect_filter_graph(width=DETECT_IMG_SIZE, height=None, hw=None, jpeg_every=1):
+    """ffmpeg filter graph for the detection pipeline: [jpg] full-res frames (every
+    `jpeg_every`th one), [det] all of them scaled for the detector, on the GPU for hw
+    'vt'/'vt_upload'. replay.py runs clips through this same graph."""
     height = height or width
-    return f"[0:v]fps={DETECT_FPS},split=2[jpg][detin];[detin]scale={width}:{height}[det]"
+    jpg = f"select=not(mod(n\\,{jpeg_every}))" if jpeg_every > 1 else "null"
+    if hw == "vt":
+        jpg += ",hwdownload,format=nv12"
+        det = f"scale_vt={width}:{height},hwdownload,format=nv12"
+    elif hw == "vt_upload":
+        det = f"format=nv12,hwupload,scale_vt={width}:{height},hwdownload,format=nv12"
+    else:
+        det = f"scale={width}:{height}"
+    return f"[0:v]fps={DETECT_FPS},split=2[jpgin][detin];[jpgin]{jpg}[jpg];[detin]{det}[det]"
 
 
 # One ffmpeg pulls RTSP and splits post-decode into a full-res JPEG and an RGB
@@ -682,9 +729,9 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
         # What the stream really is beats what the controller announced.
         _stream_dims[device_id] = (probe["width"], probe["height"])
     codec = probe["codec"]
-    hwdec_args = _hwdec_args(codec)
-    encode_args = ["-c:v", "mjpeg_rkmpp"] if FFMPEG_BIN != "ffmpeg" else ["-c:v", "mjpeg"]
     det_w, det_h = _detect_dims(width, height)
+    pre_args, graph, hw, jpeg_every = _pull_video_args(codec, det_w, det_h, device_id)
+    encode_args = ["-c:v", "mjpeg_rkmpp"] if FFMPEG_BIN != "ffmpeg" else ["-c:v", "mjpeg"]
     # Plate/face reads use the snapshot file, so refresh it every second when they're on.
     snap_interval = 1.0 if enrich.smart_detect_features() else 2.0
     jpeg_r, jpeg_w = os.pipe()
@@ -693,12 +740,19 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
         # Low-latency decode (no B-frame reorder delay). Not "-fflags nobuffer": with this
         # split/fps pipeline it left the rawvideo detection output empty (ffmpeg 8).
         "-flags", "low_delay",
-        *hwdec_args, "-i", url,
-        "-filter_complex", _detect_filter_graph(det_w, det_h),
-        "-map", "[jpg]", *encode_args, "-f", "image2pipe", f"pipe:{jpeg_w}",
-        "-map", "[det]", "-pix_fmt", "rgb24", "-f", "rawvideo", "-",
+        *pre_args, "-i", url,
+        "-filter_complex", graph,
+        # passthrough on both: each output gets exactly the graph's frames. Otherwise each
+        # pads or drops frames to its own constant rate (image2pipe repeated the ones `select`
+        # drops), and live the two numberings drifted apart: JPEG n came 0.7 s before
+        # detection frame n, or with `select` 2.6 s after it (each detection then waited out
+        # FRAME_JPEG_WAIT_S, and Porch fell to 3 analysed frames a second).
+        "-map", "[jpg]", *encode_args, "-fps_mode", "passthrough", "-f", "image2pipe",
+        f"pipe:{jpeg_w}",
+        "-map", "[det]", "-fps_mode", "passthrough", "-pix_fmt", "rgb24", "-f", "rawvideo", "-",
     ]
-    log.info("starting merged RTSP pull for deviceID=%s: %s (codec=%s)", device_id, url, codec)
+    log.info("starting merged RTSP pull for deviceID=%s: %s (codec=%s, GPU scaling %s, "
+             "JPEG every %d frames)", device_id, url, codec, hw or "off", jpeg_every)
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 pass_fds=(jpeg_w,))
@@ -710,16 +764,17 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
     # Origin for this device's clockMonotonic/clockStream (ms since the pull began).
     _stream_started_monotonic_ms[device_id] = int(time.monotonic() * 1000)
     frame_bytes = det_w * det_h * 3
-    jpegs = collections.deque(maxlen=max(2, int(DETECT_FPS * FRAME_JPEG_KEEP_S)))
+    jpegs = collections.deque(maxlen=max(2, int(DETECT_FPS * FRAME_JPEG_KEEP_S / jpeg_every)))
     with _frame_lock:
         _frame_jpegs[device_id] = jpegs
+        _frame_jpeg_every[device_id] = jpeg_every
         _latest_frame_seq.pop(device_id, None)
 
     def _jpeg_reader():
         seq, last_write = 0, None
         try:
             for data in _jpeg_frames(jpeg_pipe):
-                seq += 1
+                seq += 1 if seq == 0 else jpeg_every  # numbered as the detection frame it is
                 with _frame_cond:
                     jpegs.append((seq, data))
                     _frame_cond.notify_all()
@@ -757,6 +812,10 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
         stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
         log.info("merged RTSP pull for deviceID=%s exited rc=%s stderr_tail=%s",
                   device_id, rc, stderr[-500:])
+        if hw and seq == 0 and _active_streams.get(device_id) is proc:
+            log.warning("deviceID=%s: no frames with GPU scaling, scaling on the CPU from now on",
+                        device_id)
+            _hw_scale_failed.add(device_id)
         # Only restart on an unexpected death: _stop_stream() pops the device first,
         # so finding `proc` here means it died on its own. No retry cap.
         if _active_streams.get(device_id) is proc:
@@ -1031,8 +1090,11 @@ def _classify_frame_detections(device_id):
                 d["extra"] = {"attributes": attrs}
         out.append(d)
     # The full-res JPEG of this same frame: a track's best frame (and its thumbnail) comes
-    # from it. Without one, _capture_best falls back to the latest snapshot.
-    jpeg = _frame_jpeg(device_id, seq) if out and seq is not None else None
+    # from it. Without one, _capture_best falls back to the latest snapshot. Parked objects
+    # passed on as their last box never take a best frame, so they don't wait for it: live,
+    # a camera with a parked trailer waited on every frame and its passes doubled.
+    wanted = any(not d.get("seeded") for d in out)
+    jpeg = _frame_jpeg(device_id, seq) if wanted and seq is not None else None
     if jpeg is not None:
         for d in out:
             d["frame"] = (seq, jpeg)
@@ -1406,6 +1468,8 @@ def _capture_best(device_id, tr, d):
     best = tr.get("best")
     if d.get("seeded") or d.get("small") or (best and not _better_thumbnail(best, d)):
         return
+    if best and not d.get("frame"):
+        return  # no JPEG of this frame: the latest snapshot is another moment
     mtime, data = d.get("frame") or _read_snapshot(device_id)
     if data is None:
         return

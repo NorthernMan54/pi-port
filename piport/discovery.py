@@ -194,7 +194,7 @@ def main():
             log.warning("recv error: %s", e)
             continue
 
-        log.info("Discovery probe from %s: %s", addr, data.hex())
+        log.debug("Discovery probe from %s: %s", addr, data.hex())
 
         if len(data) < 4:
             log.warning("probe too short, ignoring")
@@ -218,7 +218,7 @@ def main():
                                args.device_id)
         try:
             sock.sendto(resp, addr)
-            log.info("Sent v%d/cmd%d discovery response to %s (%d bytes)",
+            log.debug("Sent v%d/cmd%d discovery response to %s (%d bytes)",
                       resp_version, resp_command, addr, len(resp))
         except OSError as e:
             log.warning("send error to %s: %s", addr, e)

@@ -2763,6 +2763,30 @@ class TestFrameJpegs(unittest.TestCase):
             av._capture_best("D", {}, {"score": 0.9, "coord": [100, 200, 100, 300]})
 
 
+class TestRedoReuse(unittest.TestCase):
+    def setUp(self):
+        self.addCleanup(av._redo_cache.clear)
+        cut = {"label": "car", "score": 0.9, "box": (100, 0, 200, 80)}
+        whole = {"label": "car", "score": 0.9, "box": (100, 0, 200, 150)}
+        person = {"label": "person", "score": 0.8, "box": (220, 40, 260, 140)}
+        self.cut, self.whole, self.person = cut, whole, person
+
+    def test_only_the_whole_object_is_kept(self):
+        self.assertIs(av._whole_of(self.cut, [self.person, self.whole]), self.whole)
+        self.assertIsNone(av._whole_of(self.cut, [self.person]))
+
+    def test_a_still_cut_off_box_reuses_its_second_look(self):
+        av._redo_cache["D"] = [(100.0, "car", self.cut["box"], [self.whole])]
+        self.assertEqual(av._reused_redo("D", self.cut, 105.0, []), [self.whole])
+
+    def test_motion_on_it_or_time_up_looks_again(self):
+        av._redo_cache["D"] = [(100.0, "car", self.cut["box"], [self.whole])]
+        self.assertIsNone(av._reused_redo("D", self.cut, 105.0, [(150, 20, 170, 60)]))
+        self.assertIsNone(av._reused_redo("D", self.cut, 100.0 + av.REDO_REUSE_S, []))
+        moved = dict(self.cut, box=(140, 0, 240, 80))
+        self.assertIsNone(av._reused_redo("D", moved, 105.0, []))
+
+
 class TestPullVideoArgs(unittest.TestCase):
     def setUp(self):
         self.addCleanup(av._hw_scale_failed.clear)

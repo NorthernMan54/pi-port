@@ -281,6 +281,7 @@ def _run(av, frames, settings, start_ms, settle_s, now):
     av._motion_settings.pop(DEVICE, None)
     av._startup_scan.pop(DEVICE, None)
     av._last_parked_check.pop(DEVICE, None)
+    av._redo_cache.pop(DEVICE, None)
     av._apply_motion_settings(dict(motion, deviceID=DEVICE))
     av._stream_started_monotonic_ms[DEVICE] = 0
 

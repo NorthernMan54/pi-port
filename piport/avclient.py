@@ -542,6 +542,7 @@ def _stop_stream(device_id):
     _motion_detectors.pop(device_id, None)  # a new stream starts a new background
     _startup_scan.pop(device_id, None)
     _last_parked_check.pop(device_id, None)
+    _redo_cache.pop(device_id, None)
     # The startup window starts again on the new stream's first frame: live 11:47 on
     # Camera B the RTSP pull dropped 3 s in and the window ran out before frames came back,
     # so the parked car opened an event instead of parking.
@@ -964,6 +965,51 @@ CLIPPED_REDETECT_MAX = 3   # extra looks a frame may take at boxes cut off by th
 _startup_scan = {}
 STARTUP_SCAN_INTERVAL_S = 1.0
 _last_parked_check = {}    # deviceID -> monotonic s when parked objects were last re-detected
+# A cut-off box that hasn't moved gets the same answer from its second look, frame after frame:
+# on an empty road at Camera B a box on something fixed at the top and two parked cars took
+# 2.8 extra looks a frame. The whole object it found is reused for REDO_REUSE_S, unless motion
+# touches the box. Reusing everything in the crop replayed a person beside a parked car in
+# their old spot, as a second track.
+REDO_REUSE_S = PARKED_RECHECK_S
+REDO_REUSE_IOU = 0.8
+_redo_cache = {}   # deviceID -> [(monotonic s, label, cut-off box, detections of its second look)]
+
+
+def _box_iou(a, b):
+    """IoU of two (x1, y1, x2, y2) boxes."""
+    import regions
+    inter = regions.intersection(a, b)
+    if inter is None:
+        return 0.0
+    i = regions.area(inter)
+    return i / float(regions.area(a) + regions.area(b) - i)
+
+
+def _whole_of(d, got):
+    """The detection in a second look that is the cut-off box's whole object: same label, the
+    cut-off box mostly inside it. Only it is reused; anything else in that crop may move."""
+    import regions
+    best = None
+    for g in got:
+        inter = regions.intersection(d["box"], g["box"])
+        if g["label"] != d["label"] or inter is None:
+            continue
+        cover = regions.area(inter) / float(regions.area(d["box"]))
+        if cover >= REDO_REUSE_IOU and (best is None or g["score"] > best["score"]):
+            best = g
+    return best
+
+
+def _reused_redo(device_id, d, now, motion):
+    """Detections of an earlier second look at this same cut-off box, or None."""
+    import regions
+    if regions.intersects_any(d["box"], motion):
+        return None
+    for t, label, box, got in _redo_cache.get(device_id, ()):
+        if (now - t < REDO_REUSE_S and label == d["label"]
+                and _box_iou(box, d["box"]) >= REDO_REUSE_IOU):
+            return got
+    return None
 
 
 def _detect_regions(device_id, detector, frame):
@@ -1018,9 +1064,15 @@ def _detect_regions(device_id, detector, frame):
     # through a large object at the top, and its cut-off box took over the car's track.
     # A box still cut off after that gets another look (up to CLIPPED_REDETECT_MAX a frame).
     redone = []
+    cache = [e for e in _redo_cache.get(device_id, ()) if now - e[0] < REDO_REUSE_S]
+    _redo_cache[device_id] = cache
     queue = sorted([d for d in dets if regions.clipped(d, shape)], key=lambda d: -d["score"])
     while queue and len(redone) < CLIPPED_REDETECT_MAX:
         d = queue.pop(0)
+        got = _reused_redo(device_id, d, now, motion)
+        if got is not None:
+            dets += got
+            continue
         bx1, by1, bx2, by2 = d["box"]
         region = regions.calculate_region(shape, bx1, by1, bx2, by2, regions.MIN_REGION,
                                           multiplier=2)
@@ -1028,6 +1080,9 @@ def _detect_regions(device_id, detector, frame):
             continue
         redone.append(region)
         got = run(region)
+        whole = _whole_of(d, got)
+        if whole is not None:
+            cache.append((now, d["label"], d["box"], [dict(whole, reused=True)]))
         dets += got
         queue = sorted(queue + [g for g in got if regions.clipped(g, shape)],
                        key=lambda d: -d["score"])
@@ -1080,6 +1135,8 @@ def _classify_frame_detections(device_id):
         d = {"objectType": r["objectType"], "score": r["score"], "coord": coord}
         if r.get("clipped"):
             d["clipped"] = True
+        if r.get("reused"):
+            d["reused"] = True  # an earlier look's box: it mustn't become the best frame
         if r["objectType"] == "vehicle" and enrich.vehicle_attrs_enabled():
             try:
                 attrs = enrich.vehicle_attributes(r.get("label"), frame, coord)
@@ -1466,7 +1523,8 @@ def _capture_best(device_id, tr, d):
     time. On leave the thumbnails come from it, not from the frame several seconds after
     the object was last seen (which, for a face, no longer contains it)."""
     best = tr.get("best")
-    if d.get("seeded") or d.get("small") or (best and not _better_thumbnail(best, d)):
+    if (d.get("seeded") or d.get("reused") or d.get("small")
+            or (best and not _better_thumbnail(best, d))):
         return
     if best and not d.get("frame") and device_id in _frame_jpegs:
         # The pull skipped this frame's JPEG (FRAME_JPEG_EVERY): the latest snapshot is

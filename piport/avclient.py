@@ -1468,8 +1468,10 @@ def _capture_best(device_id, tr, d):
     best = tr.get("best")
     if d.get("seeded") or d.get("small") or (best and not _better_thumbnail(best, d)):
         return
-    if best and not d.get("frame"):
-        return  # no JPEG of this frame: the latest snapshot is another moment
+    if best and not d.get("frame") and device_id in _frame_jpegs:
+        # The pull skipped this frame's JPEG (FRAME_JPEG_EVERY): the latest snapshot is
+        # another moment. replay.py has no frame JPEGs, so there the snapshot still counts.
+        return
     mtime, data = d.get("frame") or _read_snapshot(device_id)
     if data is None:
         return

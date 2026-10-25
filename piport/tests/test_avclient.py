@@ -2753,6 +2753,7 @@ class TestFrameJpegs(unittest.TestCase):
         self.assertLess(time.monotonic() - start, 0.5)
 
     def test_a_frame_without_a_jpeg_keeps_the_best_one(self):
+        av._frame_jpegs["D"] = []
         tr = {}
         av._capture_best("D", tr, {"score": 0.6, "coord": [100, 200, 100, 300], "frame": (1, b"a")})
         with mock.patch.object(av, "_read_snapshot", return_value=(0, b"snap")):

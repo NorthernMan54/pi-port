@@ -1258,7 +1258,9 @@ def handle_function(ws, msg, device_info):
             except Exception:
                 log.exception("failed to start ONVIF camera deviceID=%s", device_id)
         elif device_id:
-            _onvif.clear_device(device_id)
+            # Stop, don't forget: Protect often re-issues only streaming:true
+            # (not ChangeVideoSettings), and the destinations are still valid.
+            _onvif.stop_device(device_id)
             _stop_stream(device_id)
             _stop_motion_detector(device_id, ws=ws)
         send_msg(ws, "OnvifStreamControl", {"status": reply_status, "usedPoints": _used_points()},

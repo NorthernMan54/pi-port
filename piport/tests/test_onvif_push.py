@@ -185,6 +185,19 @@ class TestPushManager(unittest.TestCase):
         self.started[1].stop.assert_called_once()
         self.started[0].stop.assert_not_called()
 
+    def test_stop_device_keeps_destinations(self):
+        # Protect's streaming:false is a stop, not an unassign: a later start must
+        # resume the same streamName without a fresh ChangeVideoSettings.
+        self.m.set_source("CAM", "rtsp://cam/101")
+        self.m.configure("CAM", _settings("video1", "S1"))
+        self.m.stop_device("CAM")
+        self.started[0].stop.assert_called_once()
+        self.assertFalse(self.m.has_source("CAM"))
+        self.m.set_source("CAM", "rtsp://cam/101")
+        self.assertEqual([p.args[1:4] for p in self.started],
+                         [("video1", "rtsp://cam/101", "S1"),
+                          ("video1", "rtsp://cam/101", "S1")])
+
     def test_clear_device_stops_all(self):
         self.m.set_source("CAM", "rtsp://cam/101")
         self.m.configure("CAM", {**_settings("video1", "S1"), **_settings("video3", "S3")})

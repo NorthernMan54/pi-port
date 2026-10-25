@@ -328,7 +328,20 @@ class PushManager:
             src = self._sources.get(device_id)
             return dict(src) if src else None
 
+    def stop_device(self, device_id):
+        """Streaming stopped: stop the pushes but remember the destinations.
+
+        OnvifStreamControl streaming:false is a stop, not an unassign. A real AI
+        Port keeps its channel config, so a later streaming:true (e.g. after a
+        console restart, which does not necessarily re-send ChangeVideoSettings)
+        resumes the same streamNames instead of leaving the camera with no video.
+        """
+        with self._lock:
+            self._sources.pop(device_id, None)
+            self._sync(device_id)
+
     def clear_device(self, device_id):
+        """Forget the device entirely: stop pushes and drop its destinations."""
         with self._lock:
             self._sources.pop(device_id, None)
             self._wanted.pop(device_id, None)
@@ -358,6 +371,8 @@ class PushManager:
             for push in self._pushes.values():
                 push.stop()
             self._pushes.clear()
+            self._sources.clear()
+            self._wanted.clear()
 
     def _sync(self, device_id):
         src = self._sources.get(device_id)

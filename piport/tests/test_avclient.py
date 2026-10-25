@@ -1643,6 +1643,7 @@ class TestFrameStats(Base):
         super().setUp()
         av._frame_stats.pop("FS", None)
         av._inferred.pop("FS", None)
+        av._detector_calls.pop("FS", None)
         self.addCleanup(av._frame_stats.pop, "FS", None)
 
     def run_minute(self, every_seq, passes):
@@ -1652,6 +1653,7 @@ class TestFrameStats(Base):
         for i in range(passes):
             seq += every_seq
             av._inferred["FS"] += 1
+            av._detector_calls["FS"] += 3
             av._note_frame("FS", seq, 0.02, now=t + 60.0 * (i + 1) / passes)
 
     def test_keeping_up_is_info(self):
@@ -1659,7 +1661,7 @@ class TestFrameStats(Base):
             self.run_minute(1, 600)                 # every frame, 10 a second
         line = [m for m in logs.output if "frames for deviceID=FS" in m][0]
         self.assertTrue(line.startswith("INFO"))
-        self.assertIn("600 delivered (10.0/s), 600 analysed (10.0/s), 0 skipped, 600 with inference", line)
+        self.assertIn("600 delivered (10.0/s), 600 analysed (10.0/s), 0 skipped, 600 with inference (3.0 detector calls each)", line)
 
     def test_falling_behind_warns(self):
         with self.assertLogs(av.log, level="INFO") as logs:

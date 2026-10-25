@@ -1051,6 +1051,7 @@ def _detect_regions(device_id, detector, frame):
     def run(region):
         x1, y1, x2, y2 = (int(v) for v in region)
         got = []
+        _detector_calls[device_id] += 1
         for r in detector.detect(frame[y1:y2, x1:x2]):
             bx1, by1, bx2, by2 = r["box"]
             got.append(dict(r, label=r.get("label") or r["objectType"], region=region,
@@ -1109,8 +1110,11 @@ def _classify_frame_detections(device_id):
         return []
     try:
         detector = _get_detector()
-        results = (_detect_regions(device_id, detector, frame) if REGIONS
-                   else detector.detect(frame))
+        if REGIONS:
+            results = _detect_regions(device_id, detector, frame)
+        else:
+            _detector_calls[device_id] += 1
+            results = detector.detect(frame)
     except Exception:
         log.exception("classification failed for deviceID=%s", device_id)
         return []
@@ -3159,13 +3163,15 @@ def _stop_motion_detector(device_id, preserve_tracks=False, ws=None):
 
 # Per-camera frame accounting, logged once a minute: frames ffmpeg delivered (from its frame
 # numbers), frames analysed, frames skipped (replaced by a newer one before a pass picked them
-# up), inference runs (the rest were gated off as static) and the average pass time. A camera
+# up), inference runs (the rest were gated off as static) with the detector calls each made
+# (one per region crop and second look), and the average pass time. A camera
 # analysing under FRAME_RATE_WARN of DETECT_FPS is falling behind. The line ends with the
 # camera's box delay (AIPORT_BOX_DELAY_MS), which back-dates its boxes.
 FRAME_STATS_S = 60.0
 FRAME_RATE_WARN = 0.9
 _frame_stats = {}     # deviceID -> {"t0", "first_seq", "last_seq", "analysed", "busy_s"}
 _inferred = collections.Counter()   # deviceID -> passes that ran the detector
+_detector_calls = collections.Counter()   # deviceID -> detector runs (crops) over those passes
 
 
 def _note_frame(device_id, seq, busy_s, now=None):
@@ -3177,7 +3183,8 @@ def _note_frame(device_id, seq, busy_s, now=None):
     if st is None or seq < st["last_seq"]:
         # first frame, or a new stream (its frame numbers start again)
         _frame_stats[device_id] = {"t0": now, "first_seq": seq, "last_seq": seq, "analysed": 0,
-                                   "busy_s": 0.0, "inferred0": _inferred[device_id]}
+                                   "busy_s": 0.0, "inferred0": _inferred[device_id],
+                                   "calls0": _detector_calls[device_id]}
         return
     st["analysed"] += 1
     st["busy_s"] += busy_s
@@ -3188,16 +3195,19 @@ def _note_frame(device_id, seq, busy_s, now=None):
     delivered = seq - st["first_seq"]
     analysed = st["analysed"]
     inferred = _inferred[device_id] - st["inferred0"]
+    calls = _detector_calls[device_id] - st["calls0"]
     fps_in, fps_done = delivered / elapsed, analysed / elapsed
     behind = fps_done < FRAME_RATE_WARN * DETECT_FPS
     (log.warning if behind else log.info)(
         "frames for deviceID=%s over %.0f s: %d delivered (%.1f/s), %d analysed (%.1f/s), %d "
-        "skipped, %d with inference, %.0f ms a pass, box delay %d ms%s", device_id, elapsed,
-        delivered, fps_in, analysed, fps_done, max(0, delivered - analysed), inferred,
+        "skipped, %d with inference (%.1f detector calls each), %.0f ms a pass, box delay %d ms%s",
+        device_id, elapsed, delivered, fps_in, analysed, fps_done, max(0, delivered - analysed),
+        inferred, calls / max(inferred, 1),
         1000 * st["busy_s"] / max(analysed, 1), _box_delay_ms(device_id),
         " -- falling behind the %d fps detection rate" % DETECT_FPS if behind else "")
     _frame_stats[device_id] = {"t0": now, "first_seq": seq, "last_seq": seq, "analysed": 0,
-                               "busy_s": 0.0, "inferred0": _inferred[device_id]}
+                               "busy_s": 0.0, "inferred0": _inferred[device_id],
+                               "calls0": _detector_calls[device_id]}
 
 
 def _start_motion_detector(ws, device_id, ip, port, uri, preserve_tracks=False):

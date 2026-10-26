@@ -166,6 +166,7 @@ SMART_DETECT_ZONE_ID = "1"
 # latest frame only.
 _latest_frame = {}   # deviceID -> HxWx3 uint8 numpy array (DETECT_IMG_SIZE square, RGB)
 _frame_lock = threading.Lock()
+_resize_noted = set()  # (deviceID, frame side, detector side) logged once
 _stream_dims = {}    # deviceID -> (width, height) of the real camera stream
 _stream_probe = {}   # deviceID -> {"codec", "width", "height", "fps"} from ffprobe at pull start
 # deviceID -> exclusion polygons in the normalized 0-1000 space.
@@ -374,6 +375,15 @@ def _is_outside_detect_zones(device_id, coord):
     return not any(_point_in_polygon(cx, cy, poly) for poly in polygons)
 
 
+def _resize_nearest(frame, size):
+    """Nearest-neighbour resize to `size`x`size`; cheap enough for one tick."""
+    import numpy as np
+    h, w = frame.shape[:2]
+    ys = (np.arange(size) * h // size).clip(0, h - 1)
+    xs = (np.arange(size) * w // size).clip(0, w - 1)
+    return frame[ys][:, xs]
+
+
 def _classify_frame_detections(device_id):
     """Return all qualifying detections for the latest frame as
     {objectType, score, coord} in normalized 0-1000 space, sorted by score;
@@ -384,12 +394,17 @@ def _classify_frame_detections(device_id):
         return []
     try:
         detector = _get_detector()
-        if frame.shape[1] != detector.input_size:
-            # Stream predates a late detector load at a different size; the
-            # next stream restart picks up the right one.
-            log.debug("deviceID=%s frame %dpx != detector input %dpx; skipping tick",
-                      device_id, frame.shape[1], detector.input_size)
-            return []
+        if frame.shape[:2] != (detector.input_size, detector.input_size):
+            # A pull started before a late detector load is still at the old
+            # size. Resize for this tick: waiting for a stream restart meant a
+            # late load disabled detection for good, silently.
+            note = (device_id, frame.shape[1], detector.input_size)
+            if note not in _resize_noted:
+                _resize_noted.add(note)
+                log.info("deviceID=%s frames are %dx%d but the detector takes %d; "
+                         "resizing for inference", device_id, frame.shape[1], frame.shape[0],
+                         detector.input_size)
+            frame = _resize_nearest(frame, detector.input_size)
         results = detector.detect(frame)
     except Exception:
         log.exception("classification failed for deviceID=%s", device_id)
@@ -589,7 +604,12 @@ def _motion_tick(ws, device_id):
         log.debug("motion gate: static scene, skipping inference for deviceID=%s", device_id)
         detections = []
     else:
+        started = time.monotonic()
         detections = _dedupe_detections(_classify_frame_detections(device_id))
+        # AIPORT_DEBUG: proves frames reach the detector and what it returned.
+        log.debug("motion tick: deviceID=%s inference=%.0f ms detections=%d (%s)",
+                  device_id, (time.monotonic() - started) * 1000, len(detections),
+                  ", ".join(f"{d['objectType']} {d['score']:.2f}" for d in detections) or "none")
     with _motion_lock:
         dev = _motion_state.setdefault(device_id, {"tracks": {}, "next_tracker_id": 1})
         tracks = dev["tracks"]

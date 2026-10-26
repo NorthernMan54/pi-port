@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -83,6 +84,49 @@ class TestGeometry(unittest.TestCase):
         self.assertFalse(av._segment_crosses_line((100, 600), (900, 600), p1, p2))
         # movement crosses y=500 but outside the segment's x-span
         self.assertFalse(av._segment_crosses_line((900, 100), (900, 900), (0, 500), (100, 500)))
+
+
+class TestLateDetector(Base):
+    """A detector that loads after the pull started is a different input size."""
+
+    class _Det:
+        input_size = 320
+
+        def __init__(self):
+            self.seen = None
+
+        def detect(self, frame):
+            self.seen = frame.shape
+            return [{"objectType": "person", "score": 0.9, "box": (160, 160, 240, 320)}]
+
+    def tearDown(self):
+        av._latest_frame.pop("CAM", None)
+        av._resize_noted.clear()
+
+    def test_resize_nearest(self):
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("numpy not installed")
+        frame = np.arange(4 * 6 * 3, dtype=np.uint8).reshape(4, 6, 3)
+        self.assertEqual(av._resize_nearest(frame, 2).shape, (2, 2, 3))
+        self.assertEqual(av._resize_nearest(frame, 2)[0, 0].tolist(), frame[0, 0].tolist())
+
+    def test_late_detector_resizes_instead_of_skipping(self):
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("numpy not installed")
+        det = self._Det()
+        av._latest_frame["CAM"] = np.zeros((640, 640, 3), dtype=np.uint8)
+        av._resize_noted.clear()
+        with mock.patch.object(av, "_get_detector", return_value=det), \
+             mock.patch.object(av, "DETECTOR_BACKEND", "edgetpu"):
+            out = av._classify_frame_detections("CAM")
+        self.assertEqual(det.seen, (320, 320, 3))  # resized to the model input
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["coord"], [500, 500, 250, 500])  # 320px boxes -> 0-1000
+        self.assertIn(("CAM", 640, 320), av._resize_noted)
 
 
 class TestParsers(Base):

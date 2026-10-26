@@ -207,9 +207,16 @@ def _load_page():
 
 
 PAGE_HTML = _load_page()
+# Root-level instance management is localhost-only by default. Status polling can
+# still be exposed on the LAN; opt in explicitly if remote management is wanted.
+ALLOW_REMOTE_INSTANCE_CONTROL = os.environ.get(
+    "AIPORT_WEBUI_ALLOW_REMOTE", "").strip().lower() in ("1", "true", "yes", "on")
+MAX_BODY_BYTES = 64 * 1024
 
 
 class Handler(BaseHTTPRequestHandler):
+    timeout = 10
+
     def log_message(self, fmt, *args):
         pass  # keep this quiet -- polled every second, not worth logging
 
@@ -235,8 +242,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
+        if (not ALLOW_REMOTE_INSTANCE_CONTROL
+                and self.client_address[0] not in ("127.0.0.1", "::1")):
+            self._send_json({"error": "instance management is localhost-only"}, status=403)
+            return
         try:
-            length = int(self.headers.get("Content-Length", 0))
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            if length < 0 or length > MAX_BODY_BYTES:
+                raise ValueError("request body too large")
             payload = json.loads(self.rfile.read(length) or b"{}")
             name = str(payload.get("name", "")).strip()
             if not name:

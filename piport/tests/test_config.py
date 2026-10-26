@@ -27,6 +27,7 @@ class TestNetmask(unittest.TestCase):
         self.assertIsNone(config.netmask_to_prefix(""))
         self.assertIsNone(config.netmask_to_prefix("not-a-mask"))
         self.assertIsNone(config.netmask_to_prefix("255.255.255"))
+        self.assertIsNone(config.netmask_to_prefix("255.0.255.0"))
 
 
 class TestMisc(unittest.TestCase):
@@ -256,6 +257,17 @@ class TestRedact(unittest.TestCase):
                          "adopt token changed (<redacted>)")
         self.assertEqual(config.redact("reconnecting tokenless (fingerprint pinned)"),
                          "reconnecting tokenless (fingerprint pinned)")
+
+    def test_new_password_and_query_credentials(self):
+        for line in (
+            "payload={'newPassword': 'P@ssw0rd!'}",
+            "rtsp://10.0.0.9/live?username=admin&password=S3cret",
+            "rtsp://admin:p@ssw0rd@10.0.0.9/live",
+        ):
+            out = config.redact(line)
+            self.assertNotIn("P@ssw0rd", out)
+            self.assertNotIn("S3cret", out)
+            self.assertNotIn("p@ssw0rd", out)
 
     def test_leaves_ordinary_text(self):
         for line in ("connecting to wss://192.168.1.2:7442/ with headers={'X-Ident': 'fc'}",

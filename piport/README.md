@@ -77,11 +77,13 @@ additions. All of the following was confirmed live against a real console.
 Identity, networking, and the console endpoint live in `aiport.cfg` (INI) next to `run_all.py`,
 loaded via `config.py`. Every stage reads the same file, and any CLI flag overrides the cfg
 value. The protocol scripts also accept `--config <path>` and `--debug`; `run_all.py` passes both through
-to its children. Only full-line `#` comments are supported (`configparser` ignores inline ones).
+to its children. Inline comments are **not** stripped by `configparser`: an
+inline `#` becomes part of the value, so keep comments on their own lines.
 
 ```ini
 [identity]
 mac =
+name = AI Port
 hostname = piport
 platform = UVC AI Port
 discovery_platform = UP-AI-Port
@@ -114,7 +116,9 @@ debug = false
 | `[identity] mac` | Empty derives a Ubiquiti-OUI MAC `FC:EC:DA:<iface last 3 octets>`. |
 | `[identity] platform` | Must match the controller's catalog string. |
 | `[identity] discovery_platform` | Discovery TLV `0x0C` SKU (`UP-AI-Port`); blank falls back to `platform`. |
-| `[identity] device_id` | Must be unique per emulated instance. |
+| `[identity] device_id` | Must be unique per emulated instance (the shipped default is shared; `instance_manager.py`/the container entrypoint generate unique ones). |
+| `[identity] name` | Advertised name (`AIPORT_NAME`); Protect's rename is persisted separately. |
+| `[identity] guid` | Fixed AI Port catalog GUID; must not be random. |
 | `[identity] fw_version` / `discovery_fw_version` | Short version over ucp4/avclient/http / longer L2 discovery string. |
 | `[network] mode` | `dhcp` reads the live lease; `static` uses `ip`/`netmask`/`gateway`. `create --ip X.Y.Z.W` or `mode=static` makes `instance_manager.py` use `ip addr add` instead of `dhclient`. |
 | `[network] iface` / `parent_iface` | Blank = auto-detect (default-route interface). |
@@ -172,7 +176,8 @@ layouts are auto-detected. Model binaries are not committed; fetch the assets an
 optionally build `.rknn`:
 
 ```bash
-python3 scripts/fetch_models.py                     # rknn assets (ONNX + labels/anchors)
+python3 scripts/fetch_models.py                     # rknn assets (also downloads yolov5n.onnx)
+python3 scripts/fetch_models.py --no-cpu-model      # rknn assets without yolov5n.onnx
 python3 scripts/fetch_models.py --backend cpu       # CPU/Core ML model
 python3 scripts/fetch_models.py --backend edgetpu   # Coral MobileDet model
 python3 scripts/fetch_models.py --convert           # build .rknn (x86 host)
@@ -497,8 +502,9 @@ pip install rknn-toolkit2==2.3.2
 pip install onnx==1.16.1   # repin; rknn-toolkit2 may upgrade onnx
 ```
 
-`fetch_models.py` places `yolov5s_relu.rknn`, `anchors_yolov5.txt`, and `coco_80_labels_list.txt`
-in `models/`.
+`fetch_models.py` places the conversion assets (`anchors_yolov5.txt`,
+`coco_80_labels_list.txt`) in `models/`; `--convert` builds
+`yolov5s_relu.rknn` there on the x86 host.
 
 - **System `librknnrt.so` upgrade (required).** The stock OS ships runtime 1.4.0 (2022), which
   cannot load models built by `rknn-toolkit2==2.3.2` (`Invalid RKNN model version 6`). Replace
@@ -539,7 +545,10 @@ RTSP URL, `streaming` true/false) and, per channel, `ChangeVideoSettings` with a
 Protect's own ingest for that camera stops; without the push the camera has no video.
 
 Each channel is `ffmpeg -c:v copy` (plus AAC audio) into FLV, rewritten by
-`rewrite_flv()` and sent over TCP:
+`rewrite_flv()` and sent over TCP. **H.264 only:** an HEVC source is muxed by
+ffmpeg as Enhanced RTMP (an `hvc1` FourCC), which `ms` refuses (live view resets,
+the push is closed after a few hundred bytes); `rewrite_flv()` raises
+`UnsupportedCodec` for it and the push logs that once. Set the camera to H.264.
 
 - FLV header flags byte `7`; after every tag a 16-byte trailer: `0`, a 24-bit
   timescale (90000 video, 11025 otherwise), four reserved zero bytes, and the

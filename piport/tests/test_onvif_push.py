@@ -25,6 +25,10 @@ def _flv(tags):
     return out
 
 
+# AVC video tag payload: byte0 0x17 = key frame, FLV codec id 7 (H.264).
+_AVC = b"\x17\x00\x00\x00\x00"
+
+
 def _clock(step):
     c = itertools.count()
     return lambda: 1000.0 + next(c) * step
@@ -37,9 +41,9 @@ class TestRewrite(unittest.TestCase):
         return out.getvalue()
 
     def test_header_flags_and_trailers(self):
-        out = self._run(_flv([(9, 0, b"vid"), (8, 40, b"aud")]))
+        out = self._run(_flv([(9, 0, _AVC), (8, 40, b"aud")]))
         self.assertEqual(out[:9], b"FLV\x01\x07\x00\x00\x00\x09")
-        tag1 = onvif_push._flv_tag(9, b"vid", 0)
+        tag1 = onvif_push._flv_tag(9, _AVC, 0)
         body = out[13:]
         self.assertEqual(body[:len(tag1)], tag1)
         trailer = body[len(tag1):len(tag1) + 16]
@@ -66,7 +70,7 @@ class TestRewrite(unittest.TestCase):
         self.assertEqual(struct.unpack(">Q", t[8:])[0], 20 * 3600 * 90000)
 
     def test_clock_sync_injected_every_5s(self):
-        src = _flv([(9, i * 40, b"v") for i in range(20)])
+        src = _flv([(9, i * 40, _AVC) for i in range(20)])
         out = self._run(src, step=1.0)  # every tag read advances the clock 1 s
         self.assertEqual(out.count(b"onClockSync"), out.count(b"onMpma"))
         self.assertGreaterEqual(out.count(b"onClockSync"), 3)
@@ -89,8 +93,19 @@ class TestRewrite(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._run(b"RIFF....")
 
+    def test_rejects_non_h264_video(self):
+        # ffmpeg muxes HEVC into FLV as Enhanced-RTMP (byte0 0x9 = key, codec 12,
+        # 'hvc1' fourCC); ms never ingests that. Codec 8 (UniFi's own HEVC) is
+        # equally unusable because it needs the 0x68 0x01 VPS/SPS/PPS config tag.
+        for payload, codec in ((b"\x90hvc1\x01\x01\x60", "hevc (enhanced flv)"),
+                               (b"\x18\x01\x00\x00\x00\x00", "FLV codec id 8")):
+            with self.assertRaises(onvif_push.UnsupportedCodec) as ctx:
+                self._run(_flv([(9, 0, payload)]))
+            self.assertEqual(ctx.exception.codec, codec)
+            self.assertIn("H.264", str(ctx.exception))
+
     def test_truncated_source_returns(self):
-        src = _flv([(9, 0, b"video-payload")])
+        src = _flv([(9, 0, _AVC + b"video-payload")])
         out = self._run(src[:-6])
         self.assertTrue(out.startswith(b"FLV"))
 
@@ -169,6 +184,19 @@ class TestPushManager(unittest.TestCase):
         self.m.configure("CAM", _settings("video2", "S2", dest="file:///dev/null"))
         self.started[1].stop.assert_called_once()
         self.started[0].stop.assert_not_called()
+
+    def test_stop_device_keeps_destinations(self):
+        # Protect's streaming:false is a stop, not an unassign: a later start must
+        # resume the same streamName without a fresh ChangeVideoSettings.
+        self.m.set_source("CAM", "rtsp://cam/101")
+        self.m.configure("CAM", _settings("video1", "S1"))
+        self.m.stop_device("CAM")
+        self.started[0].stop.assert_called_once()
+        self.assertFalse(self.m.has_source("CAM"))
+        self.m.set_source("CAM", "rtsp://cam/101")
+        self.assertEqual([p.args[1:4] for p in self.started],
+                         [("video1", "rtsp://cam/101", "S1"),
+                          ("video1", "rtsp://cam/101", "S1")])
 
     def test_clear_device_stops_all(self):
         self.m.set_source("CAM", "rtsp://cam/101")

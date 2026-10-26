@@ -87,7 +87,8 @@ done
 if grep -q "using detector backend 'cpu'" "$LOG" || grep -q "CPU detector initialized" "$LOG"; then
     echo "log marker OK: detector cpu backend"
 else
-    echo "WARN: no detector-init log line (detector failed to load -- see logs)"
+    echo "FAIL: no detector-init log line (detector failed to load -- see logs)" >&2
+    fail=1
 fi
 
 if [ "$fail" -eq 0 ]; then

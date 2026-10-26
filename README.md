@@ -37,6 +37,7 @@ sudo scripts/install.sh --console <console-ip> [--parent-iface <iface>]
 
 # Raspberry Pi 5 + Coral, or any Linux CPU host (bare metal):
 sudo scripts/install.sh --console <console-ip> --accel edgetpu   # or cpu
+# (Pi 5 install.sh path is untested against a console; Docker bridge is verified)
 
 # x86_64 / Raspberry Pi 4/5 with Docker:
 AIPORT_CONSOLE_HOST=<console-ip> docker compose up -d --build
@@ -54,7 +55,7 @@ AIPORT_CONSOLE_HOST=<console-ip> docker compose up -d --build
 |  |  |
 | --- | --- |
 | **What** | Emulates the UniFi Protect AI Port device role |
-| **Hardware** | Orange Pi 5 Plus (RK3588 NPU) — verified live; Raspberry Pi 5 + Coral (Docker) — verified; x86_64 + Raspberry Pi 4/5 (CPU, Docker); Apple-silicon Mac (bare metal) |
+| **Hardware** | Orange Pi 5 Plus (RK3588 NPU) — verified live; Raspberry Pi 5 + Coral (Docker bridge) — verified; x86_64 + Raspberry Pi 4/5 (CPU, Docker); Apple-silicon Mac (bare metal) |
 | **Protocol / interface** | UBNT discovery UDP/10001; mTLS WSS :7442 (`ucp4` + classic avclient); RTSP relay :7447; ONVIF video push to :7550 |
 | **Detection** | Pluggable COCO detectors: RKNN (RK3588 NPU), Edge TPU (Coral), or `onnxruntime` on CPU/Core ML |
 | **Language** | Python 3 |
@@ -103,9 +104,9 @@ as `extendedFlv`, while the AI Port also pulls the camera's RTSP for detection.
 
 | Model | SoC / variant | Status | Notes |
 | --- | --- | --- | --- |
-| Orange Pi 5 Plus | RK3588 | Verified | Target board; NPU; 4 real cameras paired and streamed |
+| Orange Pi 5 Plus | RK3588 | Verified | Target board; NPU; 4 cameras have been paired and streamed live |
 | Other RK3588 boards | RK3588 | Untested | The NPU and ffmpeg paths are RK3588-specific |
-| Raspberry Pi 5 + Coral USB | BCM2712 + Edge TPU | Verified (Docker) | Adoption, a UniFi camera and a 4K ONVIF camera with MobileDet detection (~33 ms/frame on USB 2); `install.sh` path untested against a console; no H.264 hardware decoder |
+| Raspberry Pi 5 + Coral USB | BCM2712 + Edge TPU | Verified (Docker bridge) | Adoption, a UniFi camera and a 4K ONVIF camera with MobileDet detection (~33 ms/frame on USB 2); `install.sh` path untested against a console; no H.264 hardware decoder |
 | Raspberry Pi 4 | BCM2711 | Verified | `docker/` image; H.264 hardware decode bare-metal only |
 | x86_64 server / PC | amd64 | Verified | `docker/` CPU image; no NPU |
 | Apple-silicon Mac | M-series | Verified | Bare metal only (Docker Desktop has no LAN L2); Core ML on the Neural Engine |
@@ -197,16 +198,20 @@ sudo scripts/install.sh --console <UNVR-IP> [--parent-iface <iface>]
 - The NPU model cannot be built on the Pi; build it on an x86 host
   (`scripts/fetch_models.py --convert`) or let the installer fetch it from
   `--rknn-url` / `PIPORT_RKNN_URL` / its default URL. `--rknn <path>` takes a
-  local build, and a local `models-rknn/` submodule is also detected.
+  local build, and a local `models-rknn/` copy (e.g. a checkout of
+  `hutchx86/pi-port-models`) is also detected.
 - Opens the web UI on `:8090` (`--webui-port` to change) for board stats and
-  instance management.
+  instance management. Instance create/destroy is localhost-only by default;
+  set `AIPORT_WEBUI_ALLOW_REMOTE=1` in the unit to allow it from the LAN.
 
 Then, in Protect: adopt "AI Port" like any camera, and pair a real camera to it
 from the camera's own settings page. Detections appear as dashboard events with
 thumbnails, and the console's own person/vehicle/animal filters work.
 
 `run_all.py` needs root (binds UDP/10001 and TCP/443) and must be able to send L2
-broadcast/multicast on the LAN, so run it on the host, not in a NAT'd container.
+broadcast/multicast on the LAN, so run it on the host, not in a NAT'd container
+(exception: the same-host bridge setup below, where the console reaches the
+container IP directly).
 It resolves its own interface's IP by default, so multiple instances on one box
 don't collide on `:443`.
 
@@ -380,6 +385,12 @@ Limits:
 
 - **If the AI Port stops, the camera stops recording.** Protect no longer pulls
   it; unassign the camera (or remove the AI Port) to hand ingest back.
+- **H.264 only.** Video is copied, not re-encoded. An H.265/HEVC camera is muxed
+  by ffmpeg as Enhanced RTMP (an `hvc1` FourCC), which Protect's `ms` does not
+  ingest: live view resets and the push is closed after a few hundred bytes,
+  retried every second. Set the camera's stream to H.264. UniFi's own HEVC
+  framing (FLV codec id 8 with a `0x68 0x01` VPS/SPS/PPS tag) is not
+  implemented; such a stream is now refused with one clear error.
 - Every channel carries the camera's main stream (no lower-resolution
   channels); the resolution reported to Protect is probed from the stream.
 - Audio is AAC 32 kHz mono (silent if the camera has none). Protect asks for
@@ -419,7 +430,8 @@ python3 scripts/fetch_models.py --convert
 ```
 
 `scripts/install.sh` resolves the prebuilt `.rknn` in order: `--rknn <path>`, a
-local `models-rknn/` (submodule) or `rknn_convert/` copy, then a download from
+local `models-rknn/` copy (e.g. a checkout of `hutchx86/pi-port-models`) or
+`rknn_convert/` copy, then a download from
 `--rknn-url` / `PIPORT_RKNN_URL` / `DEFAULT_RKNN_URL`. The digest is verified
 when you pass `--rknn-sha256`, or always for the default URL; a custom URL or
 local copy without the flag is installed unverified and logged as such.
@@ -443,10 +455,12 @@ Device identity, network mode, the console address and the detector live in
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `[identity] mac` | derived | Device MAC (12 hex chars). Blank derives `FC:EC:DA:<interface's last 3 octets>` |
+| `[identity] name` | `AI Port` | Advertised device name (env `AIPORT_NAME`); a Protect rename is persisted separately |
 | `[identity] platform` | `UVC AI Port` | Catalog model string the console matches (must be exact) |
 | `[identity] discovery_platform` | `UP-AI-Port` | Discovery TLV `0x0C` SKU string (blank falls back to `platform`) |
 | `[identity] sysid` | `0xa5f1` | Hardware/model id |
-| `[identity] device_id` | per-instance | Persistent device UUID (must be unique per instance) |
+| `[identity] guid` | fixed catalog GUID | AI Port SKU GUID; must not be random |
+| `[identity] device_id` | UUID in `aiport.cfg` | Persistent device UUID; `instance_manager.py`/the container entrypoint generate a unique one per instance |
 | `[network] iface` / `mode` / `ip` | auto / `dhcp` / — | Interface to bind, and `dhcp` or `static` addressing |
 | `[console] host` / `port` | — / `7442` | The Protect console to dial when not yet adopted |
 | `[hardware] detector` | `auto` | `auto`, `rknn`, `edgetpu`, `cpu` or `none` (env `AIPORT_DETECTOR`) |
@@ -520,10 +534,14 @@ CPU); `cpu` forces CPU and `coreml` requests Core ML (CPU with a warning if abse
   detection); a Docker bridge setup for a console on the same host; credentials
   masked in logs; macOS bare-metal support (Core ML on Apple silicon); CPU
   Docker image + Komodo stack (x86_64 / arm64); Pi 4 hardware-decode + detector
-  tuning.
+  tuning; hardened HTTPS API (per-connection TLS, request limits), supervised
+  `run_all.py`, drained ffmpeg stderr, real per-zone IDs, localhost-only web
+  instance management, and persistent `/data` state in the LAN Compose stacks.
+- **2026-10** — firmware-update faking; optional sysinfo web UI; Pi 4 hardware
+  decode and detector tuning; Docker CPU image/Komodo stack.
 - **2026-09** — Line Crossing; paired-camera snapshot retrieval over UCP4; the
   `connectionHost` upload fix; event/feature-flag dedupe; multi-instance systemd
-  units and the web UI; one-shot `install.sh`; firmware-update faking.
+  units; one-shot `install.sh`.
 - **2026-08** — initial protocol stack: discovery, adoption, both WebSocket
   connections, NPU detection and `EventSmartDetect` with thumbnails.
 

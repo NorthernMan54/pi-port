@@ -25,10 +25,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CERT_PATH = os.path.join(HERE, "server.crt")
 KEY_PATH = os.path.join(HERE, "server.key")
 ADOPT_STATE_FILE = os.path.join(HERE, "adopt_state.json")
+# Refuse oversized/absent request bodies instead of allocating whatever a peer claims.
+MAX_BODY_BYTES = 1 << 20
+REQUEST_TIMEOUT_S = 10
 # RAM-only dir shared with avclient.py (writes snapshots); served from /api/1.2/snapshot.
 STREAM_DIR = config.stream_dir()
 # --state-dir (or None for the shared piport/ path); the firmware pin lives here.
 STATE_DIR = None
+_STARTED_MONOTONIC = time.monotonic()
 
 
 def ensure_cert():
@@ -62,10 +66,10 @@ def _freshest_jpeg(stream_dir, timeout=2.0):
     while True:
         try:
             names = [n for n in os.listdir(stream_dir) if n.endswith(".jpg")]
+            names.sort(key=lambda n: os.path.getmtime(os.path.join(stream_dir, n)),
+                       reverse=True)
         except OSError:
             names = []
-        names.sort(key=lambda n: os.path.getmtime(os.path.join(stream_dir, n)),
-                   reverse=True)
         for name in names[:3]:
             try:
                 with open(os.path.join(stream_dir, name), "rb") as f:
@@ -81,6 +85,7 @@ def _freshest_jpeg(stream_dir, timeout=2.0):
 
 class Handler(http.server.BaseHTTPRequestHandler):
     server_version = "piport-http/0.1"
+    timeout = REQUEST_TIMEOUT_S
 
     def _json(self, code, obj):
         body = json.dumps(obj).encode()
@@ -91,7 +96,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _read_body(self):
-        length = int(self.headers.get("Content-Length", 0) or 0)
+        raw = self.headers.get("Content-Length", "0") or "0"
+        try:
+            length = int(raw)
+        except ValueError:
+            self.send_error(400, "bad Content-Length")
+            return None
+        if length < 0 or length > MAX_BODY_BYTES:
+            self.send_error(413, "request body too large")
+            return None
         if not length:
             return b""
         return self.rfile.read(length)
@@ -107,7 +120,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "mac": cfg["mac"],
             "type": cfg["platform"],
             "sysid": f"0x{cfg['sysid']:04x}",
-            "name": config.device_name(STATE_DIR),
+            "name": config.device_name(STATE_DIR, cfg.get("name")),
             "model": cfg["platform"],
             "firmwareVersion": config.effective_fw_version(cfg["fw_version"], STATE_DIR),
             "adopted": adopted,
@@ -116,7 +129,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "deviceId": cfg["device_id"],
             "anonymousDeviceId": cfg["device_id"],
             "ip": cfg["ip"],
-            "uptime": 0,
+            "uptime": int(time.monotonic() - _STARTED_MONOTONIC),
             # The controller's host, not ours (Protect builds upload URLs from it).
             "connectionHost": cfg.get("console_host") or cfg["ip"],
             # Real hwrev unconfirmed; placeholder matching ucp4 getInfo's hwrev.
@@ -162,6 +175,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self._read_body()
+        if body is None:
+            return
         try:
             payload = json.loads(body) if body else {}
         except json.JSONDecodeError:
@@ -172,14 +187,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = self._route()
         if path in ("/api/adopt", "/adopt"):
             mgmt_payload = payload
-            self._persist_adopt(mgmt_payload)
-            self._json(200, {"statusCode": 200})
+            ok = self._persist_adopt(mgmt_payload)
+            self._json(200 if ok else 400,
+                       {"statusCode": 200 if ok else 400})
         elif path in ("/api/1.2/manage",):
             # Real adopt endpoint (classic UVC management API; /api/adopt unused);
             # adopt fields nested under "mgmt".
-            mgmt_payload = payload.get("mgmt", payload)
-            self._persist_adopt(mgmt_payload)
-            self._json(200, {"statusCode": 200})
+            mgmt_payload = payload.get("mgmt", payload) if isinstance(payload, dict) else {}
+            ok = self._persist_adopt(mgmt_payload)
+            self._json(200 if ok else 400,
+                       {"statusCode": 200 if ok else 400})
         elif path in ("/api/readopt", "/readopt"):
             self._json(200, {"statusCode": 200})
         elif path in ("/api/1.2/login",):
@@ -216,6 +233,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _persist_adopt(self, mgmt_payload):
+        if not isinstance(mgmt_payload, dict) or not (
+                mgmt_payload.get("hosts") or mgmt_payload.get("token")):
+            log.warning("ignoring adopt payload without hosts/token")
+            return False
         self.server.aiport_config["last_adopt_payload"] = mgmt_payload
         log.info("=" * 70)
         log.info("ADOPT PAYLOAD RECEIVED")
@@ -227,13 +248,36 @@ class Handler(http.server.BaseHTTPRequestHandler):
         log.info("  username:   %s", mgmt_payload.get("username"))
         log.info("=" * 70)
         config.atomic_write_json(ADOPT_STATE_FILE, mgmt_payload)
+        return True
 
     def log_message(self, fmt, *args):
         pass
 
 
 class Server(http.server.ThreadingHTTPServer):
-    pass
+    daemon_threads = True
+    allow_reuse_address = True
+    ssl_context = None
+
+    def process_request_thread(self, request, client_address):
+        """TLS-wrap in the worker thread, not in serve_forever's accept loop.
+
+        Wrapping the listening socket made one stalled ClientHello block every
+        subsequent connection (and Restart=on-failure could not help).
+        """
+        try:
+            request.settimeout(REQUEST_TIMEOUT_S)
+            tls = self.ssl_context.wrap_socket(request, server_side=True)
+        except (OSError, ssl.SSLError) as exc:
+            log.warning("TLS handshake from %s failed: %s", client_address, exc)
+            self.shutdown_request(request)
+            return
+        try:
+            self.finish_request(tls, client_address)
+        except Exception:
+            self.handle_error(tls, client_address)
+        finally:
+            self.shutdown_request(tls)
 
 
 def main():
@@ -292,13 +336,14 @@ def main():
         "device_id": args.device_id,
         "guid": args.guid,
         "ip": ip,
+        "name": cfg.get("name"),
         "console_host": cfg["host"],
         "last_adopt_payload": None,
     }
 
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(CERT_PATH, KEY_PATH)
-    server.socket = ctx.wrap_socket(server.socket, server_side=True)
+    server.ssl_context = ctx
 
     log.info("HTTPS control API listening on %s:%d (mac=%s platform=%s)",
               bind_ip, args.port, server.aiport_config["mac"], args.platform)

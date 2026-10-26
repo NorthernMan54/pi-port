@@ -47,7 +47,6 @@ class Base(unittest.TestCase):
         av._snapshot_filename_to_device.clear()
         av._recent_snapshot_announcements.clear()
         av._last_object_coord_by_device.clear()
-        av._snapshot_seq_by_device.clear()
         av._stream_dims.clear()
         av._active_streams.clear()
         av._pending_leaves.clear()
@@ -110,6 +109,15 @@ class TestParsers(Base):
         self.assertEqual(len(polys), 1)
         self.assertEqual(polys[0], [(0, 0), (10, 0), (10, 10), (0, 10)])
         self.assertEqual(av._parse_zones(None), [])
+        self.assertEqual(av._parse_zone_map(field), {"1": [(0, 0), (10, 0), (10, 10), (0, 10)]})
+
+    def test_zone_id_follows_controller_key(self):
+        field = {"7": {"coord": [0, 0, 1000, 0, 1000, 1000, 0, 1000]}}
+        self.assertEqual(av._parse_zone_ids(field), [7])
+        av._send_smart_detect_event(None, "M", edge_type="enter", zones=[7], tracker_id=5)
+        payload = self.sent[-1][1]
+        self.assertEqual(payload["descriptors"][0]["zones"], [7])
+        self.assertIn("7", payload["zonesStatus"])
 
     def test_parse_lines_coord_and_points(self):
         lines = av._parse_lines({

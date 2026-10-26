@@ -81,7 +81,13 @@ def main():
 
     console = os.environ.get("AIPORT_CONSOLE", "").strip()
     if console:
-        host, _, port = console.partition(":")
+        if console.startswith("[") and "]" in console:
+            host, _, rest = console[1:].partition("]")
+            port = rest[1:] if rest.startswith(":") else ""
+        elif console.count(":") == 1:
+            host, _, port = console.partition(":")
+        else:
+            host, port = console, ""
         set_ini(CFG, "console", "host", host)
         set_ini(CFG, "console", "port", port or "7442")
     hostname = os.environ.get("AIPORT_HOSTNAME", "").strip()

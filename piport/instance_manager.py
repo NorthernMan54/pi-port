@@ -18,6 +18,7 @@ import json
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -140,7 +141,7 @@ def _build_unit(entry):
                 f"ExecStartPre=/sbin/ip addr add {entry['ip']}/{prefix} dev {iface}")
             if entry.get("gateway"):
                 pre_lines.append(
-                    f"ExecStartPre=/sbin/ip route add default via {entry['gateway']} dev {iface}")
+                    f"ExecStartPre=-/sbin/ip route add default via {entry['gateway']} dev {iface}")
             post_lines = [
                 f"ExecStopPost=-/sbin/ip link del {iface}",
             ]
@@ -155,7 +156,7 @@ def _build_unit(entry):
             pre_lines.append(f"ExecStartPre=/usr/sbin/dhclient -pf {pidfile} -lf {leases} "
                              f"-cf {dhclient_conf} {iface}")
             post_lines = [
-                f"ExecStopPost=-/usr/bin/pkill -f dhclient.*{iface}",
+                f"ExecStopPost=-/usr/bin/pkill -f 'dhclient.* {iface}$'",
                 f"ExecStopPost=-/sbin/ip link del {iface}",
             ]
 
@@ -301,6 +302,13 @@ def destroy_instance(name):
     except OSError:
         pass
     _systemctl("daemon-reload")
+
+    # Destroy is a real teardown: the state dir holds the adopt token/certs and
+    # leases for this identity, and the stream dir can hold its last frame.
+    state_dir = entry.get("state_dir")
+    if state_dir:
+        shutil.rmtree(state_dir, ignore_errors=True)
+        shutil.rmtree(config.stream_dir(state_dir), ignore_errors=True)
 
     del reg[name]
     _save_registry(reg)

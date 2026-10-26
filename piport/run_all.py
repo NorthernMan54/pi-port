@@ -10,12 +10,27 @@ Usage:
 """
 import argparse
 import os
+import signal
 import subprocess
 import sys
+import time
 
 import config
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _stop_all(procs):
+    """Terminate the whole stage group, then kill anything that ignored TERM."""
+    for p in procs:
+        if p.poll() is None:
+            p.terminate()
+    deadline = time.monotonic() + 5
+    for p in procs:
+        try:
+            p.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            p.kill()
 
 
 def main():
@@ -108,13 +123,25 @@ def main():
     ]
 
     print(f"Started {len(procs)} components. Ctrl-C to stop all.")
+
+    def _on_term(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _on_term)
+    signal.signal(signal.SIGINT, _on_term)
     try:
-        for p in procs:
-            p.wait()
+        while True:
+            for p in procs:
+                rc = p.poll()
+                if rc is not None:
+                    print(f"Component {p.pid} exited rc={rc}; stopping the rest")
+                    _stop_all(procs)
+                    return 1
+            time.sleep(1)
     except KeyboardInterrupt:
-        for p in procs:
-            p.terminate()
+        _stop_all(procs)
+        return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -48,6 +48,7 @@ import apple_fm
 import enrich
 import hoststats
 import onvif_push
+from procutil import start_stderr_drain
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ADOPT_STATE_FILE = os.path.join(HERE, "adopt_state.json")
@@ -446,7 +447,9 @@ _detect_zone_ids = {}
 _detect_zone_types = {}
 # deviceID -> Line Crossing segments parsed from ChangeSmartDetectSettings.lines.
 _lines = {}
-_snapshot_seq_by_device = {}  # deviceID -> monotonic counter for fullfov snapshot filenames
+# Global monotonic counter for fullfov snapshot filenames. It must be global, not
+# per-camera: two cameras' first leave would otherwise announce the same filename.
+_snapshot_seq = itertools.count(1)
 # Filename -> {"device_id", "kind", "coord"} so an upload maps back to its camera; bounded
 # against leaks.
 _snapshot_filename_to_device = collections.OrderedDict()
@@ -532,6 +535,14 @@ def _stop_stream(device_id):
         except subprocess.TimeoutExpired:
             proc.kill()
     _stream_started_monotonic_ms.pop(device_id, None)
+    # Not _stream_restart_count: a pull that dies restarts through here, and clearing it kept
+    # the backoff at its first step. UiStreamControl resets it.
+    for table in (_stream_dims, _stream_probe):
+        table.pop(device_id, None)
+    try:
+        os.remove(os.path.join(_STREAM_DIR, f"{device_id}.jpg"))
+    except OSError:
+        pass
     with _frame_lock:
         _latest_frame.pop(device_id, None)
         _latest_frame_seq.pop(device_id, None)
@@ -760,6 +771,7 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
     finally:
         os.close(jpeg_w)
     jpeg_pipe = os.fdopen(jpeg_r, "rb")
+    stderr_tail = start_stderr_drain(proc)
     _active_streams[device_id] = proc
     _start_camera_clock(device_id, url)
     # Origin for this device's clockMonotonic/clockStream (ms since the pull began).
@@ -810,7 +822,7 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
         except Exception:
             log.exception("frame reader crashed for deviceID=%s", device_id)
         rc = proc.wait()
-        stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+        stderr = stderr_tail()
         log.info("merged RTSP pull for deviceID=%s exited rc=%s stderr_tail=%s",
                   device_id, rc, stderr[-500:])
         if hw and seq == 0 and _active_streams.get(device_id) is proc:
@@ -1895,15 +1907,22 @@ def _parse_zone_types(zones_field):
     return out
 
 
+def _parse_zone_map(zones_field):
+    """Parse zones/excludeZones into {zone_id: polygon}, keeping the controller's id."""
+    out = {}
+    for zone_id, zone in (zones_field or {}).items():
+        if not isinstance(zone, dict):
+            continue
+        coord = zone.get("coord") or []
+        if len(coord) >= 6 and len(coord) % 2 == 0:
+            out[str(zone_id)] = list(zip(coord[0::2], coord[1::2]))
+    return out
+
+
 def _parse_zones(zones_field):
     """Parse ChangeSmartDetectSettings zones/excludeZones into polygons
     (even-length coord, >= 3 points)."""
-    polygons = []
-    for zone in (zones_field or {}).values():
-        coord = zone.get("coord") or []
-        if len(coord) >= 6 and len(coord) % 2 == 0:
-            polygons.append(list(zip(coord[0::2], coord[1::2])))
-    return polygons
+    return list(_parse_zone_map(zones_field).values())
 
 
 def _parse_lines(lines_field):
@@ -2474,8 +2493,7 @@ def _send_multi_leave(ws, device_id, event_id, members, fallback):
                                               LEAVE_PRIORITY.get(m[1]["objectType"], 9)))
     now_ms = _frame_wall_ms(device_id)
     clock_mono, clock_stream = _stream_clocks(device_id)
-    seq = _snapshot_seq_by_device.get(device_id, 0) + 1
-    _snapshot_seq_by_device[device_id] = seq
+    seq = next(_snapshot_seq)
     fov_w, fov_h = _stream_dims.get(device_id, (DETECT_IMG_SIZE, DETECT_IMG_SIZE))
     fullfov = f"smartdetectsnap_zone_{seq:08d}_fullfov.jpg"
     first_best = members[0][1].get("best")
@@ -3427,6 +3445,10 @@ def _upload_snapshot(upload_uri, device_info, requested_filename, what=None,
         except OSError as e:
             log.warning("failed to read %s for snapshot upload: %s", path, e)
             return
+        if len(data) < 4 or data[:2] != b"\xff\xd8" or b"\xff\xd9" not in data[2:]:
+            log.warning("snapshot for deviceID=%s is a torn/incomplete JPEG (%d bytes); "
+                        "not uploading", device_id, len(data))
+            return
     if record["kind"] == "object" and record["coord"]:
         fov_w, fov_h = _stream_dims.get(device_id, (DETECT_IMG_SIZE, DETECT_IMG_SIZE))
         try:
@@ -3775,8 +3797,7 @@ def _send_smart_detect_event(ws, device_id, edge_type="none", event_id=1, statio
         # "leave" carries the final classification in trackerIDAttrMap (likely read by add_smart_detect_types()).
         payload["trackerIDAttrMap"] = {str(t["tracker_id"]): _leave_track_attrs(t) for t in tracks}
         # Full-FoV dims use the real stream resolution, not the square detection buffer.
-        seq = _snapshot_seq_by_device.get(device_id, 0) + 1
-        _snapshot_seq_by_device[device_id] = seq
+        seq = next(_snapshot_seq)
         fov_w, fov_h = _stream_dims.get(device_id, (DETECT_IMG_SIZE, DETECT_IMG_SIZE))
         fullfov_filename = f"smartdetectsnap_zone_{seq:08d}_fullfov.jpg"
         # One Full-FoV per message, from the first track's best-scoring moment if kept.
@@ -3881,8 +3902,7 @@ def _send_line_detect_event(ws, device_id, line, edge_type, event_id, direction,
         payload["trackerIDAttrMap"] = {
             str(tracker_id): {"objectType": object_type, "line": [line_ref]},
         }
-        seq = _snapshot_seq_by_device.get(device_id, 0) + 1
-        _snapshot_seq_by_device[device_id] = seq
+        seq = next(_snapshot_seq)
         fov_w, fov_h = _stream_dims.get(device_id, (DETECT_IMG_SIZE, DETECT_IMG_SIZE))
         fullfov_filename = f"smartdetectsnap_line_{seq:08d}_fullfov.jpg"
         snapshot_filename = f"smartdetectsnap_line_{tracker_id}{now_ms}.jpg"
@@ -4226,7 +4246,9 @@ def handle_function(ws, msg, device_info):
             except Exception:
                 log.exception("failed to start ONVIF camera deviceID=%s", device_id)
         elif device_id:
-            _onvif.clear_device(device_id)
+            # Stop, don't forget: Protect often re-issues only streaming:true
+            # (not ChangeVideoSettings), and the destinations are still valid.
+            _onvif.stop_device(device_id)
             _stop_stream(device_id)
             _stop_motion_detector(device_id, ws=ws)
             _stream_points.pop(device_id, None)
@@ -4376,6 +4398,17 @@ def handle_function(ws, msg, device_info):
         _detect_zone_types.clear()
         _detect_zone_ids.clear()
         _lines.clear()
+        _snapshot_filename_to_device.clear()
+        _last_object_coord_by_device.clear()
+        try:
+            for name in os.listdir(_STREAM_DIR):
+                if name.endswith(".jpg"):
+                    try:
+                        os.remove(os.path.join(_STREAM_DIR, name))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
         _clear_adopt_state()
         if msg.get("responseExpected"):
             send_msg(ws, fn, {}, in_response_to=msg_id)
@@ -4422,7 +4455,7 @@ def handle_function(ws, msg, device_info):
             except OSError:
                 log.warning("failed to persist device name %r", name, exc_info=True)
         if msg.get("responseExpected"):
-            send_msg(ws, fn, {"name": config.device_name(STATE_DIR),
+            send_msg(ws, fn, {"name": config.device_name(STATE_DIR, device_info.get("name")),
                               "timezone": payload.get("timezone") or ""},
                      in_response_to=msg_id)
         return
@@ -4494,12 +4527,12 @@ def run(host, port, device_info, token=None):
         send_msg(ws, "ubnt_avclient_hello", {
             "mac": device_info["mac_nosep"],
             "model": device_info["type"],
-            "name": config.device_name(STATE_DIR),
+            "name": config.device_name(STATE_DIR, device_info.get("name")),
             "fwVersion": device_info["version"],
             "connectionHost": device_info.get("console_host") or device_info["ip"],
             "connectionSecurePort": port,
             "protocolVersion": 67,
-            "adoptionCode": _adopt_token(),
+            "adoptionCode": token or "",
             "ip": device_info["ip"],
             "hwrev": 1,
             "idleTime": 0,
@@ -4622,6 +4655,7 @@ def main():
         "version": args.version,
         "ip": ip,
         "hostname": args.hostname,
+        "name": cfg.get("name"),
         "device_id": args.device_id,
         "guid": args.guid,
     }
@@ -4648,12 +4682,16 @@ def main():
             state = {}
         hosts = state.get("hosts") or []
         if hosts:
-            host_port = hosts[0]
-            if ":" in host_port:
-                host, port_s = host_port.rsplit(":", 1)
-                port = int(port_s)
-            else:
-                host, port = host_port, args.fallback_port
+            try:
+                host_port = hosts[0]
+                if ":" in host_port:
+                    host, port_s = host_port.rsplit(":", 1)
+                    port = int(port_s)
+                else:
+                    host, port = host_port, args.fallback_port
+            except (TypeError, ValueError):
+                log.warning("malformed adopt state host %r; using --host", hosts[0])
+                host, port = args.host, args.fallback_port
         else:
             host, port = args.host, args.fallback_port
 

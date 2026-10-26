@@ -131,8 +131,9 @@ class EdgeTpuDetector(Detector):
             raise RuntimeError(
                 f"unsupported Edge TPU model outputs {[o['shape'].tolist() for o in outs]}; "
                 "expected TFLite_Detection_PostProcess (SSD/MobileDet) or YOLOv5 [1,N,85]")
-        log.info("Edge TPU detector initialized (%s, device=%s, layout=%s, input=%d)",
-                 self.model_path, device, layout, self.input_size)
+        log.info("Edge TPU detector initialized (%s, device=%s, layout=%s, input=%d, "
+                 "obj_thresh=%.2f)", self.model_path, device, layout, self.input_size,
+                 postprocess.OBJ_THRESH)
 
     def _prepare_input(self, frame_rgb):
         """Raw pixels in the model's input dtype. Edge TPU models take uint8

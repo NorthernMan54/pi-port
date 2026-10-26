@@ -2802,7 +2802,12 @@ def _motion_tick(ws, device_id):
         log.debug("motion gate: static scene, skipping inference for deviceID=%s", device_id)
         detections = []
     else:
+        t0 = time.monotonic()
         detections = _dedupe_detections(_classify_frame_detections(device_id))
+        # AIPORT_DEBUG: proves frames reach the detector and what it returned.
+        log.debug("motion tick: deviceID=%s inference=%.0f ms detections=%d (%s)",
+                  device_id, (time.monotonic() - t0) * 1000, len(detections),
+                  ", ".join(f"{d['objectType']} {d['score']:.2f}" for d in detections) or "none")
         detections += _enrich_detections(
             device_id, detections)
     with _motion_lock:

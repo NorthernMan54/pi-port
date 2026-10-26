@@ -100,6 +100,41 @@ class TestGeometry(unittest.TestCase):
         self.assertFalse(av._segment_crosses_line((900, 100), (900, 900), (0, 500), (100, 500)))
 
 
+class TestLateDetector(Base):
+    """A detector that loads after the pull started takes a different input size: its
+    detect() resizes the frame, so detection doesn't stop (upstream 256ff57)."""
+
+    def tearDown(self):
+        av._latest_frame.pop("CAM", None)
+
+    def test_late_detector_resizes_instead_of_skipping(self):
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("numpy not installed")
+        from detectors import base
+
+        class Det(base.Detector):
+            def __init__(self):
+                super().__init__()
+                self.input_size = 320
+                self.seen = None
+
+            def _infer(self, frame):
+                self.seen = frame.shape
+                return np.array([[160.0, 160.0, 240.0, 320.0]]), np.array([0]), np.array([0.9])
+
+        det = Det()
+        av._latest_frame["CAM"] = np.zeros((640, 640, 3), dtype=np.uint8)
+        with mock.patch.object(av, "_get_detector", return_value=det), \
+                mock.patch.object(av, "REGIONS", False), \
+                mock.patch.object(av, "DETECTOR_BACKEND", "edgetpu"):
+            out = av._classify_frame_detections("CAM")
+        self.assertEqual(det.seen, (320, 320, 3))  # resized to the model input
+        self.assertEqual(len(out), 1)
+        self.assertEqual([round(v) for v in out[0]["coord"]], [500, 500, 250, 500])
+
+
 class TestParsers(Base):
     def test_parse_zones(self):
         field = {"1": {"coord": [0, 0, 10, 0, 10, 10, 0, 10]},

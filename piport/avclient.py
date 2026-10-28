@@ -917,9 +917,11 @@ def _is_excluded(device_id, coord):
 
 # Something on the lens: live 2026-10-23 18:58 to 04:15 a spider web on Camera C
 # gave 218 person events, every box against the right edge and the top and nearly the full
-# height ([768, 3, 231, 949] in 0-1000 image space). A person box touching the top and a
-# side and spanning LENS_MIN_HEIGHT of the frame is dropped on the cameras named in
-# AIPORT_LENS_FILTER (deviceIDs, or "all"; unset = off).
+# height ([768, 3, 231, 949] in 0-1000 image space); 2026-10-28 07:21 a strand lit by the IR
+# came from the bottom-right corner instead (about [787, 397, 213, 603]). A person box in a
+# corner of the frame -- touching two adjacent edges, the top or the bottom and a side -- and
+# spanning LENS_MIN_HEIGHT of it is dropped on the cameras named in AIPORT_LENS_FILTER
+# (deviceIDs, or "all"; unset = off).
 LENS_EDGE = 10
 LENS_MIN_HEIGHT = int(os.environ.get("AIPORT_LENS_MIN_HEIGHT", "900"))
 _LENS_FILTER = {v.strip().upper() for v in os.environ.get("AIPORT_LENS_FILTER", "").split(",")
@@ -932,8 +934,9 @@ def _on_lens(device_id, object_type, coord):
     if "ALL" not in _LENS_FILTER and str(device_id).upper() not in _LENS_FILTER:
         return False
     x, y, w, h = coord
-    return (y <= LENS_EDGE and h >= LENS_MIN_HEIGHT
-            and (x <= LENS_EDGE or x + w >= CAMERA_COORD_END - LENS_EDGE))
+    top_or_bottom = y <= LENS_EDGE or y + h >= CAMERA_COORD_END - LENS_EDGE
+    side = x <= LENS_EDGE or x + w >= CAMERA_COORD_END - LENS_EDGE
+    return top_or_bottom and side and h >= LENS_MIN_HEIGHT
 
 
 # A detection counts in a zone listing what it confirms with (a plate rides its vehicle).

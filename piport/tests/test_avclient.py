@@ -383,8 +383,15 @@ class TestProtectCanvas(Base):
             self.assertTrue(av._on_lens("B", "person", [2, 5, 300, 990]))     # left corner
             self.assertFalse(av._on_lens("B", "vehicle", web))
             self.assertFalse(av._on_lens("B", "person", [768, 3, 231, 700]))   # shorter
-            self.assertFalse(av._on_lens("B", "person", [768, 60, 231, 930]))  # below the top
+            self.assertFalse(av._on_lens("B", "person", [768, 40, 231, 930]))  # off top and bottom
             self.assertFalse(av._on_lens("B", "person", [400, 3, 231, 949]))   # off the sides
+            # 2026-10-28 07:21: a strand from the bottom-right corner; a corner, not the top.
+            strand = [787, 397, 213, 603]
+            self.assertFalse(av._on_lens("B", "person", strand))                # under 900 tall
+            with mock.patch.object(av, "LENS_MIN_HEIGHT", 550):
+                self.assertTrue(av._on_lens("B", "person", strand))
+                self.assertTrue(av._on_lens("B", "person", [0, 400, 200, 600]))   # bottom left
+                self.assertFalse(av._on_lens("B", "person", [787, 300, 213, 600]))  # no corner
         with mock.patch.object(av, "_LENS_FILTER", {"OTHER"}):
             self.assertFalse(av._on_lens("B", "person", web))
 

@@ -66,6 +66,7 @@ _STREAM_DIR = config.stream_dir()
 STATE_DIR = None
 # deviceID -> consecutive unexpected-death count since the last UiStreamControl start.
 _stream_restart_count = {}
+STREAM_RETRY_MAX_S = 30.0   # longest wait between pulls of a source that keeps failing
 # deviceID -> time.monotonic()*1000 when its RTSP pull started; the origin for
 # clockMonotonic/clockStream on that device's EventSmartDetect payloads.
 _stream_started_monotonic_ms = {}
@@ -687,6 +688,27 @@ HW_SCALE = os.environ.get("AIPORT_HW_SCALE", "1" if sys.platform == "darwin" els
 _hw_scale_failed = set()  # deviceIDs whose pull died with GPU scaling before any frame
 
 
+# What ffmpeg says when GPU scaling itself fails, as opposed to the stream: live 2026-10-28
+# Protect's relay ended two fresh pulls ("Failed reading RTSP data: End of file") and an
+# unreachable ONVIF camera refused them ("No route to host"), and each such camera was moved to
+# CPU scaling for good.
+_GPU_SCALING_ERRORS = ("scale_vt", "hwupload", "hwdownload", "videotoolbox", "hw_frames",
+                       "Impossible to convert", "reinitializing filters",
+                       "Failed to configure")
+
+
+def _gpu_scaling_error(stderr):
+    """True if a pull's stderr shows the GPU scaling path failing."""
+    return any(marker in (stderr or "") for marker in _GPU_SCALING_ERRORS)
+
+
+def _restart_wanted(device_id):
+    """A pull that died restarts only while Protect still wants the stream. Live 2026-10-28
+    Protect ended its relays, then stopped every camera while their pulls waited to restart:
+    the stop found no pull to stop, and each camera was pulled again every 20 s after that."""
+    return device_id not in _active_streams and device_id in _stream_points
+
+
 def _hw_scale_mode(hwdec_args, device_id=None):
     """'vt' (decoded on the GPU), 'vt_upload' (decoded in software) or None (CPU scaling)."""
     if not HW_SCALE or sys.platform != "darwin" or device_id in _hw_scale_failed:
@@ -825,7 +847,8 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
         stderr = stderr_tail()
         log.info("merged RTSP pull for deviceID=%s exited rc=%s stderr_tail=%s",
                   device_id, rc, stderr[-500:])
-        if hw and seq == 0 and _active_streams.get(device_id) is proc:
+        if hw and seq == 0 and _active_streams.get(device_id) is proc \
+                and _gpu_scaling_error(stderr):
             log.warning("deviceID=%s: no frames with GPU scaling, scaling on the CPU from now on",
                         device_id)
             _hw_scale_failed.add(device_id)
@@ -835,14 +858,21 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
             _active_streams.pop(device_id, None)
             # 0.5s for the first attempts: Protect rebuilds its ingest in ~2-3s and
             # a fixed 2s backoff lost the race. Counter resets on UiStreamControl.
-            count = _stream_restart_count.get(device_id, 0) + 1
+            # Consecutive pulls without a frame: one that delivered video starts the count
+            # again, so a relay drop now and then keeps the quick restart. A source that keeps
+            # refusing backs off to STREAM_RETRY_MAX_S: live 2026-10-28 an unreachable ONVIF
+            # camera was retried every 2 s, 108 times in 4 minutes.
+            count = (1 if seq else _stream_restart_count.get(device_id, 0) + 1)
             _stream_restart_count[device_id] = count
-            backoff = 0.5 if count <= 6 else 2.0
+            backoff = 0.5 if count <= 6 else min(STREAM_RETRY_MAX_S, 2.0 ** (count - 6))
             log.warning("deviceID=%s RTSP pull died unexpectedly (attempt %d), restarting in %.1fs",
                         device_id, count, backoff)
             time.sleep(backoff)
-            if device_id not in _active_streams:
+            if _restart_wanted(device_id):
                 _start_stream(device_id, ip, port, uri, width, height, url=url)
+            else:
+                log.info("deviceID=%s: stream stopped by Protect during the restart wait; "
+                         "not restarting", device_id)
 
     threading.Thread(target=_jpeg_reader, daemon=True).start()
     threading.Thread(target=_reader, daemon=True).start()
@@ -3200,6 +3230,8 @@ def _stop_motion_detector(device_id, preserve_tracks=False, ws=None):
         # Emit leave for anything still open (a discarded track with no leave
         # leaves an orphaned event on the controller).
         for tracker_id, tr in open_tracks:
+            if "event_id" not in tr:
+                continue   # never joined an event (held, unconfirmed or parked): nothing to close
             try:
                 _send_smart_detect_event(ws, device_id, edge_type="leave",
                                           event_id=tr["event_id"], stationary=True,

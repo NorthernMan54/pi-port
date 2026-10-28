@@ -2908,6 +2908,23 @@ class TestPullVideoArgs(unittest.TestCase):
         self.assertIsNone(hw)
         self.assertIn("[detin]scale=1280:720[det]", graph)
 
+    def test_a_stopped_stream_is_not_restarted(self):
+        self.addCleanup(av._stream_points.pop, "S", None)
+        av._active_streams.pop("S", None)
+        av._stream_points["S"] = 2.5
+        self.assertTrue(av._restart_wanted("S"))       # died on its own, still wanted
+        av._stream_points.pop("S")                      # Protect stopped it meanwhile
+        self.assertFalse(av._restart_wanted("S"))
+
+    def test_only_gpu_errors_turn_gpu_scaling_off(self):
+        self.assertTrue(av._gpu_scaling_error(
+            "Impossible to convert between the formats supported by the filter "
+            "'Parsed_scale_vt_0' and the filter 'auto_scale_0'"))
+        for stream_error in ("[in#0/rtsp @ 0x7a] Failed reading RTSP data: End of file",
+                             "Connection to tcp://192.168.1.42:554 failed: No route to host",
+                             "", None):
+            self.assertFalse(av._gpu_scaling_error(stream_error))
+
     def test_off_elsewhere_and_every_frame_without_a_rate(self):
         with mock.patch.object(av, "HW_SCALE", True), \
                 mock.patch.object(av.sys, "platform", "linux"), \

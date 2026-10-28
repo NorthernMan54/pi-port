@@ -73,8 +73,13 @@ def parse_ps(out):
 
 
 def read_processes():
-    out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,time=,args="], capture_output=True,
-                         text=True, timeout=10).stdout
+    """{pid: (ppid, cpu seconds, args)} from ps, or {} without it: a slim container image has
+    no ps, and the host stats thread died on it (the line then just leaves out the groups)."""
+    try:
+        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,time=,args="], capture_output=True,
+                             text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
     return parse_ps(out)
 
 

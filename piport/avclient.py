@@ -4737,6 +4737,7 @@ def main():
 
     # Single-use token: present on first connect after adopt, omitted on later reconnects.
     used_tokens = set()
+    waiting_logged = False
 
     _init_detector(cfg)
 
@@ -4769,6 +4770,18 @@ def main():
                 host, port = args.host, args.fallback_port
         else:
             host, port = args.host, args.fallback_port
+
+        if not host:
+            # Not adopted and no console configured: Protect finds it by discovery and adopts it
+            # through http_api.py, which writes adopt_state.json. Connecting meanwhile only
+            # logged "hostname isn't provided" every 5 s.
+            if not waiting_logged:
+                log.info("no console host yet ([console] host / AIPORT_CONSOLE): waiting to be "
+                         "adopted through discovery")
+                waiting_logged = True
+            time.sleep(5.0)
+            continue
+        waiting_logged = False
 
         token = state.get("token")
         send_token = token is not None and token not in used_tokens

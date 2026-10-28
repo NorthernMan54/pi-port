@@ -94,5 +94,12 @@ class TestLine(unittest.TestCase):
                                "power CPU 4.1 W, ANE 0.8 W")
 
 
+
+class TestWithoutPs(unittest.TestCase):
+    def test_no_ps_gives_no_process_groups(self):
+        from unittest import mock
+        with mock.patch.object(hoststats.subprocess, "run", side_effect=FileNotFoundError("ps")):
+            self.assertEqual(hoststats.read_processes(), {})
+
 if __name__ == "__main__":
     unittest.main()

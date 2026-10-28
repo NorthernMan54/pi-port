@@ -928,15 +928,42 @@ _LENS_FILTER = {v.strip().upper() for v in os.environ.get("AIPORT_LENS_FILTER", 
                 if v.strip()}
 
 
-def _on_lens(device_id, object_type, coord):
-    if not _LENS_FILTER or object_type != "person":
-        return False
-    if "ALL" not in _LENS_FILTER and str(device_id).upper() not in _LENS_FILTER:
-        return False
+def _lens_filter_on(device_id):
+    return bool(_LENS_FILTER) and ("ALL" in _LENS_FILTER
+                                   or str(device_id).upper() in _LENS_FILTER)
+
+
+def _frame_corner(coord):
+    """The frame corner a 0-1000 box touches ("TL", "TR", "BL", "BR": two adjacent edges), or
+    None."""
     x, y, w, h = coord
-    top_or_bottom = y <= LENS_EDGE or y + h >= CAMERA_COORD_END - LENS_EDGE
-    side = x <= LENS_EDGE or x + w >= CAMERA_COORD_END - LENS_EDGE
-    return top_or_bottom and side and h >= LENS_MIN_HEIGHT
+    v = "T" if y <= LENS_EDGE else "B" if y + h >= CAMERA_COORD_END - LENS_EDGE else None
+    s = "L" if x <= LENS_EDGE else "R" if x + w >= CAMERA_COORD_END - LENS_EDGE else None
+    return v + s if v and s else None
+
+
+def _on_lens(device_id, object_type, coord):
+    if object_type != "person" or not _lens_filter_on(device_id):
+        return False
+    return _frame_corner(coord) is not None and coord[3] >= LENS_MIN_HEIGHT
+
+
+# A person track that starts in a corner of the frame is held out of the event, as a track
+# outside the zones is, until one of its boxes leaves that corner; then it joins with its
+# history. On AIPORT_LENS_FILTER's cameras. A web on the lens never leaves its corner,
+# whatever its height: in the logs from 2026-10-16 to 10-27 that held all 218 of Camera C's
+# web tracks (24 of them under LENS_MIN_HEIGHT), and one track each on two other cameras.
+# A person who starts in a corner and walks out joins once they do (90% within 3 s).
+def _corner_held(device_id, tr, d):
+    """True while this person track has only been seen in the frame corner it started in."""
+    if tr["objectType"] != "person" or d.get("seeded") or not _lens_filter_on(device_id):
+        return bool(tr.get("corner_hold"))
+    if "corner_hold" not in tr:
+        tr["corner_hold"] = _frame_corner(d["coord"])
+    elif tr["corner_hold"] and _frame_corner(d["coord"]) != tr["corner_hold"]:
+        tr["corner_hold"] = None   # latched: it has left the corner
+        tr["left_corner"] = True
+    return bool(tr["corner_hold"])
 
 
 # A detection counts in a zone listing what it confirms with (a plate rides its vehicle).
@@ -1806,8 +1833,10 @@ def _hold_for_zones(device_id, tracks, joining):
     for tid, tr in tracks.items():
         if tr.get("awaiting_zone") and tr.get("zoned") and tr.get("confirmed", True):
             tr.pop("awaiting_zone")
-            log.info("real motion tick: %s tracker_id=%s entered a zone, joining for deviceID=%s",
-                     tr["objectType"], tid, device_id)
+            log.info("real motion tick: %s tracker_id=%s %s, joining for deviceID=%s",
+                     tr["objectType"], tid,
+                     "left the frame's corner" if tr.pop("left_corner", False)
+                     else "entered a zone", device_id)
             out.append((tid, tr))
             seen.add(tid)
     for tid, tr in joining:
@@ -1818,9 +1847,14 @@ def _hold_for_zones(device_id, tracks, joining):
             seen.add(tid)
         elif not tr.get("awaiting_zone"):
             tr["awaiting_zone"] = True
-            log.info("real motion tick: %s tracker_id=%s outside the zones for its type; tracked, "
-                     "joining once it enters one, for deviceID=%s", tr["objectType"], tid,
-                     device_id)
+            if tr.get("corner_hold"):
+                log.info("real motion tick: %s tracker_id=%s only in the frame's %s corner "
+                         "(AIPORT_LENS_FILTER); tracked, joining once it leaves it, for "
+                         "deviceID=%s", tr["objectType"], tid, tr["corner_hold"], device_id)
+            else:
+                log.info("real motion tick: %s tracker_id=%s outside the zones for its type; "
+                         "tracked, joining once it enters one, for deviceID=%s",
+                         tr["objectType"], tid, device_id)
     return out
 
 
@@ -1834,7 +1868,8 @@ def _merge_extra(tr, d, device_id=None, tracker_id=None):
         tr["zone_ids"] = list(d["zone_ids"])   # the zones it's in now; kept through gaps
         seen = tr.setdefault("zones_seen", [])
         seen.extend(z for z in d["zone_ids"] if z not in seen)
-    if d.get("in_zone", True):
+    held = device_id is not None and _corner_held(device_id, tr, d)
+    if d.get("in_zone", True) and not held:
         tr["zoned"] = True        # latched: it has been in a zone listing its type
     else:
         tr.setdefault("zoned", False)

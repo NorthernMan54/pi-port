@@ -373,6 +373,12 @@ class TestProtectCanvas(Base):
         av._exclude_zones["B"] = [[(900, 200), (1000, 200), (1000, 300), (900, 300)]]
         self.assertFalse(av._is_excluded("B", person))  # covers the head, not the feet
 
+    def test_frame_corner(self):
+        self.assertEqual(av._frame_corner([787, 397, 213, 603]), "BR")
+        self.assertEqual(av._frame_corner([0, 3, 300, 400]), "TL")
+        self.assertIsNone(av._frame_corner([0, 300, 300, 400]))       # a side only
+        self.assertIsNone(av._frame_corner([300, 0, 300, 1000]))      # top and bottom
+
     def test_lens_filter_drops_a_full_height_box_in_the_corner(self):
         # Live 2026-10-23 night: a web on Camera C's lens, [768, 3, 231, 949].
         web = [768, 3, 231, 949]
@@ -679,6 +685,35 @@ class TestCameraEvent(Base):
         leave = next(p for fn, p in self.sent if fn == "EventSmartDetect" and p["edgeType"] == "leave")
         self.assertEqual(list(leave["zonesStatus"]), ["2"])
         self.assertEqual([v["zone"] for v in leave["trackerIDAttrMap"].values()], [[2]])
+
+    def test_a_person_that_never_leaves_a_corner_opens_no_event(self):
+        # Live 2026-10-28 07:21 on Camera C: a web strand lit by the IR, from the bottom-right
+        # corner and 600 tall, under the height the lens filter's box rule needs.
+        from unittest import mock
+        with mock.patch.object(av, "_LENS_FILTER", {"ALL"}):
+            for i in range(30):
+                self.tick(dict(self.PERSON, coord=[787 + i % 2, 397, 213, 603]))
+            for _ in range(40):
+                self.tick()
+        self.assertEqual(self.events(), [])
+
+    def test_a_person_from_a_corner_joins_once_they_leave_it(self):
+        from unittest import mock
+        with mock.patch.object(av, "_LENS_FILTER", {"ALL"}):
+            for x in (0, 0, 0):                                  # bottom-left corner
+                self.tick(dict(self.PERSON, coord=[x, 400, 200, 600]))
+            self.assertEqual(self.events(), [])
+            for x in range(40, 400, 40):                         # walks out of it
+                self.tick(dict(self.PERSON, coord=[x, 380, 200, 600]))
+        self.assertEqual(self.events()[0][:2], ("enter", ["person"]))
+        tracks = av._motion_state["D"]["tracks"]
+        self.assertEqual(len(tracks), 1)                         # the same track throughout
+
+    def test_corners_are_ordinary_without_the_lens_filter(self):
+        from unittest import mock
+        with mock.patch.object(av, "_LENS_FILTER", set()):
+            self.tick(dict(self.PERSON, coord=[787, 397, 213, 603]))
+        self.assertEqual(self.events()[0][:2], ("enter", ["person"]))
 
     def test_leave_names_every_zone_the_person_was_in(self):
         # Live 10:10 on Camera C: a walk from the lower zone into the upper one closed as zone 1 only.

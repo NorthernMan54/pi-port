@@ -495,8 +495,10 @@ open always classify, so a stationary object keeps its track and can close norma
 `AIPORT_LENS_FILTER` drops a person box in a corner of the picture (touching two adjacent
 edges: the top or the bottom, and a side) that spans at least `AIPORT_LENS_MIN_HEIGHT` of its
 height (900 of 1000 by default): something on the lens, such as a spider web, which one night
-gave a camera 218 person events. It takes
-deviceIDs or `all`; unset, it is off.
+gave a camera 218 person events. On the same cameras a person track that starts in a corner
+is held out of the event, as a track outside the zones is, until one of its boxes leaves that
+corner, whatever its height: a web never does, and a person who starts there joins (with their
+track's history) once they walk out. It takes deviceIDs or `all`; unset, it is off.
 
 **Conversion must run on a separate x86_64 build host.** `rknn-toolkit-lite2` is the on-device,
 inference-only API (aarch64-only wheels for Python <= 3.12); it can only run an already-converted

@@ -298,6 +298,13 @@ def resolve_ip(iface, cfg=None, bind_ip=None):
     return _iface_ip(iface) or "0.0.0.0"
 
 
+def advertised_ip(ip):
+    """The IP to tell Protect, when that isn't the one bound: AIPORT_ADVERTISE_IP, for a
+    container behind NAT whose :443 is published on a host address (compose.macos.yaml);
+    otherwise `ip`. Only what's reported changes, never what's bound."""
+    return (os.environ.get("AIPORT_ADVERTISE_IP") or "").strip() or ip
+
+
 def netmask_to_prefix(netmask):
     """Dotted-quad netmask -> CIDR prefix length (255.255.255.0 -> 24)."""
     if not netmask:

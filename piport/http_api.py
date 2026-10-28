@@ -321,7 +321,7 @@ def main():
 
     ensure_cert()
 
-    ip = config.resolve_ip(args.iface, cfg, args.bind_ip)
+    ip = config.advertised_ip(config.resolve_ip(args.iface, cfg, args.bind_ip))
     bind_ip = args.bind_ip
     # (Not on macOS without root: only the wildcard address may be bound to :443 there.)
     if (bind_ip == "0.0.0.0" and str(cfg["mode"]).lower() == "static" and cfg.get("ip")

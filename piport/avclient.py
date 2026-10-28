@@ -4721,7 +4721,7 @@ def main():
         hoststats.start()
 
     mac_nosep = config.resolve_mac(args.iface, args.mac, cfg).lower()
-    ip = config.resolve_ip(args.iface, cfg, args.bind_ip)
+    ip = config.advertised_ip(config.resolve_ip(args.iface, cfg, args.bind_ip))
 
     device_info = {
         "mac_nosep": mac_nosep,

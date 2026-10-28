@@ -141,7 +141,7 @@ def main():
         STATE_DIR = args.state_dir
 
     mac = bytes.fromhex(config.resolve_mac(args.iface, args.mac, cfg))
-    ip = config.resolve_ip(args.iface, cfg, args.bind_ip)
+    ip = config.advertised_ip(config.resolve_ip(args.iface, cfg, args.bind_ip))
     ip_bytes = socket.inet_aton(ip)
     start = time.time()
 

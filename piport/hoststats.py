@@ -151,14 +151,27 @@ def parse_powermetrics(data):
     return out
 
 
+# powermetrics needs root. Not running as root (the launchd agent runs as the user), it's run
+# through `sudo -n`, which works only with a sudoers rule for it (see scripts/macos_launchd.sh);
+# without one the GPU and power figures are left out from the first failure on.
+_powermetrics_denied = []
+
+
 def _sample_macos():
-    if os.geteuid() != 0 or not os.path.exists(POWERMETRICS):
+    if _powermetrics_denied or not os.path.exists(POWERMETRICS):
         return {}
+    cmd = [POWERMETRICS, "-n", "1", "-i", "1000", "-f", "plist",
+           "-s", "cpu_power,gpu_power,ane_power"]
+    if os.geteuid() != 0:
+        cmd = ["/usr/bin/sudo", "-n"] + cmd
     try:
-        data = subprocess.run([POWERMETRICS, "-n", "1", "-i", "1000", "-f", "plist",
-                               "-s", "cpu_power,gpu_power,ane_power"],
-                              capture_output=True, timeout=20).stdout
-        return parse_powermetrics(data)
+        proc = subprocess.run(cmd, capture_output=True, timeout=20)
+        if proc.returncode != 0 and os.geteuid() != 0:
+            _powermetrics_denied.append(True)
+            log.info("host stats: powermetrics needs root and sudo -n wasn't allowed; "
+                     "GPU and power figures are off")
+            return {}
+        return parse_powermetrics(proc.stdout)
     except (OSError, subprocess.SubprocessError, ValueError, plistlib.InvalidFileException):
         log.debug("powermetrics sample failed", exc_info=True)
         return {}

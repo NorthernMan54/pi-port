@@ -323,7 +323,9 @@ def main():
 
     ip = config.resolve_ip(args.iface, cfg, args.bind_ip)
     bind_ip = args.bind_ip
-    if bind_ip == "0.0.0.0" and str(cfg["mode"]).lower() == "static" and cfg.get("ip"):
+    # (Not on macOS without root: only the wildcard address may be bound to :443 there.)
+    if (bind_ip == "0.0.0.0" and str(cfg["mode"]).lower() == "static" and cfg.get("ip")
+            and not (sys.platform == "darwin" and os.geteuid() != 0)):
         bind_ip = cfg["ip"]
 
     server = Server((bind_ip, args.port), Handler)

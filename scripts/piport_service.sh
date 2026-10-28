@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Run pi-port on macOS and restart it without a new terminal or password.
 #
-#   cd ~/Code/pi-port && sudo scripts/piport_service.sh
+#   scripts/macos_launchd.sh install     as a launchd agent under your account (recommended)
+#   cd ~/Code/pi-port && scripts/piport_service.sh     in a terminal
+#
+# No sudo: macOS lets any user bind ports below 1024. (Run with sudo it still works, as before.)
 #
 # Settings come from ~/.piport.env (see scripts/piport.env.example): AIPORT_* settings and
 # PIPORT_* identity, one KEY=value per line, re-read on every restart. Only those keys are
@@ -11,19 +14,23 @@
 #   touch ~/.piport-restart     restart pi-port (new code, new settings), no sudo needed
 #   Ctrl-C in this terminal     stop it
 #
-# If pi-port exits on its own it is restarted after 5 s. Output goes to the terminal and
-# ~/piport.log. caffeinate keeps the Mac awake while this runs.
+# If pi-port exits on its own it is restarted after 5 s. Output goes to ~/piport.log, rotated
+# by size (PIPORT_LOG_MAX_MB, 50 by default; PIPORT_LOG_KEEP old files, 5), and to the
+# terminal when there is one. caffeinate keeps the Mac awake while this runs.
 set -u
 
-if [ "$(id -u)" -ne 0 ] && [ -z "${PIPORT_SERVICE_TEST:-}" ]; then
+if [ "$(uname)" != Darwin ] && [ "$(id -u)" -ne 0 ] && [ -z "${PIPORT_SERVICE_TEST:-}" ]; then
     echo "run with sudo: it binds port 443 on the interface's address" >&2
     exit 1
 fi
-USER_HOME=$(eval echo "~${SUDO_USER:-$USER}")
+USER_HOME=$(eval echo "~${SUDO_USER:-${USER:-$(id -un)}}")
 REPO=${PIPORT_SERVICE_TEST:-$(cd "$(dirname "$0")/.." && pwd)}  # the test points it at a stub
 ENV_FILE=${PIPORT_ENV_FILE:-$USER_HOME/.piport.env}
 TRIGGER=${PIPORT_RESTART_FILE:-$USER_HOME/.piport-restart}
 LOG=${PIPORT_LOG:-$USER_HOME/piport.log}
+# pi-port's process group, so a wrapper killed outright (yesterday's app restart) doesn't leave
+# an orphan holding :443 that the next start can't get past.
+PIDFILE=${PIPORT_PIDFILE:-$USER_HOME/.piport-service.pid}
 
 load_settings() {
     # Clear the previous run's settings so a removed line really goes away.
@@ -72,9 +79,30 @@ stop_child() {
     fi
     child=""
 }
-trap 'echo "piport_service: stopping"; stop_child; exit 0' INT TERM
+stop_stale() {
+    # A pi-port left by an earlier wrapper that was killed outright: it has its own process
+    # group, so it outlives the wrapper and keeps :443.
+    local old
+    old=$(cat "$PIDFILE" 2>/dev/null) || return 0
+    if [ -n "$old" ] && ps -p "$old" -o command= 2>/dev/null | grep -q "run_all.py"; then
+        echo "piport_service: stopping pi-port (pid $old) left running by an earlier start"
+        child=$old
+        stop_child
+    fi
+    rm -f "$PIDFILE"
+}
+trap 'echo "piport_service: stopping"; stop_child; rm -f "$PIDFILE"; exit 0' INT TERM
 
-exec > >(trap '' INT; tee -a "$LOG") 2>&1   # tee outlives Ctrl-C to log the stop
+# One writer rotates the log; it ignores Ctrl-C/TERM so the stop is still logged. Its sizes are
+# read once, here (a change needs a full restart, not ~/.piport-restart).
+env_number() {
+    local v
+    v=$(sed -n "s/^[[:space:]]*$1=//p" "$ENV_FILE" 2>/dev/null | tail -1 | sed 's/[[:space:]#].*//')
+    [[ "$v" =~ ^[0-9]+(\.[0-9]+)?$ ]] && echo "$v" || echo "$2"
+}
+exec > >("$REPO/venv/bin/python" "$(dirname "$0")/log_writer.py" "$LOG" \
+             --max-mb "${PIPORT_LOG_MAX_MB:-$(env_number PIPORT_LOG_MAX_MB 50)}" \
+             --keep "${PIPORT_LOG_KEEP:-$(env_number PIPORT_LOG_KEEP 5)}") 2>&1
 [ -n "${PIPORT_SERVICE_TEST:-}" ] || caffeinate -is -w $$ &
 
 while true; do
@@ -82,6 +110,7 @@ while true; do
         sleep 5
         continue
     fi
+    stop_stale
     seen=$(mtime "$TRIGGER")
     echo "piport_service: starting pi-port at $(date '+%F %T') (settings from $ENV_FILE)"
     # A background job may start with SIGINT ignored, and Python then never raises
@@ -97,6 +126,7 @@ os.execv(sys.argv[1], sys.argv[1:])' "$REPO/venv/bin/python" "$REPO/piport/run_a
         --device-id "$PIPORT_DEVICE_ID" < /dev/null &   # a background job reading the
     # terminal is stopped (SIGTTIN): ffmpeg and ffprobe read stdin
     child=$!
+    echo "$child" > "$PIDFILE"
     set +m
     while kill -0 "$child" 2>/dev/null; do
         sleep 1

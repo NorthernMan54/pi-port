@@ -155,9 +155,15 @@ Identity and the console endpoint default from `aiport.cfg` -- edit it (or pass 
 before the first run. Then adopt "AI Port" from the Protect UI like a normal camera, and pair a
 real camera to it from the camera's own settings.
 
-On macOS, `sudo scripts/piport_service.sh` runs it from settings in `~/.piport.env`
-(`scripts/piport.env.example`) and restarts it on `touch ~/.piport-restart`, so a code or
-settings change needs neither a new terminal nor the password.
+On macOS, `scripts/macos_launchd.sh install` runs it as a launchd agent under your own account
+(no sudo: macOS lets any user bind ports below 1024). It starts at login and is restarted if it
+exits, from settings in `~/.piport.env` (`scripts/piport.env.example`); `touch ~/.piport-restart`
+(or `scripts/macos_launchd.sh restart`) picks up a code or settings change. Output goes to
+`~/piport.log`, rotated at `PIPORT_LOG_MAX_MB` (50) with `PIPORT_LOG_KEEP` (5) old files kept.
+`scripts/piport_service.sh` is what the agent runs, and can also be run in a terminal. Files an
+earlier `sudo` run left owned by root have to be handed back first (install prints the `chown`),
+and the host stats line's GPU and power figures need a sudoers rule for `powermetrics` (in the
+script's header).
 
 ## Object detection (NPU / CPU / Core ML / Edge TPU)
 

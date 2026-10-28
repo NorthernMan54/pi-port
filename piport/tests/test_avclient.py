@@ -2030,7 +2030,6 @@ class TestEventDedupe(Base):
     def setUp(self):
         super().setUp()
         av._last_status_sent.clear()
-        av._feature_flags_sent.clear()
 
     def test_status_event_sent_only_on_change(self):
         av._send_status_event(None, "D", True, True, True, True)
@@ -2040,13 +2039,13 @@ class TestEventDedupe(Base):
         self.assertEqual(len(self.sent), 2)
         self.assertEqual(self.sent[-1][0], "EventAIPortStatus")
 
-    def test_feature_flags_sent_once_per_connection(self):
+    def test_feature_flags_resent_on_every_stream_start(self):
+        # Protect re-applies the camera's smart-detect capability on each event;
+        # suppressing repeats left a re-paired camera motion-only (lab, 2026-10-26).
         av._send_feature_flags_event(None, "D")
-        av._send_feature_flags_event(None, "D")
-        self.assertEqual(len(self.sent), 1)
-        av._feature_flags_sent.clear()  # simulates the next controller connection
         av._send_feature_flags_event(None, "D")
         self.assertEqual(len(self.sent), 2)
+        self.assertEqual([m[0] for m in self.sent], ["EventFeatureFlagsUpdated"] * 2)
 
 
 class TestStreamClocks(Base):

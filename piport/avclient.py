@@ -4005,10 +4005,12 @@ def _send_line_detect_event(ws, device_id, line, edge_type, event_id, direction,
     send_msg(ws, "EventSmartDetect", payload, response_expected=False)
 
 
-# Dedupe the idempotent capability/status events: Protect re-applies smart-detect
-# settings on every resend, and a G3 camera's "Service Unavailable" reply loops.
+# Dedupe the idempotent status event: a unchanged flood of EventAIPortStatus is
+# pointless, and a G3 camera's "Service Unavailable" reply loops.
+# EventFeatureFlagsUpdated is deliberately NOT deduped across stream starts: it is
+# what makes Protect re-apply smart-detect capability to the paired camera, and
+# the console can lose that (re-pair, DB restore) without telling us.
 _last_status_sent = {}
-_feature_flags_sent = set()
 
 
 # EventAIPortStatus follows each paired camera's health: isStreaming once its stream has
@@ -4129,9 +4131,11 @@ def _send_status_event(ws, device_id, plug, streaming, smart_ready, audio_ready)
 def _send_feature_flags_event(ws, device_id):
     # Must mirror the AI Port's real key names/values: the controller WHOLESALE
     # replaces the paired camera's flags, so an omitted key wipes the real value.
-    if device_id in _feature_flags_sent:
-        return
-    _feature_flags_sent.add(device_id)
+    # Sent on every stream start: Protect re-applies ChangeSmartMotionSettings /
+    # ChangeSmartDetectSettings for the camera on receipt (service.log), which is
+    # how the camera row gets smartDetectTypes and the UI its Detection Zone.
+    # A once-per-connection guard left a re-paired camera motion-only until the
+    # next reconnect (observed on the lab UNVR, 2026-10-26).
     send_msg(ws, "EventFeatureFlagsUpdated", {
         "deviceID": device_id,
         "smartDetect": _smart_detect_features(),
@@ -4575,7 +4579,6 @@ def run(host, port, device_info, token=None):
     # New controller connection = fresh state: forget what this session already
     # reported so the controller gets one full status/capability snapshot.
     _last_status_sent.clear()
-    _feature_flags_sent.clear()
     url = f"wss://{host}:{port}/camera/1.0/ws"
     if token:
         url += f"?token={token}"

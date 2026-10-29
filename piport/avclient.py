@@ -625,6 +625,7 @@ def _tmp_dir():
     AI Ports sharing a host never touch each other's files); emptied at startup with the
     rest of that dir (_reset_stream_dir). Made on
     use: macOS's periodic /tmp cleanup can remove it while pi-port runs."""
+    config.make_stream_dir(_STREAM_DIR)
     path = os.path.join(_STREAM_DIR, "tmp")
     os.makedirs(path, exist_ok=True)
     return path
@@ -764,7 +765,7 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
     """Pull from Protect's relay (ip/port/uri), or from `url` directly -- an
     ONVIF camera's own RTSP URL."""
     _stop_stream(device_id)
-    os.makedirs(_STREAM_DIR, exist_ok=True)
+    config.make_stream_dir(_STREAM_DIR)
     _stream_dims[device_id] = (width or DETECT_IMG_SIZE, height or DETECT_IMG_SIZE)
     direct = bool(url)
     url = url or f"rtsp://{ip}:{port}/{uri}"

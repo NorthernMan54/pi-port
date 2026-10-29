@@ -90,6 +90,17 @@ class TestServiceScript(unittest.TestCase):
             time.sleep(0.1)
         self.fail("timed out waiting for %d %r line(s); got %s" % (count, prefix, self.lines("")))
 
+    def test_bind_ip_and_the_instance_state_dir(self):
+        # PIPORT_STATE_DIR left out: the instance's own state/ under ~/.pi-port.
+        with open(self.env_file, "w") as f:
+            f.write("PIPORT_IFACE=en0\nPIPORT_MAC=AA\nPIPORT_DEVICE_ID=dev\n"
+                    "PIPORT_BIND_IP=192.0.2.9\n")
+        self.env["PIPORT_INSTANCE"] = "test-instance"
+        self.start()
+        args = " ".join(self.wait_for("start", 1)[0])
+        self.assertIn("--bind-ip 192.0.2.9", args)
+        self.assertIn("/.pi-port/test-instance/state ", args + " ")
+
     def test_restart_and_stop(self):
         self.start()
         first = self.wait_for("start", 1)[0]

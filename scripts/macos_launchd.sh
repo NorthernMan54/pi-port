@@ -1,51 +1,129 @@
 #!/bin/bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Run pi-port as a launchd agent under your own account on macOS: started at login, restarted if
-# it exits, logging to ~/piport.log with rotation (scripts/piport_service.sh does the work).
+# Run pi-port under launchd on macOS: started at boot or login, restarted if it exits, logging
+# with rotation (scripts/piport_service.sh does the work). Each instance has its own folder,
+# ~/.pi-port/$PIPORT_INSTANCE/ ("native" when not set; see scripts/piport_paths.sh), and its
+# own launchd job, local.piport.<instance>.
 #
-#   scripts/macos_launchd.sh install     write ~/Library/LaunchAgents/local.piport.plist, start it
-#   scripts/macos_launchd.sh restart     restart pi-port (touch ~/.piport-restart also works)
+#   scripts/macos_launchd.sh install     install it as a launchd agent under your account, start it
+#   scripts/macos_launchd.sh restart     restart pi-port (touching its restart file also works)
 #   scripts/macos_launchd.sh stop        stop it until the next start/install or login
 #   scripts/macos_launchd.sh start       start it again
 #   scripts/macos_launchd.sh status      launchd's view and the last log lines
-#   scripts/macos_launchd.sh logs        follow ~/piport.log
+#   scripts/macos_launchd.sh logs        follow its logs/piport.log
 #   scripts/macos_launchd.sh uninstall   stop it and remove the plist
 #
-# No sudo: macOS lets any user bind ports below 1024. Files an earlier `sudo` run left owned by
-# root have to be handed back first; install says which and how. The host stats line's GPU and
-# power figures need powermetrics as root: allow just that command with
+#   sudo PIPORT_INSTANCE=onvif scripts/macos_launchd.sh install --daemon
+#
+# An agent needs no sudo: macOS lets any user bind ports below 1024. An instance that pulls
+# cameras straight from the LAN (ONVIF) has to be a root daemon instead (--daemon): macOS's
+# Local Network privacy blocks an agent from LAN devices other than the gateway. Give it its own
+# address in piport.env (PIPORT_BIND_IP, and AIPORT_ADVERTISE_IP for Protect); the daemon adds
+# that address to PIPORT_IFACE at every start. After install, the daemon's start, stop, restart
+# and uninstall need sudo too; status and logs don't.
+#
+# Installing "native" for the first time moves the old ~/.piport.env, ~/.piport-state and
+# ~/piport.log* into ~/.pi-port/native/ and replaces the old local.piport agent.
+#
+# Files an earlier `sudo` run left owned by root have to be handed back before an agent install;
+# install says which and how. The host stats line's GPU and power figures need powermetrics as
+# root: allow just that command with
 #   echo "$USER ALL=(root) NOPASSWD: /usr/bin/powermetrics" | sudo tee /etc/sudoers.d/piport-powermetrics
 #   sudo chmod 440 /etc/sudoers.d/piport-powermetrics && sudo visudo -cf /etc/sudoers.d/piport-powermetrics
 set -u
 
-LABEL=${PIPORT_LAUNCHD_LABEL:-local.piport}
-REPO=$(cd "$(dirname "$0")/.." && pwd)
-PLIST=$HOME/Library/LaunchAgents/$LABEL.plist
-DOMAIN=gui/$(id -u)
-ENV_FILE=${PIPORT_ENV_FILE:-$HOME/.piport.env}
-LOG=${PIPORT_LOG:-$HOME/piport.log}
-LAUNCHD_LOG=$HOME/Library/Logs/piport-launchd.log   # the wrapper's own errors only
-
 die() { echo "macos_launchd: $*" >&2; exit 1; }
+[ "$(uname)" = Darwin ] || die "this is for macOS"
 
-loaded() { launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; }
+CMD=${1:-}
+DAEMON=""
+[ "${2:-}" = --daemon ] && DAEMON=1
+
+if [ "$(id -u)" -eq 0 ]; then
+    [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ] \
+        || die "run it with sudo from your own account, so it knows whose home folder to use"
+    USER_NAME=$SUDO_USER
+else
+    USER_NAME=$(id -un)
+fi
+USER_ID=$(id -u "$USER_NAME")
+USER_HOME=$(eval echo "~$USER_NAME")
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+. "$REPO/scripts/piport_paths.sh"
+
+LABEL=${PIPORT_LAUNCHD_LABEL:-local.piport.$INSTANCE}
+OLD_LABEL=local.piport   # the single agent from before ~/.pi-port
+DAEMON_PLIST=/Library/LaunchDaemons/$LABEL.plist
+[ -f "$DAEMON_PLIST" ] && DAEMON=1
+if [ -n "$DAEMON" ]; then
+    PLIST=$DAEMON_PLIST
+    DOMAIN=system
+else
+    PLIST=$USER_HOME/Library/LaunchAgents/$LABEL.plist
+    DOMAIN=gui/$USER_ID
+fi
+LAUNCHD_LOG=$BASE/logs/launchd.log   # the wrapper's own errors only
+
+case "$CMD" in
+    install|uninstall|start|stop|restart)
+        if [ -n "$DAEMON" ]; then
+            [ "$(id -u)" -eq 0 ] || die "$LABEL is a root daemon: run this with sudo"
+        else
+            [ "$(id -u)" -ne 0 ] \
+                || die "run it as yourself, not with sudo: the agent runs under your account (add --daemon for a root daemon)"
+        fi
+        ;;
+esac
+
+loaded() { launchctl print "$DOMAIN/$1" >/dev/null 2>&1; }
 
 state_dir() {
-    sed -n 's/^[[:space:]]*PIPORT_STATE_DIR=//p' "$ENV_FILE" 2>/dev/null | tail -1 \
-        | sed 's/[[:space:]]*#.*//;s/^"//;s/"$//'
+    local dir
+    dir=$(sed -n 's/^[[:space:]]*PIPORT_STATE_DIR=//p' "$ENV_FILE" 2>/dev/null | tail -1 \
+        | sed 's/[[:space:]]*#.*//;s/^"//;s/"$//')
+    echo "${dir:-$DEFAULT_STATE_DIR}"
+}
+
+migrate_legacy() {
+    # The single instance from before ~/.pi-port becomes "native", with the same identity.
+    [ -n "$LEGACY" ] && [ -z "$DAEMON" ] || return 0
+    local old_plist=$USER_HOME/Library/LaunchAgents/$OLD_LABEL.plist
+    if loaded "$OLD_LABEL"; then
+        echo "stopping the old $OLD_LABEL agent"
+        launchctl bootout "$DOMAIN/$OLD_LABEL" 2>/dev/null
+    fi
+    rm -f "$old_plist"
+    check_not_running
+    echo "moving $LEGACY_ENV_FILE and the files it uses into $BASE/"
+    mkdir -p "$BASE/logs" || die "can't create $BASE"
+    local old_state
+    old_state=$(state_dir)
+    if [ "$old_state" = "$LEGACY_STATE_DIR" ] && [ -d "$old_state" ]; then
+        [ -e "$BASE/state" ] && die "$BASE/state already exists; move $old_state by hand"
+        mv "$old_state" "$BASE/state" || die "couldn't move $old_state"
+        # Its other settings may point inside it too (AIPORT_FACES_DIR).
+        sed -i '' "s#$LEGACY_STATE_DIR#$BASE/state#g" "$LEGACY_ENV_FILE"
+    fi
+    mv "$LEGACY_ENV_FILE" "$BASE/piport.env" || die "couldn't move $LEGACY_ENV_FILE"
+    for f in "$LEGACY_LOG" "$LEGACY_LOG".*; do
+        [ -e "$f" ] && mv "$f" "$BASE/logs/$(basename "$f")"
+    done
+    rm -f "$LEGACY_RESTART_FILE" "$LEGACY_PIDFILE" "$USER_HOME/Library/Logs/piport-launchd.log"
+    . "$REPO/scripts/piport_paths.sh"   # now the new paths
 }
 
 check_ownership() {
-    # Everything pi-port writes must be yours: its state dir, the stream dir under /tmp, the
-    # repo (compiled files, the Apple helper build) and the log.
-    local paths=("$REPO" "$LOG") dir
-    dir=$(state_dir)
-    [ -n "$dir" ] && paths+=("$dir")
-    [ -e /tmp/aiport-streams ] && paths+=("/private/tmp/aiport-streams")
+    # Everything an agent writes must be yours: its state dir, the stream dir under /tmp, the
+    # repo (compiled files, the Apple helper build) and the log. A daemon is root.
+    [ -z "$DAEMON" ] || return 0
+    # The stream dir is this instance's own under the shared /tmp/aiport-streams
+    # (config.stream_dir: a hash of the state dir's path).
+    local paths=("$REPO" "$LOG" "$(state_dir)")
+    paths+=("/private/tmp/aiport-streams/$(printf %s "$(state_dir)" | shasum | cut -c1-12)")
     local bad=()
     for p in "${paths[@]}"; do
         [ -e "$p" ] || continue
-        if [ -n "$(find "$p" ! -user "$(id -u)" -print -quit 2>/dev/null)" ]; then
+        if [ -n "$(find "$p" ! -user "$USER_ID" -print -quit 2>/dev/null)" ]; then
             bad+=("$p")
         fi
     done
@@ -53,23 +131,34 @@ check_ownership() {
         echo "These still hold files owned by root from an earlier sudo run:" >&2
         printf '  %s\n' "${bad[@]}" >&2
         echo "Hand them back, then run install again:" >&2
-        echo "  sudo chown -R $(id -un):staff$(printf ' "%s"' "${bad[@]}")" >&2
+        echo "  sudo chown -R $USER_NAME:staff$(printf ' "%s"' "${bad[@]}")" >&2
         exit 1
     fi
 }
 
 check_not_running() {
+    # This instance only (its state dir), so another instance can keep running.
     local pids
-    pids=$(pgrep -f "$REPO/piport/run_all.py" || true)
-    if [ -n "$pids" ] && ! loaded; then
-        echo "pi-port is already running outside launchd (pid $(echo $pids | tr ' ' ','))." >&2
-        echo "Stop it first (Ctrl-C in its terminal, or: sudo pkill -INT -f piport/run_all.py)." >&2
+    pids=$(pgrep -f "piport/run_all.py .*--state-dir $(state_dir)( |$)" || true)
+    if [ -n "$pids" ] && ! loaded "$LABEL"; then
+        echo "$INSTANCE is already running outside launchd (pid $(echo $pids | tr ' ' ','))." >&2
+        echo "Stop it first (Ctrl-C in its terminal, or: sudo kill -INT $(echo $pids | tr ',' ' '))." >&2
         exit 1
     fi
 }
 
 write_plist() {
     mkdir -p "$(dirname "$PLIST")" "$(dirname "$LAUNCHD_LOG")"
+    local extra=""
+    if [ -n "$DAEMON" ]; then
+        # SUDO_USER/SUDO_UID: the wrapper finds your home folder from them, and the Apple
+        # vehicle model's helper runs as you. No .pyc files: root's would block the agent's
+        # ownership check on the shared repo.
+        extra="
+        <key>SUDO_USER</key><string>$USER_NAME</string>
+        <key>SUDO_UID</key><string>$USER_ID</string>
+        <key>PYTHONDONTWRITEBYTECODE</key><string>1</string>"
+    fi
     cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -86,6 +175,7 @@ write_plist() {
     <dict>
         <!-- ffmpeg and ffprobe come from Homebrew; launchd's own PATH doesn't have it. -->
         <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PIPORT_INSTANCE</key><string>$INSTANCE</string>$extra
     </dict>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
@@ -100,15 +190,22 @@ write_plist() {
 </plist>
 EOF
     plutil -lint "$PLIST" >/dev/null || die "wrote an invalid $PLIST"
+    if [ -n "$DAEMON" ]; then
+        chown root:wheel "$PLIST" && chmod 644 "$PLIST"
+        # The folder stays yours: edit piport.env and touch restart without sudo. What the
+        # daemon writes inside (state, logs) is root's but readable.
+        chown "$USER_NAME:staff" "$USER_HOME/.pi-port" "$BASE"
+    fi
 }
 
 start() {
-    loaded || launchctl bootstrap "$DOMAIN" "$PLIST" || die "launchctl bootstrap failed"
+    loaded "$LABEL" || launchctl bootstrap "$DOMAIN" "$PLIST" || die "launchctl bootstrap failed"
     launchctl enable "$DOMAIN/$LABEL"
 }
 
 status() {
-    if loaded; then
+    echo "$LABEL ($([ -n "$DAEMON" ] && echo "root daemon" || echo agent), files in $BASE):"
+    if loaded "$LABEL"; then
         launchctl print "$DOMAIN/$LABEL" | grep -E "^\s*(state|pid|last exit code|runs) =" \
             | sed 's/^[[:space:]]*/  /'
     else
@@ -118,26 +215,28 @@ status() {
     tail -n 5 "$LOG" 2>/dev/null | cut -c1-200 | sed 's/^/  /'
 }
 
-[ "$(uname)" = Darwin ] || die "this is for macOS"
-[ "$(id -u)" -ne 0 ] || die "run it as yourself, not with sudo: the agent runs under your account"
-
-case "${1:-}" in
+case "$CMD" in
     install)
+        migrate_legacy
         [ -r "$ENV_FILE" ] || die "no $ENV_FILE (copy scripts/piport.env.example)"
         [ -x "$REPO/venv/bin/python" ] || die "no venv at $REPO/venv"
+        if [ -n "$DAEMON" ]; then
+            grep -qE '^[[:space:]]*PIPORT_BIND_IP=[0-9]' "$ENV_FILE" \
+                || die "a daemon needs its own address: set PIPORT_BIND_IP in $ENV_FILE"
+        fi
         check_ownership
         check_not_running
-        loaded && launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null
+        loaded "$LABEL" && launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null
         write_plist
         start
-        echo "installed $PLIST; pi-port starts now and at every login"
+        echo "installed $PLIST; pi-port starts now and at every $([ -n "$DAEMON" ] && echo boot || echo login)"
         sleep 3
         status
         ;;
     uninstall)
-        loaded && launchctl bootout "$DOMAIN/$LABEL"
+        loaded "$LABEL" && launchctl bootout "$DOMAIN/$LABEL"
         rm -f "$PLIST"
-        echo "removed $LABEL"
+        echo "removed $LABEL (its files stay in $BASE)"
         ;;
     start)
         [ -f "$PLIST" ] || die "not installed (run: $0 install)"
@@ -145,18 +244,18 @@ case "${1:-}" in
         status
         ;;
     stop)
-        loaded && launchctl bootout "$DOMAIN/$LABEL"
-        echo "stopped $LABEL (starts again at login, or with: $0 start)"
+        loaded "$LABEL" && launchctl bootout "$DOMAIN/$LABEL"
+        echo "stopped $LABEL (starts again at $([ -n "$DAEMON" ] && echo boot || echo login), or with: $0 start)"
         ;;
     restart)
-        loaded || die "not running (run: $0 start)"
+        loaded "$LABEL" || die "not running (run: $0 start)"
         launchctl kickstart -k "$DOMAIN/$LABEL"
         status
         ;;
     status) status ;;
     logs) exec tail -n 50 -F "$LOG" ;;
     *)
-        sed -n '3,13p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac

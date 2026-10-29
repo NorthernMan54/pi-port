@@ -21,7 +21,13 @@ import subprocess
 import sys
 from datetime import datetime
 
-LOG = os.path.expanduser(os.environ.get("PIPORT_LOG", "~/piport.log"))
+# The instance's log (PIPORT_INSTANCE, "native" if not set; scripts/piport_paths.sh), or the
+# one in the home folder from before ~/.pi-port.
+_INSTANCE_LOG = os.path.expanduser(
+    f"~/.pi-port/{os.environ.get('PIPORT_INSTANCE', 'native')}/logs/piport.log")
+LOG = os.path.expanduser(os.environ.get("PIPORT_LOG") or (
+    _INSTANCE_LOG if os.path.exists(_INSTANCE_LOG) or "PIPORT_INSTANCE" in os.environ
+    else "~/piport.log"))
 OUT_DIR = os.path.expanduser(os.environ.get("PIPORT_CLIPS", "~/piport-clips"))
 
 _PULL = re.compile(r"starting merged RTSP pull for deviceID=(\w+): (rtsp://\S+)")

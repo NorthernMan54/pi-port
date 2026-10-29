@@ -15,7 +15,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 USER_HOME="$(eval echo "~${SUDO_USER:-$USER}")"
-STATE_DIR="${PIPORT_STATE_DIR:-$USER_HOME/.piport-state}"
+. "$(dirname "$0")/piport_paths.sh"   # PIPORT_INSTANCE picks the instance; "native" if not set
+STATE_DIR="${PIPORT_STATE_DIR:-$DEFAULT_STATE_DIR}"
 
 usage() { sed -n '5,13p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 [ $# -ge 2 ] || usage

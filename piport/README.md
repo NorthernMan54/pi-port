@@ -157,13 +157,22 @@ real camera to it from the camera's own settings.
 
 On macOS, `scripts/macos_launchd.sh install` runs it as a launchd agent under your own account
 (no sudo: macOS lets any user bind ports below 1024). It starts at login and is restarted if it
-exits, from settings in `~/.piport.env` (`scripts/piport.env.example`); `touch ~/.piport-restart`
-(or `scripts/macos_launchd.sh restart`) picks up a code or settings change. Output goes to
-`~/piport.log`, rotated at `PIPORT_LOG_MAX_MB` (50) with `PIPORT_LOG_KEEP` (5) old files kept.
-`scripts/piport_service.sh` is what the agent runs, and can also be run in a terminal. Files an
-earlier `sudo` run left owned by root have to be handed back first (install prints the `chown`),
-and the host stats line's GPU and power figures need a sudoers rule for `powermetrics` (in the
-script's header).
+exits. Each instance keeps its files in `~/.pi-port/<instance>/` (`PIPORT_INSTANCE`, `native`
+when not set): settings in `piport.env` (`scripts/piport.env.example`), `state/`, and
+`logs/piport.log`, rotated at `PIPORT_LOG_MAX_MB` (50) with `PIPORT_LOG_KEEP` (5) old files
+kept. Touching its `restart` file (or `scripts/macos_launchd.sh restart`) picks up a code or
+settings change. The first `native` install moves the old `~/.piport.env`, `~/.piport-state`
+and `~/piport.log` there. `scripts/piport_service.sh` is what the agent runs, and can also be
+run in a terminal. Files an earlier `sudo` run left owned by root have to be handed back first
+(install prints the `chown`), and the host stats line's GPU and power figures need a sudoers
+rule for `powermetrics` (in the script's header).
+
+A second instance can run beside it on its own address, MAC and device ID. One that pulls
+ONVIF cameras straight from the LAN has to be a root daemon, because macOS's Local Network
+privacy blocks an agent from LAN devices other than the gateway:
+`sudo PIPORT_INSTANCE=onvif scripts/macos_launchd.sh install --daemon`, with `PIPORT_BIND_IP`
+and `AIPORT_ADVERTISE_IP` set in `~/.pi-port/onvif/piport.env`. It adds that address to the
+interface at every start, so the alias comes back after a reboot.
 
 ## Object detection (NPU / CPU / Core ML / Edge TPU)
 

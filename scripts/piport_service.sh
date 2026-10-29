@@ -7,15 +7,17 @@
 #
 # No sudo: macOS lets any user bind ports below 1024. (Run with sudo it still works, as before.)
 #
-# Settings come from ~/.piport.env (see scripts/piport.env.example): AIPORT_* settings and
-# PIPORT_* identity, one KEY=value per line, re-read on every restart. Only those keys are
-# taken; the file is never run as a script.
+# Each instance's files are in ~/.pi-port/$PIPORT_INSTANCE/ ("native" when not set; see
+# scripts/piport_paths.sh). Settings come from its piport.env (see scripts/piport.env.example):
+# AIPORT_* settings and PIPORT_* identity, one KEY=value per line, re-read on every restart.
+# Only those keys are taken; the file is never run as a script. PIPORT_BIND_IP binds :443 and
+# :10001 to that address only, so several instances can share a Mac.
 #
-#   touch ~/.piport-restart     restart pi-port (new code, new settings), no sudo needed
-#   Ctrl-C in this terminal     stop it
+#   touch ~/.pi-port/native/restart     restart pi-port (new code, new settings), no sudo needed
+#   Ctrl-C in this terminal             stop it
 #
-# If pi-port exits on its own it is restarted after 5 s. Output goes to ~/piport.log, rotated
-# by size (PIPORT_LOG_MAX_MB, 50 by default; PIPORT_LOG_KEEP old files, 5), and to the
+# If pi-port exits on its own it is restarted after 5 s. Output goes to the instance's
+# logs/piport.log, rotated by size (PIPORT_LOG_MAX_MB, 50 by default; PIPORT_LOG_KEEP old files, 5), and to the
 # terminal when there is one. caffeinate keeps the Mac awake while this runs.
 set -u
 
@@ -25,18 +27,18 @@ if [ "$(uname)" != Darwin ] && [ "$(id -u)" -ne 0 ] && [ -z "${PIPORT_SERVICE_TE
 fi
 USER_HOME=$(eval echo "~${SUDO_USER:-${USER:-$(id -un)}}")
 REPO=${PIPORT_SERVICE_TEST:-$(cd "$(dirname "$0")/.." && pwd)}  # the test points it at a stub
-ENV_FILE=${PIPORT_ENV_FILE:-$USER_HOME/.piport.env}
-TRIGGER=${PIPORT_RESTART_FILE:-$USER_HOME/.piport-restart}
-LOG=${PIPORT_LOG:-$USER_HOME/piport.log}
-# pi-port's process group, so a wrapper killed outright (yesterday's app restart) doesn't leave
-# an orphan holding :443 that the next start can't get past.
-PIDFILE=${PIPORT_PIDFILE:-$USER_HOME/.piport-service.pid}
+# ENV_FILE, TRIGGER, LOG, PIDFILE and DEFAULT_STATE_DIR. PIDFILE holds pi-port's process
+# group, so a wrapper killed outright (yesterday's app restart) doesn't leave an orphan holding
+# :443 that the next start can't get past.
+. "$(dirname "$0")/piport_paths.sh"
 
 load_settings() {
     # Clear the previous run's settings so a removed line really goes away.
     for k in $(env | grep -E '^(AIPORT|PIPORT)_[A-Z0-9_]*=' | cut -d= -f1); do
-        [ "$k" = PIPORT_ENV_FILE ] || [ "$k" = PIPORT_RESTART_FILE ] || [ "$k" = PIPORT_LOG ] \
-            || unset "$k"
+        case $k in
+            PIPORT_INSTANCE|PIPORT_ENV_FILE|PIPORT_RESTART_FILE|PIPORT_LOG|PIPORT_PIDFILE) ;;
+            *) unset "$k" ;;
+        esac
     done
     if [ ! -r "$ENV_FILE" ]; then
         echo "piport_service: no $ENV_FILE (copy scripts/piport.env.example)" >&2
@@ -55,14 +57,24 @@ load_settings() {
             echo "piport_service: ignoring line in $ENV_FILE: $line" >&2
         fi
     done < "$ENV_FILE"
+    export PIPORT_STATE_DIR=${PIPORT_STATE_DIR:-$DEFAULT_STATE_DIR}
     local missing=""
-    for k in PIPORT_IFACE PIPORT_MAC PIPORT_DEVICE_ID PIPORT_STATE_DIR; do
+    for k in PIPORT_IFACE PIPORT_MAC PIPORT_DEVICE_ID; do
         [ -n "${!k:-}" ] || missing="$missing $k"
     done
     if [ -n "$missing" ]; then
         echo "piport_service: $ENV_FILE is missing$missing" >&2
         return 1
     fi
+}
+
+# A root instance on its own address (PIPORT_BIND_IP) adds it to the interface itself: an
+# alias isn't kept across reboots, and this runs at boot.
+ensure_alias() {
+    [ -n "${PIPORT_BIND_IP:-}" ] && [ "$(id -u)" -eq 0 ] && [ "$(uname)" = Darwin ] || return 0
+    ifconfig "$PIPORT_IFACE" 2>/dev/null | grep -q "inet $PIPORT_BIND_IP " && return 0
+    echo "piport_service: adding $PIPORT_BIND_IP to $PIPORT_IFACE"
+    ifconfig "$PIPORT_IFACE" alias "$PIPORT_BIND_IP" 255.255.255.255
 }
 
 mtime() { stat -f %m "$1" 2>/dev/null || echo 0; }
@@ -100,6 +112,7 @@ env_number() {
     v=$(sed -n "s/^[[:space:]]*$1=//p" "$ENV_FILE" 2>/dev/null | tail -1 | sed 's/[[:space:]#].*//')
     [[ "$v" =~ ^[0-9]+(\.[0-9]+)?$ ]] && echo "$v" || echo "$2"
 }
+mkdir -p "$(dirname "$LOG")"
 exec > >("$REPO/venv/bin/python" "$(dirname "$0")/log_writer.py" "$LOG" \
              --max-mb "${PIPORT_LOG_MAX_MB:-$(env_number PIPORT_LOG_MAX_MB 50)}" \
              --keep "${PIPORT_LOG_KEEP:-$(env_number PIPORT_LOG_KEEP 5)}") 2>&1
@@ -110,6 +123,7 @@ while true; do
         sleep 5
         continue
     fi
+    ensure_alias
     stop_stale
     seen=$(mtime "$TRIGGER")
     echo "piport_service: starting pi-port at $(date '+%F %T') (settings from $ENV_FILE)"
@@ -118,12 +132,14 @@ while true; do
     # Job control only for this launch: pi-port gets its own process group (stop_child signals
     # all of it), while the loop's sleeps and $(...) don't each get one, which raced and
     # printed "child setpgid (...): Operation not permitted".
+    bind=()
+    [ -n "${PIPORT_BIND_IP:-}" ] && bind=(--bind-ip "$PIPORT_BIND_IP")
     set -m
     "$REPO/venv/bin/python" -c 'import os, signal, sys
 signal.signal(signal.SIGINT, signal.SIG_DFL)
 os.execv(sys.argv[1], sys.argv[1:])' "$REPO/venv/bin/python" "$REPO/piport/run_all.py" \
         --iface "$PIPORT_IFACE" --state-dir "$PIPORT_STATE_DIR" --mac "$PIPORT_MAC" \
-        --device-id "$PIPORT_DEVICE_ID" < /dev/null &   # a background job reading the
+        --device-id "$PIPORT_DEVICE_ID" ${bind[@]+"${bind[@]}"} < /dev/null &   # a background job reading the
     # terminal is stopped (SIGTTIN): ffmpeg and ffprobe read stdin
     child=$!
     echo "$child" > "$PIDFILE"

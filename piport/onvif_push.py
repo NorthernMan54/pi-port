@@ -75,11 +75,11 @@ def script_tag(name, data, timestamp=0):
     return _flv_tag(_TAG_SCRIPT, b"\x02" + _amf_string(name) + _amf_value(data), timestamp)
 
 
-def timing_trailer(is_video, elapsed_s):
+def timing_trailer(is_video, elapsed_s, scale=None):
     """16 bytes: 0, the 24-bit timescale, 4 zero bytes, then elapsed time in
     that timescale as 64-bit big-endian (identical to the 32-bit layout below
     2**32 ticks, ~13 h of video; no wrap after that)."""
-    scale = _TIMESCALE_VIDEO if is_video else _TIMESCALE_OTHER
+    scale = scale or (_TIMESCALE_VIDEO if is_video else _TIMESCALE_OTHER)
     return (b"\x00" + scale.to_bytes(3, "big") + b"\x00" * 4
             + struct.pack(">Q", int(elapsed_s * scale)))
 
@@ -168,6 +168,9 @@ class ExtendedFlvWriter:
         # - dropping"), which lost the first ~5 s after every reconnect (live 2026-10-28).
         self.early_sync = early_sync
         self._sync_next = False
+        # Audio trailers in the audio's own sample rate, as a UniFi camera writes them
+        # (16000 for 16 kHz AAC); 11025 made AAC stall in Protect's live view.
+        self.audio_rate = None
 
     def header(self, header):
         self.write(header[:4] + b"\x07" + header[5:9])
@@ -193,7 +196,8 @@ class ExtendedFlvWriter:
     def tag(self, tag_header, body):
         """A whole tag (body = payload + PreviousTagSize) and its trailer."""
         self.write(tag_header + body)
-        self.write(timing_trailer(tag_header[0] == _TAG_VIDEO, self.now - self.start))
+        rate = self.audio_rate if tag_header[0] == _TAG_AUDIO else None
+        self.write(timing_trailer(tag_header[0] == _TAG_VIDEO, self.now - self.start, rate))
         if self.early_sync and tag_header[0] == _TAG_VIDEO and len(body) > 5 and body[1] == 1:
             self.early_sync = False  # the first video frame (AVC NALU, not its config)
             self._sync_next = True
@@ -275,7 +279,7 @@ def ffmpeg_push_cmd(ffmpeg_bin, source_url, stream_name, camera_audio=True, copy
     cmd = [
         ffmpeg_bin, "-nostdin", "-loglevel", "error",
         "-avoid_negative_ts", "make_zero", "-fflags", "+genpts+discardcorrupt",
-        "-use_wallclock_as_timestamps", "1", "-timeout", "15000000",
+        "-timeout", "15000000",  # camera timestamps kept: no -use_wallclock_as_timestamps (test)
         "-rtsp_transport", "tcp", "-i", source_url,
     ]
     aac = ["-c:a", "aac", "-ar", "32000", "-ac", "1", "-b:a", "32k"]
@@ -660,6 +664,9 @@ class FlvPush:
                 sent += len(data)
 
             writer = ExtendedFlvWriter(write, early_sync=True)
+            meta = next((b for h, b in config if h[0] == _TAG_SCRIPT), None)
+            rate = _metadata_numbers(meta[:-4]).get("audiosamplerate") if meta else None
+            writer.audio_rate = int(rate) if rate else None
             writer.header(header)
             for tag_header, body in config:
                 tag_header, body = set_stream_name(tag_header, body, self.stream_name)

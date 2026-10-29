@@ -97,6 +97,7 @@ as `extendedFlv`, while the AI Port also pulls the camera's RTSP for detection.
 | `avclient.py` | Pairing, streaming and smart-detect WebSocket + detection loop |
 | `detectors/` | Pluggable detector backends: `rknn` NPU, `edgetpu` Coral, `cpu` (onnxruntime/Core ML) |
 | `onvif_push.py` | ONVIF camera video push to Protect (`extendedFlv`) |
+| `onvif_media.py` | ONVIF camera's media profiles (substream for `video3`) |
 | `sysinfo_server.py` | Dev-box CPU/mem/GPU/NPU/Coral status page (`webui.html`) |
 | `instance_manager.py`, `run_all.py` | Multi-instance orchestration |
 
@@ -162,6 +163,7 @@ piport/               the emulator
   avclient.py           pairing/streaming/smart-detect websocket + detection
   detectors/            pluggable detector backends (rknn / edgetpu / cpu)
   onvif_push.py         ONVIF camera video push (extendedFlv)
+  onvif_media.py        ONVIF camera media profiles (substream lookup)
   sysinfo_server.py     dev-box CPU/mem/GPU/NPU/Coral status page (+ webui.html)
   models/               anchors + COCO labels (model binaries fetched, not stored)
   instance_manager.py / run_all.py   multi-instance orchestration
@@ -391,8 +393,11 @@ Limits:
   retried every second. Set the camera's stream to H.264. UniFi's own HEVC
   framing (FLV codec id 8 with a `0x68 0x01` VPS/SPS/PPS tag) is not
   implemented; such a stream is now refused with one clear error.
-- Every channel carries the camera's main stream (no lower-resolution
-  channels); the resolution reported to Protect is probed from the stream.
+- `video1`/`video2` carry the camera's main stream; `video3` carries its
+  substream when the camera's ONVIF Media service lists a smaller H.264 profile
+  (looked up with the RTSP URL's login; otherwise the main stream). The resolution
+  reported to Protect is probed from the main stream, and the substream's is its
+  ONVIF profile's.
 - Audio is AAC 32 kHz mono (silent if the camera has none). Protect asks for
   Opus, which plain FLV cannot carry.
 - Each channel and the detector open their own RTSP session to the camera; some

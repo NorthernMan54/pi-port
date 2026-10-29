@@ -554,6 +554,13 @@ RTSP URL, `streaming` true/false) and, per channel, `ChangeVideoSettings` with a
 `extendedFlv` `avSerializer`: a `streamName` and `tcp://<console>:7550` as destination.
 Protect's own ingest for that camera stops; without the push the camera has no video.
 
+`OnvifStreamControl` names only the main profile. `onvif_media.py` asks the camera's
+ONVIF Media service (GetCapabilities, GetProfiles, GetStreamUri, WS-Security digest
+with the RTSP URL's login) for the rest, once per URL, and `video3` carries the
+smallest H.264 profile below the main one's resolution; until that answer `video3`
+waits, so it doesn't open a main-stream session only to restart on the substream.
+`video1`/`video2`, and detection, use the main stream.
+
 Each channel is `ffmpeg -c:v copy` (plus AAC audio) into FLV, rewritten by
 `rewrite_flv()` and sent over TCP. **H.264 only:** an HEVC source is muxed by
 ffmpeg as Enhanced RTMP (an `hvc1` FourCC), which `ms` refuses (live view resets,

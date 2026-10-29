@@ -159,7 +159,16 @@ class TestPushManager(unittest.TestCase):
             return push
 
         self.FlvPush.side_effect = make
-        self.m = onvif_push.PushManager()
+        self.profiles = []      # what the camera's ONVIF Media service lists
+        self.lookups = []
+
+        def fetch(url):
+            self.lookups.append(url)
+            if isinstance(self.profiles, Exception):
+                raise self.profiles
+            return self.profiles
+
+        self.m = onvif_push.PushManager(fetch_profiles=fetch, background=False)
 
     def test_waits_for_source(self):
         self.m.configure("CAM", _settings("video1", "S1"))
@@ -211,6 +220,57 @@ class TestPushManager(unittest.TestCase):
         self.m.set_source("CAM", "rtsp://cam/101", audio=False, width=3840, height=2160, fps=12)
         self.assertEqual(self.m.source("CAM"), {"url": "rtsp://cam/101", "audio": False,
                                                 "width": 3840, "height": 2160, "fps": 12})
+
+    def _two_profiles(self):
+        self.profiles = [
+            {"token": "P1", "encoding": "H264", "width": 2560, "height": 1440, "fps": 20,
+             "url": "rtsp://cam/101"},
+            {"token": "P2", "encoding": "H264", "width": 640, "height": 360, "fps": 20,
+             "url": "rtsp://cam/102"},
+        ]
+
+    def _pushed(self):
+        return {p.args[1]: p.args[2] for p in self.started if not p.stop.called}
+
+    def test_video3_carries_substream(self):
+        self._two_profiles()
+        self.m.configure("CAM", {**_settings("video1", "S1"), **_settings("video2", "S2"),
+                                 **_settings("video3", "S3")})
+        self.m.set_source("CAM", "rtsp://cam/101")
+        self.assertEqual(self._pushed(), {"video1": "rtsp://cam/101", "video2": "rtsp://cam/101",
+                                          "video3": "rtsp://cam/102"})
+        self.assertEqual(self.m.substream("CAM"), {"width": 640, "height": 360, "fps": 20})
+
+    def test_video3_waits_for_profiles(self):
+        # No push on the main stream first: a camera allows few RTSP sessions, and a
+        # restart onto the substream right after would overlap the two.
+        self._two_profiles()
+        self.m.configure("CAM", {**_settings("video1", "S1"), **_settings("video3", "S3")})
+        seen = []
+        fetch = self.m._fetch_profiles
+        self.m._fetch_profiles = lambda url: (seen.append(dict(self._pushed())), fetch(url))[1]
+        self.m.set_source("CAM", "rtsp://cam/101")
+        self.assertEqual(seen, [{"video1": "rtsp://cam/101"}])
+        self.assertEqual(len(self.started), 2)
+
+    def test_lookup_once_per_url(self):
+        self._two_profiles()
+        self.m.configure("CAM", _settings("video3", "S3"))
+        self.m.set_source("CAM", "rtsp://cam/101")
+        self.m.stop_device("CAM")
+        self.m.set_source("CAM", "rtsp://cam/101")
+        self.assertEqual(self.lookups, ["rtsp://cam/101"])
+        self.assertEqual([p.args[2] for p in self.started], ["rtsp://cam/102"] * 2)
+
+    def test_no_substream_or_failed_lookup_uses_main(self):
+        for profiles in ([], OSError("timed out")):
+            with self.subTest(profiles=profiles):
+                self.setUp()
+                self.profiles = profiles
+                self.m.configure("CAM", _settings("video3", "S3"))
+                self.m.set_source("CAM", "rtsp://cam/101")
+                self.assertEqual(self._pushed(), {"video3": "rtsp://cam/101"})
+                self.assertIsNone(self.m.substream("CAM"))
 
 
 

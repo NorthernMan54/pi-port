@@ -4374,17 +4374,22 @@ def handle_function(ws, msg, device_info):
             _onvif.configure(payload["deviceID"], payload["video"])
             onvif_src = _onvif.source(payload["deviceID"])
         if onvif_src:
-            # Every channel carries the camera's main stream, so report its real
-            # geometry -- probed, since Protect echoes back whatever we answered
-            # before. A wrong size breaks the web player (it sizes its decoder from it).
+            # Channels carry the camera's main stream (video3 its substream, if it has
+            # one), so report their real geometry -- the main one probed, since Protect
+            # echoes back whatever we answered before. A wrong size breaks the web
+            # player (it sizes its decoder from it).
             probe = _stream_probe.get(payload["deviceID"]) or {}
             channel = {"enabled": True,
                        "width": probe.get("width") or onvif_src["width"] or 1920,
                        "height": probe.get("height") or onvif_src["height"] or 1080,
                        "fps": probe.get("fps") or onvif_src["fps"] or 15,
                        "bitrate": 8000000}
+            sub = _onvif.substream(payload["deviceID"])
+            sub_channel = {"enabled": True, "width": sub["width"], "height": sub["height"],
+                           "fps": sub["fps"] or channel["fps"], "bitrate": 1000000} if sub else None
             send_msg(ws, "ChangeVideoSettings", {
-                "video": {k: dict(channel) for k in payload["video"]},
+                "video": {k: dict(sub_channel if sub and k == onvif_push.SUB_CHANNEL else channel)
+                          for k in payload["video"]},
                 "audio": {"enabled": True, "volume": 100},
             }, in_response_to=msg_id)
             return

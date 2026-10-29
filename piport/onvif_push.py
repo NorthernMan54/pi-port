@@ -8,6 +8,10 @@ ChangeVideoSettings asks for each channel (video1/2/3) as an "extendedFlv"
 stream pushed to tcp://<console>:7550 under a given streamName. Without that
 push the camera shows no video and records nothing.
 
+OnvifStreamControl names only the camera's main profile. video3, the low channel
+on a UniFi camera, gets the camera's substream instead when its ONVIF Media service
+lists a smaller H.264 profile (onvif_media.py); video1/video2 stay on the main one.
+
 Each push is `ffmpeg -c:v copy -f flv -` (no re-encode) piped through
 rewrite_flv() into a TCP socket. The rewrite mirrors unifi-cam-proxy's
 clock_sync.py (MIT, keshavdv/unifi-cam-proxy): header flags byte 7, a 16-byte
@@ -26,9 +30,13 @@ import threading
 import time
 from urllib.parse import parse_qs, urlsplit
 
+import onvif_media
 from procutil import start_stderr_drain
 
 log = logging.getLogger("aiport-onvif")
+
+# The channel that carries the camera's substream when it has one.
+SUB_CHANNEL = "video3"
 
 CLOCK_SYNC_INTERVAL_S = 5.0
 _TAG_VIDEO = 9
@@ -322,18 +330,73 @@ def retry_delay(retry_s, failed):
 class PushManager:
     """Per-device ONVIF source URL plus the channel pushes Protect asked for."""
 
-    def __init__(self, ffmpeg_bin="ffmpeg"):
+    def __init__(self, ffmpeg_bin="ffmpeg", fetch_profiles=None, background=True):
         self.ffmpeg_bin = ffmpeg_bin
+        self._fetch_profiles = fetch_profiles or onvif_media.fetch_profiles
+        self._background = background  # False runs the profile lookup inline (tests)
         self._lock = threading.Lock()
         self._sources = {}   # device_id -> {"url", "audio", "width", "height", "fps"}
         self._wanted = {}    # device_id -> {channel: (stream_name, destination)}
         self._pushes = {}    # (device_id, channel) -> FlvPush
+        self._subs = {}      # main url -> substream profile dict, or None (none/failed)
+        self._looking_up = set()  # main urls whose profiles are being fetched
 
     def set_source(self, device_id, url, audio=True, width=None, height=None, fps=None):
         with self._lock:
             self._sources[device_id] = {"url": url, "audio": bool(audio), "width": width,
                                         "height": height, "fps": fps}
+            lookup = url not in self._subs and url not in self._looking_up
+            if lookup:
+                self._looking_up.add(url)
             self._sync(device_id)
+        if lookup:
+            if self._background:
+                threading.Thread(target=self._find_substream, args=(url,), daemon=True,
+                                 name=f"onvif-profiles-{device_id}").start()
+            else:
+                self._find_substream(url)
+
+    def _find_substream(self, url):
+        """Look up the camera's profiles once per main url, then start the waiting
+        SUB_CHANNEL pushes (on the substream, or the main stream if there is none)."""
+        host = urlsplit(url).hostname
+        try:
+            sub = onvif_media.pick_substream(self._fetch_profiles(url))
+        except Exception as e:
+            log.warning("ONVIF profiles of %s unavailable (%s): %s carries the main stream",
+                        host, e, SUB_CHANNEL)
+            sub = None
+        else:
+            if sub:
+                log.info("ONVIF camera %s: %s carries substream %s (%sx%s @%s fps)", host,
+                         SUB_CHANNEL, sub["token"], sub["width"], sub["height"], sub["fps"])
+            else:
+                log.info("ONVIF camera %s has no smaller H.264 profile: %s carries the main "
+                         "stream", host, SUB_CHANNEL)
+        with self._lock:
+            self._subs[url] = sub
+            self._looking_up.discard(url)
+            for device_id, src in list(self._sources.items()):
+                if src["url"] == url:
+                    self._sync(device_id)
+
+    def substream(self, device_id):
+        """{width, height, fps} of the substream SUB_CHANNEL carries, or None if it
+        carries the main stream."""
+        with self._lock:
+            src = self._sources.get(device_id)
+            sub = self._subs.get(src["url"]) if src else None
+            return {k: sub[k] for k in ("width", "height", "fps")} if sub else None
+
+    def _channel_url(self, src, channel):
+        """The url `channel` pushes; None while SUB_CHANNEL waits for the profiles."""
+        url = src["url"]
+        if channel != SUB_CHANNEL:
+            return url
+        if url in self._looking_up:
+            return None
+        sub = self._subs.get(url)
+        return sub["url"] if sub else url
 
     def source(self, device_id):
         with self._lock:
@@ -388,15 +451,15 @@ class PushManager:
 
     def _sync(self, device_id):
         src = self._sources.get(device_id)
-        url = src["url"] if src else None
-        wanted = self._wanted.get(device_id, {}) if url else {}
+        wanted = self._wanted.get(device_id, {}) if src else {}
+        urls = {channel: self._channel_url(src, channel) for channel in wanted}
         for key in [k for k in self._pushes if k[0] == device_id]:
-            channel = key[1]
-            want = wanted.get(channel)
-            if not want or not self._pushes[key].matches(url, *want):
+            want, url = wanted.get(key[1]), urls.get(key[1])
+            if not want or not url or not self._pushes[key].matches(url, *want):
                 self._pushes.pop(key).stop()
         for channel, (name, dest) in wanted.items():
-            if (device_id, channel) not in self._pushes:
+            url = urls[channel]
+            if url and (device_id, channel) not in self._pushes:
                 try:
                     self._pushes[(device_id, channel)] = FlvPush(
                         device_id, channel, url, name, dest, self.ffmpeg_bin,

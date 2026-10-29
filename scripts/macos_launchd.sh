@@ -138,8 +138,13 @@ check_ownership() {
 
 check_not_running() {
     # This instance only (its state dir), so another instance can keep running.
-    local pids
-    pids=$(pgrep -f "piport/run_all.py .*--state-dir $(state_dir)( |$)" || true)
+    # A job just booted out takes a few seconds to stop (ExitTimeOut), so wait for it first.
+    local pids pattern="piport/run_all.py .*--state-dir $(state_dir)( |$)"
+    for _ in $(seq 1 30); do
+        pids=$(pgrep -f "$pattern" || true)
+        [ -z "$pids" ] && break
+        sleep 1
+    done
     if [ -n "$pids" ] && ! loaded "$LABEL"; then
         echo "$INSTANCE is already running outside launchd (pid $(echo $pids | tr ' ' ','))." >&2
         echo "Stop it first (Ctrl-C in its terminal, or: sudo kill -INT $(echo $pids | tr ',' ' '))." >&2

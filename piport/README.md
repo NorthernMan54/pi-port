@@ -172,7 +172,10 @@ ONVIF cameras straight from the LAN has to be a root daemon, because macOS's Loc
 privacy blocks an agent from LAN devices other than the gateway:
 `sudo PIPORT_INSTANCE=onvif scripts/macos_launchd.sh install --daemon`, with `PIPORT_BIND_IP`
 and `AIPORT_ADVERTISE_IP` set in `~/.pi-port/onvif/piport.env`. It adds that address to the
-interface at every start, so the alias comes back after a reboot.
+interface at every start, so the alias comes back after a reboot. Once a root daemon holds a specific
+address's :443, macOS refuses a user agent the wildcard :443 (`Address already in use`, even
+with `SO_REUSEPORT`), so on a Mac with a daemon every instance runs as one, each with its own
+`PIPORT_BIND_IP` (the main instance on the interface's own address).
 
 ## Object detection (NPU / CPU / Core ML / Edge TPU)
 

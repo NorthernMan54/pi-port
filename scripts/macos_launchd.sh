@@ -19,7 +19,9 @@
 # cameras straight from the LAN (ONVIF) has to be a root daemon instead (--daemon): macOS's
 # Local Network privacy blocks an agent from LAN devices other than the gateway. Give it its own
 # address in piport.env (PIPORT_BIND_IP, and AIPORT_ADVERTISE_IP for Protect); the daemon adds
-# that address to PIPORT_IFACE at every start. After install, the daemon's start, stop, restart
+# that address to PIPORT_IFACE at every start. With a daemon on the Mac, make every instance
+# a daemon on its own address: a user agent can't take the wildcard :443 once root holds a
+# specific address's :443 (EADDRINUSE). After install, the daemon's start, stop, restart
 # and uninstall need sudo too; status and logs don't.
 #
 # Installing "native" for the first time moves the old ~/.piport.env, ~/.piport-state and

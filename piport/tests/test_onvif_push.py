@@ -150,7 +150,7 @@ class TestPushManager(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.started = []
 
-        def make(device_id, channel, url, name, dest, ffmpeg_bin, camera_audio=True):
+        def make(device_id, channel, url, name, dest, ffmpeg_bin, camera_audio=True, pool=None):
             push = mock.Mock()
             push.args = (device_id, channel, url, name, dest)
             push.matches.side_effect = lambda u, n, d: (u, n, d) == (url, name, dest)
@@ -193,6 +193,16 @@ class TestPushManager(unittest.TestCase):
         self.m.configure("CAM", _settings("video2", "S2", dest="file:///dev/null"))
         self.started[1].stop.assert_called_once()
         self.started[0].stop.assert_not_called()
+
+    def test_encoder_only_settings_keep_pushes(self):
+        # Live 2026-10-28: Protect sends fps/bitrate settings for every channel without an
+        # avSerializer right after assigning a camera; that stopped the running pushes.
+        self.m.set_source("CAM", "rtsp://cam/101")
+        self.m.configure("CAM", _settings("video1", "S1"))
+        self.m.configure("CAM", {"video1": {"dynamicFpsMode": 2, "enabled": True, "fps": 20},
+                                 "video2": {"enabled": True, "fps": 20}})
+        self.started[0].stop.assert_not_called()
+        self.assertEqual(len(self.started), 1)
 
     def test_stop_device_keeps_destinations(self):
         # Protect's streaming:false is a stop, not an unassign: a later start must
@@ -279,6 +289,189 @@ class TestRetryDelay(unittest.TestCase):
         delays = [onvif_push.retry_delay(1, n) for n in range(0, 10)]
         self.assertEqual(delays, [1, 1, 1, 1, 2, 4, 8, 16, 30, 30])
         self.assertEqual(onvif_push.retry_delay(0.2, 0), 1.0)   # never under a second
+
+def _meta(stream_name="piport"):
+    """ffmpeg's onMetaData: an ECMA array with a number and the streamName."""
+    amf = onvif_push._amf_string
+    pairs = (amf("duration") + b"\x00" + struct.pack(">d", 0)
+             + amf("streamName") + b"\x02" + amf(stream_name))
+    return b"\x02" + amf("onMetaData") + b"\x08" + struct.pack(">I", 2) + pairs + b"\x00\x00\x09"
+
+
+_AVC_CONFIG = b"\x17\x00\x00\x00\x00\x01\x64"
+_AAC_CONFIG = b"\xaf\x00\x12\x10"
+_KEY = b"\x17\x01\x00\x00\x00key"
+_INTER = b"\x27\x01\x00\x00\x00inter"
+_AAC = b"\xaf\x01aac"
+
+# A camera stream as the shared pull's ffmpeg writes it, starting mid-stream (t=1000 ms).
+_SOURCE = _flv([(18, 0, _meta()), (9, 0, _AVC_CONFIG), (8, 0, _AAC_CONFIG),
+                (9, 1000, _KEY), (8, 1010, _AAC), (9, 1040, _INTER), (9, 2000, _KEY)])
+
+
+def _parse_extended(data):
+    """[(tag type, timestamp, payload)] from extendedFlv (each tag + 16-byte trailer)."""
+    tags, pos = [], 13
+    while pos + 11 <= len(data):
+        size = int.from_bytes(data[pos + 1:pos + 4], "big")
+        ts = onvif_push._tag_timestamp(data[pos:pos + 11])
+        tags.append((data[pos], ts, data[pos + 11:pos + 11 + size]))
+        pos += 11 + size + 4 + 16
+    return tags
+
+
+class TestStreamName(unittest.TestCase):
+    def test_replaced_and_tag_resized(self):
+        tag = onvif_push._flv_tag(18, _meta("piport"), 0)
+        header, body = onvif_push.set_stream_name(tag[:11], tag[11:], "lJg3D2LxtQkAADlB")
+        payload = body[:-4]
+        self.assertEqual(int.from_bytes(header[1:4], "big"), len(payload))
+        self.assertEqual(struct.unpack(">I", body[-4:])[0], len(payload) + 11)
+        self.assertEqual(payload, _meta("lJg3D2LxtQkAADlB"))
+
+    def test_other_tags_untouched(self):
+        tag = onvif_push._flv_tag(9, _KEY, 40)
+        self.assertEqual(onvif_push.set_stream_name(tag[:11], tag[11:], "X"),
+                         (tag[:11], tag[11:]))
+
+
+class TestPullPool(unittest.TestCase):
+    def test_one_pull_per_stream_until_last_user(self):
+        with mock.patch.object(onvif_push, "SharedPull") as SharedPull:
+            pool = onvif_push.PullPool()
+            made = []
+
+            def start_returns_self(url, audio, ffmpeg_bin):
+                pull = mock.Mock(source_url=url, camera_audio=audio)
+                pull.start.return_value = pull
+                made.append(pull)
+                return pull
+
+            SharedPull.side_effect = start_returns_self
+            a = pool.acquire("rtsp://cam/101", True)
+            b = pool.acquire("rtsp://cam/101", True)
+            c = pool.acquire("rtsp://cam/102", True)
+            self.assertIs(a, b)
+            self.assertIsNot(a, c)
+            pool.release(a)
+            a.stop.assert_not_called()
+            pool.release(b)
+            a.stop.assert_called_once()
+            self.assertIsNot(pool.acquire("rtsp://cam/101", True), a)
+            self.assertEqual(len(made), 3)
+
+
+class _Sink:
+    def __init__(self, accept=True):
+        self.items, self.accept = [], accept
+
+    def put(self, item):
+        if self.accept:
+            self.items.append(item)
+        return self.accept
+
+
+class TestFanOut(unittest.TestCase):
+    def setUp(self):
+        self.pull = onvif_push.SharedPull("rtsp://cam/101")
+        self.pull._header = b"FLV\x01\x05\x00\x00\x00\x09\x00\x00\x00\x00"
+        self.pull._config = {"video": ("vh", "vb"), "meta": ("mh", "mb")}
+
+    def _tag(self, payload, ts):
+        tag = onvif_push._flv_tag(9, payload, ts)
+        return tag[:11], tag[11:]
+
+    def test_joins_at_key_frame_with_config_first(self):
+        sink = _Sink()
+        self.pull.subscribe(sink)
+        self.pull._deliver(*self._tag(_INTER, 960), keyframe=False)
+        self.assertEqual(sink.items, [])
+        key = self._tag(_KEY, 1000)
+        self.pull._deliver(*key, keyframe=True)
+        self.pull._deliver(*self._tag(_INTER, 1040), keyframe=False)
+        self.assertEqual(sink.items[0], ("start", self.pull._header,
+                                         [("mh", "mb"), ("vh", "vb")], 1000))
+        self.assertEqual(sink.items[1], ("tag",) + key)
+        self.assertEqual([i[0] for i in sink.items], ["start", "tag", "tag"])
+
+    def test_sink_that_fell_behind_rejoins_at_key_frame(self):
+        sink = _Sink()
+        self.pull.subscribe(sink)
+        self.pull._deliver(*self._tag(_KEY, 1000), keyframe=True)
+        sink.accept = False
+        self.pull._deliver(*self._tag(_INTER, 1040), keyframe=False)
+        sink.accept = True
+        self.pull._deliver(*self._tag(_INTER, 1080), keyframe=False)
+        self.assertEqual(len(sink.items), 2)  # nothing until the next key frame
+        self.pull._deliver(*self._tag(_KEY, 2000), keyframe=True)
+        self.assertEqual(sink.items[2][0], "start")
+
+
+class TestSharedPushes(unittest.TestCase):
+    """Two channels on one stream: one ffmpeg, two connections, each under its
+    own streamName and starting at t=0 on a key frame."""
+
+    def test_two_pushes_one_ffmpeg(self):
+        import socket
+        import tempfile
+        import threading
+
+        with tempfile.NamedTemporaryFile(suffix=".flv", delete=False) as f:
+            f.write(_SOURCE)
+        self.addCleanup(os.unlink, f.name)
+        cat = [sys.executable, "-c",
+               "import sys,time; sys.stdout.buffer.write(open(sys.argv[1],'rb').read());"
+               "sys.stdout.flush(); time.sleep(0.5)", f.name]
+        launched = []
+
+        def fake_cmd(*args, **kw):
+            launched.append(args)
+            return cat
+
+        servers, received = [], {}
+        for name in ("S1", "S2"):
+            srv = socket.socket()
+            srv.bind(("127.0.0.1", 0))
+            srv.listen(4)
+            srv.settimeout(10)
+            servers.append((name, srv))
+            self.addCleanup(srv.close)
+
+        def serve(name, srv):
+            conn, _ = srv.accept()
+            conn.settimeout(10)
+            data = b""
+            while True:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+            conn.close()
+            received[name] = data
+
+        threads = [threading.Thread(target=serve, args=s) for s in servers]
+        for t in threads:
+            t.start()
+        with mock.patch.object(onvif_push, "ffmpeg_push_cmd", fake_cmd):
+            pool = onvif_push.PullPool()
+            pushes = [onvif_push.FlvPush("CAM", f"video{i + 1}", "rtsp://cam/101", name,
+                                         f"tcp://127.0.0.1:{srv.getsockname()[1]}",
+                                         pool=pool).start()
+                      for i, (name, srv) in enumerate(servers)]
+            for t in threads:
+                t.join(15)
+            for push in pushes:
+                push.stop()
+        self.assertEqual(len(launched), 1)
+        for name in ("S1", "S2"):
+            data = received[name]
+            self.assertEqual(data[:5], b"FLV\x01\x07")
+            tags = _parse_extended(data)
+            self.assertEqual(tags[0], (18, 0, _meta(name)))
+            self.assertEqual(tags[1:3], [(9, 0, _AVC_CONFIG), (8, 0, _AAC_CONFIG)])
+            self.assertEqual(tags[3], (9, 0, _KEY))  # rebased to the key frame it joined at
+            self.assertEqual([t[1] for t in tags[4:]], [10, 40, 1000])
+
 
 if __name__ == "__main__":
     unittest.main()

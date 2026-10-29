@@ -400,8 +400,11 @@ Limits:
   ONVIF profile's.
 - Audio is AAC 32 kHz mono (silent if the camera has none). Protect asks for
   Opus, which plain FLV cannot carry.
-- Each channel and the detector open their own RTSP session to the camera; some
-  cameras limit concurrent logins (Hikvision answers `401` past its limit).
+- Channels carrying the same stream share one RTSP session (one ffmpeg, fanned
+  out); the detector opens its own. With a substream that is three sessions:
+  main (`video1`/`video2`), sub (`video3`) and detection. Cameras limit
+  concurrent sessions: a Hikvision answers `500` to RTSP SETUP past three, or
+  `401` past its login limit.
 - On a Pi 5 the camera's H.264 is decoded in software for detection (~half a
   core for 4K at 12 fps).
 

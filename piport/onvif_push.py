@@ -23,6 +23,7 @@ video running 11% and audio 9x too fast; its media server then drops the frames
 as "from the future" and the web player never starts.
 """
 import logging
+import queue
 import socket
 import struct
 import subprocess
@@ -39,6 +40,7 @@ log = logging.getLogger("aiport-onvif")
 SUB_CHANNEL = "video3"
 
 CLOCK_SYNC_INTERVAL_S = 5.0
+_TAG_AUDIO = 8
 _TAG_VIDEO = 9
 _TAG_SCRIPT = 18
 # Trailer timescales as captured from real cameras by unifi-cam-proxy:
@@ -135,46 +137,107 @@ def _read_exact(read, n):
     return buf
 
 
-def rewrite_flv(read, write, clock=time.time):
-    """Copy a plain FLV stream from read(n) to write(bytes) as Protect's
-    extendedFlv. Returns when the source ends; raises ValueError on a non-FLV
-    source. write() errors (socket gone) propagate."""
+def _tag_timestamp(tag_header):
+    return struct.unpack(">i", tag_header[7:8] + tag_header[4:7])[0]
+
+
+def _retime(tag_header, timestamp):
+    """The tag header with its timestamp (24 bits + extended byte) replaced."""
+    ts = struct.pack(">i", max(0, int(timestamp)))
+    return tag_header[:4] + ts[1:] + ts[:1] + tag_header[8:]
+
+
+def read_flv_header(read):
+    """FLV header plus PreviousTagSize0; ValueError on a non-FLV source."""
     header = _read_exact(read, 9)
     if len(header) < 9 or header[:3] != b"FLV":
         raise ValueError(f"not an FLV stream: {header[:3]!r}")
-    write(header[:4] + b"\x07" + header[5:9])
-    write(_read_exact(read, 4))  # PreviousTagSize0
+    return header + _read_exact(read, 4)
 
-    # First sync only after 5 s, as clock_sync.py does: Protect closes the
-    # connection when an onClockSync arrives ahead of the first frames.
-    last_sync = clock()
-    start = clock()  # read separately, as clock_sync.py does
+
+class ExtendedFlvWriter:
+    """Protect's extendedFlv to write(bytes): header flags 7, a timing trailer
+    after every tag, onClockSync/onMpma every 5 s. One per connection."""
+
+    def __init__(self, write, clock=time.time):
+        self.write = write
+        self.clock = clock
+        self.now = self.start = self.last_sync = None
+
+    def header(self, header):
+        self.write(header[:4] + b"\x07" + header[5:9])
+        self.write(header[9:13])  # PreviousTagSize0
+        # First sync only after 5 s, as clock_sync.py does: Protect closes the
+        # connection when an onClockSync arrives ahead of the first frames.
+        self.last_sync = self.clock()
+        self.start = self.clock()  # read separately, as clock_sync.py does
+
+    def sync_if_due(self, timestamp):
+        """Once per tag, before it: the clock sync when it is due."""
+        now = self.now = self.clock()
+        if now - self.last_sync >= CLOCK_SYNC_INTERVAL_S:
+            self.last_sync = now
+            self.write(script_tag("onClockSync", {"streamClock": int(timestamp),
+                                                  "streamClockBase": 0,
+                                                  "wallClock": now * 1000}, timestamp))
+            self.write(timing_trailer(False, now - self.start))
+            self.write(script_tag("onMpma", _MPMA, 0))
+            self.write(timing_trailer(False, now - self.start))
+
+    def tag(self, tag_header, body):
+        """A whole tag (body = payload + PreviousTagSize) and its trailer."""
+        self.write(tag_header + body)
+        self.write(timing_trailer(tag_header[0] == _TAG_VIDEO, self.now - self.start))
+
+
+def read_tags(read):
+    """(tag_header, body) for each whole tag after the header; body is the
+    payload plus PreviousTagSize. Ends with the source (a cut-off tag is dropped)."""
     while True:
         tag_header = _read_exact(read, 11)
         if len(tag_header) < 11:
             return
-        tag_type = tag_header[0]
-        size = int.from_bytes(tag_header[1:4], "big")
-        timestamp = struct.unpack(">i", tag_header[7:8] + tag_header[4:7])[0]
-        now = clock()
-        if now - last_sync >= CLOCK_SYNC_INTERVAL_S:
-            last_sync = now
-            write(script_tag("onClockSync", {"streamClock": int(timestamp),
-                                             "streamClockBase": 0,
-                                             "wallClock": now * 1000}, timestamp))
-            write(timing_trailer(False, now - start))
-            write(script_tag("onMpma", _MPMA, 0))
-            write(timing_trailer(False, now - start))
-        body = _read_exact(read, size + 4)  # payload + PreviousTagSize
-        if len(body) < size + 4:
+        body = _read_exact(read, int.from_bytes(tag_header[1:4], "big") + 4)
+        yield tag_header, body
+        if len(body) < int.from_bytes(tag_header[1:4], "big") + 4:
+            return
+
+
+def check_video_codec(tag_header, body):
+    if tag_header[0] == _TAG_VIDEO and len(body) > 4:
+        codec = video_codec(body)
+        if codec != "h264":
+            raise UnsupportedCodec(codec)
+
+
+def rewrite_flv(read, write, clock=time.time):
+    """Copy a plain FLV stream from read(n) to write(bytes) as Protect's
+    extendedFlv. Returns when the source ends; raises ValueError on a non-FLV
+    source. write() errors (socket gone) propagate."""
+    writer = ExtendedFlvWriter(write, clock)
+    writer.header(read_flv_header(read))
+    for tag_header, body in read_tags(read):
+        writer.sync_if_due(_tag_timestamp(tag_header))
+        if len(body) < int.from_bytes(tag_header[1:4], "big") + 4:
             write(tag_header + body)
             return
-        if tag_type == _TAG_VIDEO and size:
-            codec = video_codec(body)
-            if codec != "h264":
-                raise UnsupportedCodec(codec)
-        write(tag_header + body)
-        write(timing_trailer(tag_type == _TAG_VIDEO, now - start))
+        check_video_codec(tag_header, body)
+        writer.tag(tag_header, body)
+
+
+def set_stream_name(tag_header, body, name):
+    """ffmpeg's onMetaData tag with its streamName value replaced: one pull
+    feeds several pushes, each under the streamName Protect gave its channel."""
+    payload = body[:-4]
+    key = b"\x00\x0astreamName\x02"
+    at = payload.find(key)
+    if tag_header[0] != _TAG_SCRIPT or at < 0:
+        return tag_header, body
+    start = at + len(key)
+    end = start + 2 + struct.unpack(">H", payload[start:start + 2])[0]
+    payload = payload[:start] + _amf_string(name) + payload[end:]
+    tag = _flv_tag(_TAG_SCRIPT, payload, _tag_timestamp(tag_header))
+    return tag[:11], tag[11:]
 
 
 # --- push processes -----------------------------------------------------------
@@ -213,29 +276,47 @@ def ffmpeg_push_cmd(ffmpeg_bin, source_url, stream_name, camera_audio=True):
     ]
 
 
-class FlvPush:
-    """Keeps one channel pushed: ffmpeg -> rewrite_flv -> TCP, restarted on any
-    failure every retry interval until stop()."""
+def _describe(url):
+    """A source for logs: host and path, never the login."""
+    parts = urlsplit(url)
+    return f"{parts.hostname}{parts.path}"
 
-    def __init__(self, device_id, channel, source_url, stream_name, destination,
-                 ffmpeg_bin="ffmpeg", camera_audio=True):
-        self.device_id = device_id
-        self.camera_audio = camera_audio
-        self.channel = channel
+
+def _is_config_tag(tag_header, payload):
+    """AVC sequence header or AAC AudioSpecificConfig: needed before any frame."""
+    if tag_header[0] == _TAG_VIDEO:
+        return len(payload) > 1 and payload[1] == 0
+    if tag_header[0] == _TAG_AUDIO:
+        return len(payload) > 1 and payload[0] >> 4 == 10 and payload[1] == 0
+    return False
+
+
+def _is_keyframe(tag_header, payload):
+    return tag_header[0] == _TAG_VIDEO and len(payload) > 1 and payload[0] >> 4 == 1
+
+
+class SharedPull:
+    """One ffmpeg reading a camera stream, fanned out to every push of it.
+
+    A camera allows few RTSP sessions (a Hikvision 2560x1440 answered 500 past
+    three: video1, video3 and detection), so channels carrying the same stream
+    share one session. A push joins at the next key frame: it gets ffmpeg's
+    onMetaData and the AVC/AAC config tags first, then frames.
+    """
+
+    def __init__(self, source_url, camera_audio=True, ffmpeg_bin="ffmpeg"):
         self.source_url = source_url
-        self.stream_name = stream_name
-        self.destination = destination
-        self.host, self.port, self.retry_s, self.timeout_s = parse_destination(destination)
+        self.camera_audio = camera_audio
         self.ffmpeg_bin = ffmpeg_bin
+        self._lock = threading.Lock()
+        self._sinks = {}       # FlvPush -> waiting for a key frame to (re)join
+        self._header = None
+        self._config = {}      # "meta" / "video" / "audio" -> (tag_header, body)
         self._stop = threading.Event()
         self._proc = None
         self._codec_error_logged = None
         self._thread = threading.Thread(target=self._run, daemon=True,
-                                        name=f"push-{device_id}-{channel}")
-
-    def matches(self, source_url, stream_name, destination):
-        return (self.source_url, self.stream_name, self.destination) == \
-               (source_url, stream_name, destination)
+                                        name=f"pull-{_describe(source_url)}")
 
     def start(self):
         self._thread.start()
@@ -251,38 +332,61 @@ class FlvPush:
             except subprocess.TimeoutExpired:
                 proc.kill()
 
+    def subscribe(self, sink):
+        with self._lock:
+            self._sinks[sink] = True
+
+    def unsubscribe(self, sink):
+        with self._lock:
+            self._sinks.pop(sink, None)
+
+    def resync(self, sink):
+        """Send `sink` a fresh start at the next key frame."""
+        with self._lock:
+            if sink in self._sinks:
+                self._sinks[sink] = True
+
     def _run(self):
         attempt = failed = 0
         while not self._stop.is_set():
             attempt += 1
-            failed = 0 if self._push_once(attempt) else failed + 1
-            if self._stop.wait(retry_delay(self.retry_s, failed)):
+            failed = 0 if self._pull_once(attempt) else failed + 1
+            if self._stop.wait(retry_delay(1.0, failed)):
                 break
-        log.info("push %s/%s stopped", self.device_id, self.channel)
+        log.info("pull %s stopped", _describe(self.source_url))
 
-    def _push_once(self, attempt):
-        sock = proc = None
+    def _pull_once(self, attempt):
+        proc = None
         stderr_tail = lambda: ""
-        sent = 0
+        frames = 0
         codec_error = None
         try:
-            sock = socket.create_connection((self.host, self.port), timeout=self.timeout_s)
-            sock.settimeout(30)
+            # The streamName is set per push (set_stream_name), not here.
             proc = self._proc = subprocess.Popen(
-                ffmpeg_push_cmd(self.ffmpeg_bin, self.source_url, self.stream_name,
-                                self.camera_audio),
+                ffmpeg_push_cmd(self.ffmpeg_bin, self.source_url, "piport", self.camera_audio),
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
             stderr_tail = start_stderr_drain(proc)
-            log.info("push %s/%s -> %s:%d streamName=%s started (attempt %d, pid %d)",
-                     self.device_id, self.channel, self.host, self.port, self.stream_name,
-                     attempt, proc.pid)
-
-            def write(data):
-                nonlocal sent
-                sock.sendall(data)
-                sent += len(data)
-
-            rewrite_flv(proc.stdout.read, write)
+            with self._lock:
+                names = ", ".join(sorted(f"{s.device_id}/{s.channel}" for s in self._sinks))
+            log.info("pull %s started for %s (attempt %d, pid %d)",
+                     _describe(self.source_url), names or "no push", attempt, proc.pid)
+            self._header = read_flv_header(proc.stdout.read)
+            self._config = {}
+            for tag_header, body in read_tags(proc.stdout.read):
+                if self._stop.is_set():
+                    break
+                payload = body[:-4]
+                if len(body) < int.from_bytes(tag_header[1:4], "big") + 4:
+                    break
+                check_video_codec(tag_header, body)
+                if tag_header[0] == _TAG_SCRIPT and b"onMetaData" in payload[:16]:
+                    self._config["meta"] = (tag_header, body)
+                elif _is_config_tag(tag_header, payload):
+                    self._config["video" if tag_header[0] == _TAG_VIDEO else "audio"] = \
+                        (tag_header, body)
+                else:
+                    frames += 1
+                    self._deliver(tag_header, body, _is_keyframe(tag_header, payload))
             reason = "ffmpeg output ended"
         except UnsupportedCodec as exc:
             codec_error = exc.codec
@@ -296,12 +400,16 @@ class FlvPush:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     proc.kill()
-            if sock:
-                sock.close()
+            if proc:
+                proc.stdout.close()
+            with self._lock:
+                for sink in self._sinks:
+                    self._sinks[sink] = True
+                    sink.put(("end", "camera stream ended"))
         if not self._stop.is_set():
             stderr = stderr_tail()[-300:]
-            msg = ("push %s/%s ended after %d bytes: %s%s", self.device_id, self.channel,
-                   sent, reason, f" ffmpeg: {stderr.strip()}" if stderr.strip() else "")
+            msg = ("pull %s ended after %d frames: %s%s", _describe(self.source_url), frames,
+                   reason, f" ffmpeg: {stderr.strip()}" if stderr.strip() else "")
             if codec_error is None:
                 self._codec_error_logged = None
                 log.warning(*msg)
@@ -313,6 +421,180 @@ class FlvPush:
                 log.error(*msg)
             else:
                 log.debug(*msg)
+        return frames > 0
+
+    def _deliver(self, tag_header, body, keyframe):
+        with self._lock:
+            for sink, waiting in list(self._sinks.items()):
+                if waiting:
+                    if not keyframe or "video" not in self._config:
+                        continue
+                    config = [self._config[k] for k in ("meta", "video", "audio")
+                              if k in self._config]
+                    if not sink.put(("start", self._header, config,
+                                     _tag_timestamp(tag_header))):
+                        continue
+                    self._sinks[sink] = False
+                if not sink.put(("tag", tag_header, body)):
+                    self._sinks[sink] = True  # fell behind: it rejoins at a key frame
+
+
+class PullPool:
+    """The SharedPull per (source url, audio), alive while a push uses it."""
+
+    def __init__(self, ffmpeg_bin="ffmpeg"):
+        self.ffmpeg_bin = ffmpeg_bin
+        self._lock = threading.Lock()
+        self._pulls = {}  # (url, audio) -> [SharedPull, users]
+
+    def acquire(self, url, camera_audio):
+        with self._lock:
+            entry = self._pulls.get((url, camera_audio))
+            if entry is None:
+                entry = self._pulls[(url, camera_audio)] = [
+                    SharedPull(url, camera_audio, self.ffmpeg_bin).start(), 0]
+            entry[1] += 1
+            return entry[0]
+
+    def release(self, pull):
+        with self._lock:
+            key = (pull.source_url, pull.camera_audio)
+            entry = self._pulls.get(key)
+            if entry and entry[0] is pull:
+                entry[1] -= 1
+                if entry[1] <= 0:
+                    del self._pulls[key]
+                    pull.stop()
+
+
+class FlvPush:
+    """Keeps one channel pushed: its SharedPull's tags -> extendedFlv -> TCP,
+    reconnected on any failure every retry interval until stop()."""
+
+    QUEUE_TAGS = 600       # ~10 s of 20 fps video plus audio
+    STALL_S = 30.0         # no tag for this long ends the connection
+
+    def __init__(self, device_id, channel, source_url, stream_name, destination,
+                 ffmpeg_bin="ffmpeg", camera_audio=True, pool=None):
+        self.device_id = device_id
+        self.camera_audio = camera_audio
+        self.channel = channel
+        self.source_url = source_url
+        self.stream_name = stream_name
+        self.destination = destination
+        self.host, self.port, self.retry_s, self.timeout_s = parse_destination(destination)
+        self._pool = pool or PullPool(ffmpeg_bin)
+        self._pull = None
+        self._queue = queue.Queue(maxsize=self.QUEUE_TAGS)
+        self._stop = threading.Event()
+        self._sock = None
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name=f"push-{device_id}-{channel}")
+
+    def matches(self, source_url, stream_name, destination):
+        return (self.source_url, self.stream_name, self.destination) == \
+               (source_url, stream_name, destination)
+
+    def start(self):
+        self._pull = self._pool.acquire(self.source_url, self.camera_audio)
+        self._pull.subscribe(self)
+        self._thread.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+        if self._pull:
+            self._pull.unsubscribe(self)
+            self._pool.release(self._pull)
+        sock = self._sock
+        if sock:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def put(self, item):
+        """From the pull: False (and the queue emptied) when this push fell behind."""
+        try:
+            self._queue.put_nowait(item)
+            return True
+        except queue.Full:
+            with self._queue.mutex:
+                self._queue.queue.clear()
+                self._queue.queue.append(("end", "fell behind the camera stream"))
+                self._queue.not_empty.notify()
+            return False
+
+    def _get(self, timeout):
+        """Next item, or None on stop or after `timeout` seconds without one."""
+        deadline = time.monotonic() + timeout
+        while not self._stop.is_set():
+            try:
+                return self._queue.get(timeout=min(1.0, max(0.0, deadline - time.monotonic())))
+            except queue.Empty:
+                if time.monotonic() >= deadline:
+                    return None
+        return None
+
+    def _run(self):
+        attempt = failed = 0
+        while not self._stop.is_set():
+            item = self._get(1.0)
+            if not item or item[0] != "start":
+                continue  # waiting for the pull to hand over a key frame
+            attempt += 1
+            failed = 0 if self._push_once(item, attempt) else failed + 1
+            if self._stop.wait(retry_delay(self.retry_s, failed)):
+                break
+            with self._queue.mutex:
+                self._queue.queue.clear()
+            self._pull.resync(self)
+        log.info("push %s/%s stopped", self.device_id, self.channel)
+
+    def _push_once(self, start, attempt):
+        _, header, config, base_ts = start
+        sent = 0
+        reason = "stopped"
+        try:
+            sock = self._sock = socket.create_connection((self.host, self.port),
+                                                         timeout=self.timeout_s)
+            sock.settimeout(30)
+            log.info("push %s/%s -> %s:%d streamName=%s started (attempt %d, %s)",
+                     self.device_id, self.channel, self.host, self.port, self.stream_name,
+                     attempt, _describe(self.source_url))
+
+            def write(data):
+                nonlocal sent
+                sock.sendall(data)
+                sent += len(data)
+
+            writer = ExtendedFlvWriter(write)
+            writer.header(header)
+            for tag_header, body in config:
+                tag_header, body = set_stream_name(tag_header, body, self.stream_name)
+                writer.sync_if_due(0)
+                writer.tag(_retime(tag_header, 0), body)
+            while not self._stop.is_set():
+                item = self._get(self.STALL_S)
+                if item is None:
+                    if not self._stop.is_set():
+                        reason = f"no frames for {self.STALL_S:.0f} s"
+                    break
+                if item[0] != "tag":
+                    reason = item[1] if item[0] == "end" else "restarted"
+                    break
+                tag_header = _retime(item[1], _tag_timestamp(item[1]) - base_ts)
+                writer.sync_if_due(_tag_timestamp(tag_header))
+                writer.tag(tag_header, item[2])
+        except OSError as exc:
+            reason = repr(exc)
+        finally:
+            if self._sock:
+                self._sock.close()
+                self._sock = None
+        if not self._stop.is_set():
+            log.warning("push %s/%s ended after %d bytes: %s", self.device_id, self.channel,
+                        sent, reason)
         return sent > 0
 
 
@@ -338,6 +620,7 @@ class PushManager:
         self._sources = {}   # device_id -> {"url", "audio", "width", "height", "fps"}
         self._wanted = {}    # device_id -> {channel: (stream_name, destination)}
         self._pushes = {}    # (device_id, channel) -> FlvPush
+        self._pool = PullPool(ffmpeg_bin)  # channels on the same stream share one pull
         self._subs = {}      # main url -> substream profile dict, or None (none/failed)
         self._looking_up = set()  # main urls whose profiles are being fetched
 
@@ -428,11 +711,16 @@ class PushManager:
 
     def configure(self, device_id, video_settings):
         """Apply a ChangeVideoSettings `video` dict: channels with an extendedFlv
-        avSerializer and a tcp destination are pushed; /dev/null stops one."""
+        avSerializer and a tcp destination are pushed; /dev/null stops one.
+        A channel without an avSerializer is left as it is: Protect also sends
+        encoder-only settings (fps, bitrate mode), which stopped the push."""
         with self._lock:
             wanted = self._wanted.setdefault(device_id, {})
             for channel, settings in (video_settings or {}).items():
-                serializer = (settings or {}).get("avSerializer") or {}
+                serializer = (settings or {}).get("avSerializer")
+                if serializer is None:
+                    continue
+                serializer = serializer or {}
                 dests = serializer.get("destinations") or []
                 name = (serializer.get("parameters") or {}).get("streamName")
                 if not dests or any("/dev/null" in d for d in dests):
@@ -463,6 +751,6 @@ class PushManager:
                 try:
                     self._pushes[(device_id, channel)] = FlvPush(
                         device_id, channel, url, name, dest, self.ffmpeg_bin,
-                        camera_audio=src["audio"]).start()
+                        camera_audio=src["audio"], pool=self._pool).start()
                 except ValueError:
                     log.warning("push %s/%s: bad destination %r", device_id, channel, dest)

@@ -561,6 +561,14 @@ smallest H.264 profile below the main one's resolution; until that answer `video
 waits, so it doesn't open a main-stream session only to restart on the substream.
 `video1`/`video2`, and detection, use the main stream.
 
+Channels on the same stream share one ffmpeg (`SharedPull`, kept per URL by
+`PullPool`): a camera allows few RTSP sessions, and a Hikvision answered `500` to a
+fourth. Each push (`FlvPush`) joins at the next key frame with ffmpeg's
+`onMetaData` (its own `streamName` patched in) and the AVC/AAC config tags, its
+timestamps rebased to that frame; one that falls ~10 s behind or loses its socket
+rejoins at a later key frame. The pull restarts ffmpeg (backing off while it gets
+no frames) as long as a push uses it.
+
 Each channel is `ffmpeg -c:v copy` (plus AAC audio) into FLV, rewritten by
 `rewrite_flv()` and sent over TCP. **H.264 only:** an HEVC source is muxed by
 ffmpeg as Enhanced RTMP (an `hvc1` FourCC), which `ms` refuses (live view resets,

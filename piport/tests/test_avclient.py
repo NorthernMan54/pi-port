@@ -2644,6 +2644,25 @@ class HwDecoderSelection(unittest.TestCase):
         self.assertEqual(av._hwdec_args(None), [])
         self.assertEqual(av._hwdec_args("mjpeg"), [])
 
+    def test_videotoolbox_h264_from_the_camera_itself(self):
+        # An ONVIF camera is pulled directly, not through Protect's relay.
+        os.environ["AIPORT_HWDEC"] = "videotoolbox"
+        self.assertEqual(av._hwdec_args("h264", direct=True), ["-hwaccel", "videotoolbox"])
+        self.assertEqual(av._hwdec_args(None, direct=True), ["-hwaccel", "videotoolbox"])
+        self.assertEqual(av._hwdec_args("hevc", direct=True), ["-hwaccel", "videotoolbox"])
+        self.assertEqual(av._hwdec_args("mjpeg", direct=True), [])
+        os.environ["AIPORT_HWDEC"] = "rkmpp"
+        self.assertEqual(av._hwdec_args("h264", direct=True), ["-c:v", "h264_rkmpp"])
+
+    def test_direct_h264_pull_stays_on_the_gpu(self):
+        os.environ["AIPORT_HWDEC"] = "videotoolbox"
+        with mock.patch.object(av, "HW_SCALE", True), \
+                mock.patch.object(av.sys, "platform", "darwin"):
+            pre, _, hw, _ = av._pull_video_args("h264", 1280, 720, "CAM", direct=True)
+            self.assertEqual(hw, "vt")
+            self.assertIn("videotoolbox_vld", pre)
+            self.assertEqual(av._pull_video_args("h264", 1280, 720, "CAM")[2], "vt_upload")
+
     def test_auto_on_macos_is_videotoolbox(self):
         os.environ.pop("AIPORT_HWDEC", None)
         with mock.patch.object(av.sys, "platform", "darwin"), \

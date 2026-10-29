@@ -83,6 +83,12 @@ _HWDEC_BACKENDS = {
     "v4l2m2m": {"h264": ["-c:v", "h264_v4l2m2m"], "hevc": ["-c:v", "hevc_v4l2m2m"]},
     "videotoolbox": {"hevc": ["-hwaccel", "videotoolbox"]},
 }
+# Codecs hardware-decoded only when pulled straight from the camera (an ONVIF camera), not
+# through Protect's relay. A 2560x1440 Hikvision's H.264 (driveway clips, 2026-10-28) decoded
+# with 0 errors either way, VideoToolbox at ~1.4% of a core vs ~7.3% in software.
+_HWDEC_DIRECT = {
+    "videotoolbox": {"h264": ["-hwaccel", "videotoolbox"]},
+}
 _FFPROBE_BIN = os.path.join(os.path.dirname(FFMPEG_BIN), "ffprobe") \
     if FFMPEG_BIN != "ffmpeg" and os.path.exists(os.path.join(os.path.dirname(FFMPEG_BIN), "ffprobe")) \
     else "ffprobe"
@@ -177,14 +183,18 @@ def _rtsp_timeout_args():
     return [flag, str(int(RTSP_TIMEOUT_S * 1_000_000))] if flag else []
 
 
-def _hwdec_args(codec):
+def _hwdec_args(codec, direct=False):
     """Input decoder args for the active hardware backend, or empty (ffmpeg's
     auto-selected software decoder). Unknown/failed probe assumes h264, the
-    historical default."""
+    historical default. `direct`: pulled from the camera itself, not Protect's relay."""
     backend = _detect_hwdec()
     if not backend:
         return []
-    return list(_HWDEC_BACKENDS[backend].get(codec or "h264", []))
+    codec = codec or "h264"
+    args = _HWDEC_BACKENDS[backend].get(codec)
+    if not args and direct:
+        args = _HWDEC_DIRECT.get(backend, {}).get(codec)
+    return list(args or [])
 
 # Real detection: per-tick YOLOv5s/RKNN classify the latest frame; objects are
 # IOU-tracked per objectType with their own trackerID/eventId and enter/move/leave.
@@ -716,10 +726,11 @@ def _hw_scale_mode(hwdec_args, device_id=None):
     return "vt" if "videotoolbox" in hwdec_args else "vt_upload"
 
 
-def _pull_video_args(codec, det_w, det_h, device_id=None):
+def _pull_video_args(codec, det_w, det_h, device_id=None, direct=False):
     """(ffmpeg args before -i, filter graph, GPU scaling mode, JPEG every Nth frame) for a
-    stream of this codec. replay.py builds its pull from this too."""
-    hwdec = _hwdec_args(codec)
+    stream of this codec (`direct`: from the camera, not Protect's relay). replay.py builds
+    its pull from this too."""
+    hwdec = _hwdec_args(codec, direct)
     hw = _hw_scale_mode(hwdec, device_id)
     pre = list(hwdec)
     if hw == "vt":
@@ -755,6 +766,7 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
     _stop_stream(device_id)
     os.makedirs(_STREAM_DIR, exist_ok=True)
     _stream_dims[device_id] = (width or DETECT_IMG_SIZE, height or DETECT_IMG_SIZE)
+    direct = bool(url)
     url = url or f"rtsp://{ip}:{port}/{uri}"
     out_path = os.path.join(_STREAM_DIR, f"{device_id}.jpg")
     probe = _probe_stream(url)
@@ -764,7 +776,8 @@ def _start_stream(device_id, ip, port, uri, width=None, height=None, url=None):
         _stream_dims[device_id] = (probe["width"], probe["height"])
     codec = probe["codec"]
     det_w, det_h = _detect_dims(width, height)
-    pre_args, graph, hw, jpeg_every = _pull_video_args(codec, det_w, det_h, device_id)
+    pre_args, graph, hw, jpeg_every = _pull_video_args(codec, det_w, det_h, device_id,
+                                                       direct=direct)
     encode_args = ["-c:v", "mjpeg_rkmpp"] if FFMPEG_BIN != "ffmpeg" else ["-c:v", "mjpeg"]
     # Plate/face reads use the snapshot file, so refresh it every second when they're on.
     snap_interval = 1.0 if enrich.smart_detect_features() else 2.0

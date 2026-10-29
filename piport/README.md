@@ -569,7 +569,9 @@ timestamps rebased to that frame; one that falls ~10 s behind or loses its socke
 rejoins at a later key frame. The pull restarts ffmpeg (backing off while it gets
 no frames) as long as a push uses it.
 
-Each channel is `ffmpeg -c:v copy` (plus AAC audio) into FLV, rewritten by
+Each channel is `ffmpeg -c:v copy -c:a copy` into FLV (audio FLV or Protect can't
+take -- any sound format but MP3, G.711 or AAC -- is re-encoded to AAC; a camera
+without audio gets a silent AAC track), rewritten by
 `rewrite_flv()` and sent over TCP. **H.264 only:** an HEVC source is muxed by
 ffmpeg as Enhanced RTMP (an `hvc1` FourCC), which `ms` refuses (live view resets,
 the push is closed after a few hundred bytes); `rewrite_flv()` raises

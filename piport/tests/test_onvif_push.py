@@ -121,11 +121,14 @@ class TestDestination(unittest.TestCase):
             with self.assertRaises(ValueError):
                 onvif_push.parse_destination(bad)
 
-    def test_ffmpeg_cmd_copies_video_with_aac(self):
+    def test_ffmpeg_cmd_copies_video_and_audio(self):
+        # Re-encoding the camera's G.711 to AAC made live view stop and start every second.
         cmd = onvif_push.ffmpeg_push_cmd("ffmpeg", "rtsp://cam/1", "ABC")
         self.assertEqual(cmd[cmd.index("-c:v") + 1], "copy")
-        self.assertEqual(cmd[cmd.index("-c:a") + 1], "aac")
+        self.assertEqual(cmd[cmd.index("-c:a") + 1], "copy")
         self.assertIn("0:a:0", cmd)
+        reencoded = onvif_push.ffmpeg_push_cmd("ffmpeg", "rtsp://cam/1", "ABC", copy_audio=False)
+        self.assertEqual(reencoded[reencoded.index("-c:a") + 1], "aac")
         self.assertNotIn("lavfi", cmd)
         self.assertIn("streamName=ABC", cmd)
         self.assertEqual(cmd[-3:], ["-f", "flv", "-"])
@@ -405,6 +408,42 @@ class TestFanOut(unittest.TestCase):
         self.assertEqual(len(sink.items), 2)  # nothing until the next key frame
         self.pull._deliver(*self._tag(_KEY, 2000), keyframe=True)
         self.assertEqual(sink.items[2][0], "start")
+
+
+class TestAudioCopyFallback(unittest.TestCase):
+    """Audio Protect won't take copied (ffmpeg 8 writes Opus as Enhanced FLV, sound
+    format 9) switches the pull to AAC for its next attempt."""
+
+    def _pull_once(self, source):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".flv", delete=False) as f:
+            f.write(source)
+        self.addCleanup(os.unlink, f.name)
+        launched = []
+
+        def fake_cmd(ffmpeg_bin, url, name, camera_audio=True, copy_audio=True):
+            launched.append(copy_audio)
+            return [sys.executable, "-c",
+                    "import sys; sys.stdout.buffer.write(open(sys.argv[1],'rb').read())", f.name]
+
+        pull = onvif_push.SharedPull("rtsp://cam/101")
+        with mock.patch.object(onvif_push, "ffmpeg_push_cmd", fake_cmd), \
+                self.assertLogs("aiport-onvif", "WARNING"):
+            pull._pull_once(1)
+            pull._pull_once(2)
+        return pull, launched
+
+    def test_enhanced_flv_audio_falls_back_to_aac(self):
+        opus = b"\x9f" + b"Opus" + b"\x00"
+        pull, launched = self._pull_once(_flv([(9, 0, _AVC_CONFIG), (8, 0, opus), (9, 0, _KEY)]))
+        self.assertFalse(pull._copy_audio)
+        self.assertEqual(launched, [True, False])
+
+    def test_g711_stays_copied(self):
+        mulaw = b"\x82" + b"\x7f" * 160  # sound format 8: G.711 mu-law
+        pull, launched = self._pull_once(_flv([(9, 0, _AVC_CONFIG), (8, 0, mulaw), (9, 0, _KEY)]))
+        self.assertTrue(pull._copy_audio)
+        self.assertEqual(launched, [True, True])
 
 
 class TestSharedPushes(unittest.TestCase):

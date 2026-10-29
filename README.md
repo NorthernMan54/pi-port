@@ -398,8 +398,11 @@ Limits:
   (looked up with the RTSP URL's login; otherwise the main stream). The resolution
   reported to Protect is probed from the main stream, and the substream's is its
   ONVIF profile's.
-- Audio is AAC 32 kHz mono (silent if the camera has none). Protect asks for
-  Opus, which plain FLV cannot carry.
+- The camera's audio is copied as it is (G.711, AAC or MP3), like unifi-cam-proxy
+  with `-c:a copy`: re-encoding G.711 to AAC made live view stop and start every
+  second. Other audio (e.g. Opus) is re-encoded to AAC 32 kHz mono, and a camera
+  without audio gets a silent AAC track. Protect asks for Opus, which plain FLV
+  cannot carry.
 - Channels carrying the same stream share one RTSP session (one ffmpeg, fanned
   out); the detector opens its own. With a substream that is three sessions:
   main (`video1`/`video2`), sub (`video3`) and detection. Cameras limit

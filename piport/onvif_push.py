@@ -253,27 +253,41 @@ def parse_destination(dest):
     return parts.hostname, parts.port, retry, timeout
 
 
-def ffmpeg_push_cmd(ffmpeg_bin, source_url, stream_name, camera_audio=True):
-    """Camera video copied (no re-encode) plus an AAC audio track into FLV on
-    stdout. Protect's ingest only marks a stream ready (live view, recording)
-    with both tracks present -- the extendedFlv header always flags audio+video
-    -- so a camera without audio gets a silent track. AAC 32 kHz mono as in
-    unifi-cam-proxy; Protect asks for Opus, which plain FLV cannot carry."""
+def ffmpeg_push_cmd(ffmpeg_bin, source_url, stream_name, camera_audio=True, copy_audio=True):
+    """Camera video copied (no re-encode) plus an audio track into FLV on stdout.
+    Protect's ingest only marks a stream ready (live view, recording) with both
+    tracks present -- the extendedFlv header always flags audio+video -- so a
+    camera without audio gets a silent AAC track.
+
+    The camera's audio is copied (FLV carries G.711 and AAC as they are), as
+    unifi-cam-proxy runs here with -c:a copy. Re-encoding G.711 to AAC made
+    Protect's live view stop and start every second (live 2026-10-28);
+    `copy_audio=False` re-encodes, for audio FLV can't hold (e.g. Opus)."""
     cmd = [
         ffmpeg_bin, "-nostdin", "-loglevel", "error",
         "-avoid_negative_ts", "make_zero", "-fflags", "+genpts+discardcorrupt",
         "-use_wallclock_as_timestamps", "1", "-timeout", "15000000",
         "-rtsp_transport", "tcp", "-i", source_url,
     ]
+    aac = ["-c:a", "aac", "-ar", "32000", "-ac", "1", "-b:a", "32k"]
     if camera_audio:
-        cmd += ["-map", "0:v:0", "-map", "0:a:0"]
+        cmd += ["-map", "0:v:0", "-map", "0:a:0"] + (["-c:a", "copy"] if copy_audio else aac)
     else:
         cmd += ["-f", "lavfi", "-i", "anullsrc=r=32000:cl=mono",
-                "-map", "0:v:0", "-map", "1:a:0", "-shortest"]
+                "-map", "0:v:0", "-map", "1:a:0", "-shortest"] + aac
     return cmd + [
-        "-c:v", "copy", "-c:a", "aac", "-ar", "32000", "-ac", "1", "-b:a", "32k",
+        "-c:v", "copy",
         "-metadata", f"streamName={stream_name}", "-f", "flv", "-",
     ]
+
+
+# FLV sound formats (high nibble of an audio tag) Protect takes copied: MP3, G.711 A-law and
+# mu-law, AAC. ffmpeg 8 copies e.g. Opus too, as Enhanced FLV (9), like the HEVC ms refuses.
+_COPYABLE_AUDIO = (2, 7, 8, 10)
+
+
+class _AudioNotCopyable(ValueError):
+    """The camera's audio came out of a copy in a format Protect won't take."""
 
 
 def _describe(url):
@@ -358,6 +372,7 @@ class SharedPull:
         self._stop = threading.Event()
         self._proc = None
         self._codec_error_logged = None
+        self._copy_audio = True  # until ffmpeg says FLV can't hold the camera's audio
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name=f"pull-{_describe(source_url)}")
 
@@ -406,7 +421,8 @@ class SharedPull:
         try:
             # The streamName is set per push (set_stream_name), not here.
             proc = self._proc = subprocess.Popen(
-                ffmpeg_push_cmd(self.ffmpeg_bin, self.source_url, "piport", self.camera_audio),
+                ffmpeg_push_cmd(self.ffmpeg_bin, self.source_url, "piport", self.camera_audio,
+                                self._copy_audio),
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
             stderr_tail = start_stderr_drain(proc)
             with self._lock:
@@ -423,6 +439,9 @@ class SharedPull:
                 if len(body) < int.from_bytes(tag_header[1:4], "big") + 4:
                     break
                 check_video_codec(tag_header, body)
+                if (self._copy_audio and tag_header[0] == _TAG_AUDIO and payload
+                        and payload[0] >> 4 not in _COPYABLE_AUDIO):
+                    raise _AudioNotCopyable(f"FLV sound format {payload[0] >> 4}")
                 if tag_header[0] == _TAG_SCRIPT and b"onMetaData" in payload[:16]:
                     self._config["meta"] = (tag_header, body)
                 elif _is_config_tag(tag_header, payload):
@@ -434,6 +453,9 @@ class SharedPull:
                         stats.frame(_tag_timestamp(tag_header))
                     self._deliver(tag_header, body, _is_keyframe(tag_header, payload))
             reason = "ffmpeg output ended"
+        except _AudioNotCopyable as exc:
+            self._copy_audio = False
+            reason = f"camera audio not copyable ({exc}): re-encoding it to AAC from now on"
         except UnsupportedCodec as exc:
             codec_error = exc.codec
             reason = str(exc)

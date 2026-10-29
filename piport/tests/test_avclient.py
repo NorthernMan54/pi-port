@@ -1301,6 +1301,31 @@ class TestCameraEvent(Base):
         self.assertNotIn("vehicle", ev[0][1])   # the car stayed parked
         self.assertEqual(ev[-1], ("leave", [], ["face", "person"]))  # closed without the time limit
 
+    def test_person_standing_still_parks_and_closes_the_event(self):
+        # Live 10:42 on the ONVIF Driveway: people standing in the driveway held the event
+        # open to its 5-minute limit, and a car passing on the road at 10:44 joined it, shown
+        # in Protect at 10:42 with a person's thumbnail.
+        for _ in range(av.STILL_TICKS + 3):
+            self.tick(self.PERSON, self.FACE)
+        ev = self.events()
+        self.assertEqual(ev[0], ("enter", ["face", "person"], []))
+        self.assertEqual(ev[-1], ("leave", [], ["face", "person"]))
+        self.assertIsNone(av._motion_state["D"].get("event"))
+        tracks = av._motion_state["D"]["tracks"].values()
+        self.assertTrue(all(tr.get("stationary_coord") for tr in tracks))
+
+    def test_car_passing_a_parked_person_gets_its_own_event(self):
+        for _ in range(av.STILL_TICKS + 3):
+            self.tick(self.PERSON, self.FACE)
+        self.sent.clear()
+        for _ in range(3):
+            self.tick(self.PERSON, self.FACE, self.CAR)
+        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
+            self.tick(self.PERSON, self.FACE)
+        ev = self.events()
+        self.assertEqual(ev[0], ("enter", ["vehicle"], []))
+        self.assertEqual(ev[-1], ("leave", ["vehicle"], ["vehicle"]))
+
     def test_single_participant_keeps_proven_leave(self):
         av._event_max_ms["D"] = 0
         self.tick(self.CAR)
@@ -1385,11 +1410,15 @@ class TestCameraEvent(Base):
         self.tick(self.PERSON)
         for _ in range(av.STILL_TICKS):
             self.tick(self.PERSON)
-        d = self.sent[-1][1]["descriptors"][0]
+        # A still person parks (PARK_WHEN_STILL_IN_EVENT): the event closes, and the leave
+        # reports them stationary since they stopped.
+        fn, p = self.sent[-1]
+        self.assertEqual((fn, p["edgeType"]), ("EventSmartDetect", "leave"), self.sent[-1])
+        d = p["descriptors"][0]
         self.assertEqual((d["objectType"], d["stationary"]), ("person", True))
         tr = av._motion_state["D"]["tracks"][1]
         self.assertEqual(d["idleSinceTimeMs"], tr["still_since_ms"])
-        self.assertIsNotNone(av._motion_state["D"].get("event"))  # people are not parked
+        self.assertIsNone(av._motion_state["D"].get("event"))
 
     def test_jitter_still_counts_as_still(self):
         tr = {"coord": [100, 100, 200, 200]}

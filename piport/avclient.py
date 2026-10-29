@@ -2224,6 +2224,18 @@ STILL_IOU = 0.7
 STILL_TICKS = _ticks(30)
 STARTUP_WINDOW_MS = 15000
 PARK_WHEN_STILL = ("vehicle",)
+# Once confirmed, a still person or animal parks too, so someone standing in the driveway
+# doesn't hold the camera's one event open to its time limit and pull later passers-by into
+# it. A real camera does the same: a stationary tracker is a bystander, carried in the
+# descriptors but not holding the event (unifi-cam-proxy's EventSmartDetect captures). Their
+# face parks with them. Unlike a vehicle, a person who never moved still opens an event.
+PARK_WHEN_STILL_IN_EVENT = PARK_WHEN_STILL + ("person", "animal")
+# People standing and talking shift and gesture, so their box rarely keeps STILL_IOU with its
+# anchor for STILL_TICKS (live 10:42: three people stood ~1 minute, longest IoU run 36 s).
+# For them, still is the box centre staying within RESUME_MOVE_FRACTION of the anchor box's
+# size for STILL_PERSON_MS of frame time, which doesn't stretch when detection falls behind.
+STILL_BY_CENTRE = ("person", "animal")
+STILL_PERSON_MS = 20000
 
 
 def _center_moved(a, b, frac=RESUME_MOVE_FRACTION):
@@ -2281,13 +2293,18 @@ def _resume_recent(dev, d, event):
 def _update_still(tr, now_ms):
     """Advance a track's stillness against its anchor box (detector jitter tolerated)."""
     anchor = tr.get("anchor")
-    if anchor is None or _iou(tr["coord"], anchor) < STILL_IOU:
+    by_centre = tr.get("objectType") in STILL_BY_CENTRE
+    if anchor is None or (_center_moved(anchor, tr["coord"]) if by_centre
+                          else _iou(tr["coord"], anchor) < STILL_IOU):
         tr["anchor"] = list(tr["coord"])
         tr["still_ticks"] = 0
         tr["still_since_ms"] = now_ms
     else:
         tr["still_ticks"] = tr.get("still_ticks", 0) + 1
-    tr["still"] = tr["still_ticks"] >= STILL_TICKS
+    if by_centre:
+        tr["still"] = now_ms - tr["still_since_ms"] >= STILL_PERSON_MS
+    else:
+        tr["still"] = tr["still_ticks"] >= STILL_TICKS
 
 
 def _park(tr):
@@ -3121,20 +3138,26 @@ def _motion_tick(ws, device_id):
                          device_id)
                 joining.append((tid, tr))
 
-        # 3. A vehicle that has stopped (still ~30 s) parks; its snapshot stays in the leave.
-        #    One that never left its first box parks with no event.
+        # 3. A vehicle, person or animal that has stopped (still ~30 s) parks; its snapshot
+        #    stays in the leave. A vehicle that never left its first box parks with no event.
         for tid, tr in tracks.items():
             if (not tr.get("stationary_coord") and tr.get("still")
                     and tr["objectType"] in PARK_WHEN_STILL and not tr.get("confirmed", True)
                     and tr.get("true_positive") and not tr.get("left_first_box")):
                 tr["confirmed"] = True
             if (not tr.get("stationary_coord") and tr.get("still")
-                    and tr["objectType"] in PARK_WHEN_STILL and tr.get("confirmed", True)):
+                    and tr["objectType"] in PARK_WHEN_STILL_IN_EVENT and tr.get("confirmed", True)):
                 log.info("real motion tick: %s tracker_id=%s still for %d ticks, parked for "
                          "deviceID=%s", tr["objectType"], tid, tr["still_ticks"], device_id)
-                _park(tr)
-                if event is not None and tr.get("event_id") == event["id"]:
-                    event["finished"].append((tid, tr))
+                parking = [(tid, tr)]
+                face = tracks.get(tr.get("face_tid"))
+                if face is not None and face["objectType"] == "face" \
+                        and not face.get("stationary_coord"):
+                    parking.append((tr["face_tid"], face))
+                for ptid, ptr in parking:
+                    _park(ptr)
+                    if event is not None and ptr.get("event_id") == event["id"]:
+                        event["finished"].append((ptid, ptr))
 
         # 3b. A face or plate confirms as soon as a confirmed, active track of its parent
         #     type is there (it was found inside that track's box); a face only once a read

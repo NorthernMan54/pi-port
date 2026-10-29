@@ -571,7 +571,8 @@ no frames) as long as a push uses it.
 
 Each channel is `ffmpeg -c:v copy -c:a copy` into FLV (audio FLV or Protect can't
 take -- any sound format but MP3, G.711 or AAC -- is re-encoded to AAC; a camera
-without audio gets a silent AAC track), rewritten by
+without audio gets a silent AAC track; known issue: no audio plays in Protect
+yet -- G.711 gives none in the browser, AAC stutters), rewritten by
 `rewrite_flv()` and sent over TCP. **H.264 only:** an HEVC source is muxed by
 ffmpeg as Enhanced RTMP (an `hvc1` FourCC), which `ms` refuses (live view resets,
 the push is closed after a few hundred bytes); `rewrite_flv()` raises

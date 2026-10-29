@@ -878,7 +878,7 @@ class TestCameraEvent(Base):
             self.tick()
         ev = self.events()
         # Multi-participant leave: no descriptors, a snapshot per participant.
-        self.assertEqual(ev[-1], ("leave", [], ["face", "person"]))
+        self.assertEqual(ev[-1], ("leave", ["face", "person"], ["face", "person"]))
         self.assertEqual([e[0] for e in ev[:-1]], ["moving"] * (len(ev) - 1))
         self.assertIsNone(av._motion_state["D"].get("event"))
 
@@ -911,7 +911,7 @@ class TestCameraEvent(Base):
         self.assertEqual(self.events(), [("enter", ["face", "person"], [])])
         for _ in range(av.MOTION_MISS_TOLERANCE_TICKS):
             self.tick(self.CAR)
-        self.assertEqual(self.events()[-1], ("leave", [], ["face", "person"]))
+        self.assertEqual(self.events()[-1], ("leave", ["face", "person"], ["face", "person"]))
 
     def _clock(self, start=0):
         clock = [start]
@@ -1299,7 +1299,7 @@ class TestCameraEvent(Base):
         ev = self.events()
         self.assertEqual(ev[0][0], "enter")
         self.assertNotIn("vehicle", ev[0][1])   # the car stayed parked
-        self.assertEqual(ev[-1], ("leave", [], ["face", "person"]))  # closed without the time limit
+        self.assertEqual(ev[-1], ("leave", ["face", "person"], ["face", "person"]))  # closed without the time limit
 
     def test_person_standing_still_parks_and_closes_the_event(self):
         # Live 10:42 on the ONVIF Driveway: people standing in the driveway held the event
@@ -1309,10 +1309,25 @@ class TestCameraEvent(Base):
             self.tick(self.PERSON, self.FACE)
         ev = self.events()
         self.assertEqual(ev[0], ("enter", ["face", "person"], []))
-        self.assertEqual(ev[-1], ("leave", [], ["face", "person"]))
+        self.assertEqual(ev[-1], ("leave", ["face", "person"], ["face", "person"]))
         self.assertIsNone(av._motion_state["D"].get("event"))
         tracks = av._motion_state["D"]["tracks"].values()
         self.assertTrue(all(tr.get("stationary_coord") for tr in tracks))
+
+    def test_object_that_never_joined_is_not_in_the_leave(self):
+        # Live 11:57 on both Driveways: a car on the far road, outside every zone listing
+        # vehicles, closed while a person's event was open and went into its leave, so the
+        # person's event was listed (at 30%) as a vehicle detection too.
+        car = dict(self.CAR, in_zone=False)
+        for _ in range(3):
+            self.tick(self.PERSON, self.FACE, car)
+        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS + 1):
+            self.tick(self.PERSON, self.FACE)          # the car is gone
+        for _ in range(av.MOTION_MISS_TOLERANCE_TICKS + 1):
+            self.tick()
+        ev = self.events()
+        self.assertEqual(ev[0], ("enter", ["face", "person"], []))
+        self.assertEqual(ev[-1], ("leave", ["face", "person"], ["face", "person"]))
 
     def test_car_passing_a_parked_person_gets_its_own_event(self):
         for _ in range(av.STILL_TICKS + 3):
@@ -1680,11 +1695,20 @@ class TestMultiLeave(Base):
     def test_payload_shape(self):
         self.send().cancel()
         payload = self.sent[-1][1]
-        self.assertEqual((payload["edgeType"], payload["descriptors"], payload["objectTypes"]),
-                         ("leave", [], []))
+        self.assertEqual((payload["edgeType"], payload["objectTypes"]), ("leave", []))
         self.assertEqual([(x["trackerID"], x["smartDetectSnapshotType"])
                           for x in payload["smartDetectSnapshots"]],
                          [(3, "person"), (1, "vehicle"), (4, "face")])
+        # Each participant's final descriptor too, at its snapshot's score and box: with
+        # none, Protect showed multi-participant events at 30%.
+        self.assertEqual([(d["trackerID"], d["objectType"], d["confidenceLevel"], d["coord"])
+                          for d in payload["descriptors"]],
+                         [(x["trackerID"], x["smartDetectSnapshotType"], x["confidenceLevel"],
+                           x["coord"]) for x in payload["smartDetectSnapshots"]])
+        with mock.patch.object(av, "MULTI_LEAVE_DESCRIPTORS", False):
+            self.sent.clear()
+            self.send()
+            self.assertEqual(self.sent[-1][1]["descriptors"], [])
         attrs = payload["trackerIDAttrMap"]
         self.assertEqual(attrs["3"]["associatedFaceTrackerID"], 4)
         self.assertEqual(attrs["4"]["faceEmbed"], [0.1, 0.2])

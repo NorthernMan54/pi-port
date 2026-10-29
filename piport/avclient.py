@@ -2410,6 +2410,12 @@ LEAVE_PRIORITY = {"face": 0, "person": 1, "vehicle": 2, "animal": 3}
 # associatedFaceTrackerID, vehicleType/color, plate as matchedName). If Protect requests
 # none of its snapshots within LEAVE_FALLBACK_S, the proven single-tracker leave is resent.
 LEAVE_FALLBACK_S = 4.0
+# Each participant's final descriptor (best-frame box and score) also goes in that leave:
+# with empty descriptors Protect showed every multi-participant event at 30% (live
+# 2026-10-29: a person sent at 51 and a vehicle at 68 both showed 30%), while
+# single-participant leaves, which carry a descriptor, showed their real score.
+# AIPORT_MULTI_LEAVE_DESCRIPTORS=0 goes back to empty descriptors.
+MULTI_LEAVE_DESCRIPTORS = os.environ.get("AIPORT_MULTI_LEAVE_DESCRIPTORS", "1") != "0"
 _pending_leaves = {}  # snapshot filename -> shared {"seen": bool} for a multi-tracker leave
 
 
@@ -2599,7 +2605,7 @@ def _send_multi_leave(ws, device_id, event_id, members, fallback):
     _record_snapshot_filename(fullfov, device_id, kind="fullfov",
                               jpeg=first_best["jpeg"] if first_best else None)
     faces_by_person = _associate_faces(members)
-    snapshots, attr_map = [], {}
+    snapshots, attr_map, descriptors = [], {}, []
     for tid, tr in members:
         b = tr.get("best")
         crop = list(b["coord"] if b else tr["coord"])
@@ -2608,7 +2614,20 @@ def _send_multi_leave(ws, device_id, event_id, members, fallback):
         name = f"smartdetectsnap_zone_{tid}{wall}.jpg"
         _record_snapshot_filename(name, device_id, kind="object", coord=crop,
                                   jpeg=b["jpeg"] if b else None)
-        level = int(round(tr["score"] * 100)) if tr["score"] <= 1 else int(round(tr["score"]))
+        # The best frame's score, as the snapshot is that frame (not the last read).
+        score = b["score"] if b and b.get("score") is not None else tr["score"]
+        level = int(round(score * 100)) if score <= 1 else int(round(score))
+        if MULTI_LEAVE_DESCRIPTORS:
+            descriptors.append({
+                "attributes": None, "boxColor": "cyan", "confidenceLevel": level,
+                "coord": box, "coord3d": [-1, -1], "firstShownTimeMs": tr["first_shown_ms"],
+                "idleSinceTimeMs": tr.get("still_since_ms") if tr.get("still")
+                else tr["first_shown_ms"],
+                "intelligenceZones": [], "lines": [], "loiterZones": [], "name": "",
+                "objectType": tr["objectType"], "secondLensZones": [],
+                "stationary": bool(tr.get("still") or tr.get("stationary_coord")), "tag": "",
+                "trackerID": tid, "zones": _track_zones(tr.get("zone_ids")),
+            })
         snapshots.append({
             "clockBestMonotonic": 0, "clockBestWall": wall, "confidenceLevel": level,
             "coord": box, "framingRect": box, "reVerifyEligible": False,
@@ -2621,8 +2640,7 @@ def _send_multi_leave(ws, device_id, event_id, members, fallback):
     payload = {
         "deviceID": device_id, "clockMonotonic": clock_mono, "clockStream": clock_stream,
         "clockStreamRate": 1000, "clockWall": _clock_wall(device_id, now_ms),
-        # Departing trackers aren't repeated in descriptors (real captures, notes s7).
-        "descriptors": [], "displayTimeoutMSec": 200, "edgeType": "leave",
+        "descriptors": descriptors, "displayTimeoutMSec": 200, "edgeType": "leave",
         "eventId": event_id, "objectTypes": [],
         "smartDetectSnapshotFullFoV": fullfov,
         "smartDetectSnapshotFullFoVHeight": fov_h, "smartDetectSnapshotFullFoVWidth": fov_w,
@@ -3033,7 +3051,11 @@ def _motion_tick(ws, device_id):
                       "track for deviceID=%s tracker_id=%s (last seen: %s score=%.2f)",
                       tolerance, device_id, tracker_id,
                       tr["objectType"], tr["score"])
-            if event is not None and not tr.get("stationary_coord"):
+            # Only a track that joined the event goes in its leave: one that closes while the
+            # event is open without having joined (never confirmed, or never in a zone for its
+            # type, like a car on the far road at 11:57) isn't a participant.
+            if (event is not None and not tr.get("stationary_coord")
+                    and tr.get("event_id") == event["id"]):
                 event["finished"].append((tracker_id, tr))  # its snapshot goes in the leave
             _close_line_events(ws, device_id, tracker_id, tr)
             _save_face_crop(device_id, tracker_id, tr)

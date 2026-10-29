@@ -1374,6 +1374,34 @@ class TestCameraEvent(Base):
         self.assertEqual(ev[0], ("enter", ["face", "person"], []))
         self.assertEqual(ev[-1], ("leave", ["face", "person"], ["face", "person"]))
 
+    def test_parked_face_of_a_parked_person_does_not_rejoin(self):
+        # Live 15:43 on Driveway faces parked since 12:36 and 12:39 took a passing face at
+        # their spot and rejoined, each a face of its own in Protect.
+        from unittest import mock
+        for _ in range(av.STILL_TICKS + 3):
+            self.tick(self.PERSON, self.FACE)
+        tracks = av._motion_state["D"]["tracks"]
+        old = {tid for tid, tr in tracks.items() if tr["objectType"] == "face"}
+        with mock.patch.object(av, "_moved_since", lambda tr: tr["objectType"] == "face"), \
+                mock.patch.object(av, "_parked_spot_unchanged", return_value=False):
+            self.tick(self.PERSON, self.FACE)
+        faces = {tid for tid, tr in tracks.items() if tr["objectType"] == "face"}
+        self.assertTrue(faces)
+        self.assertFalse(faces & old)
+        self.assertTrue(all(tracks[t].get("stationary_coord") for t in tracks
+                            if tracks[t]["objectType"] == "person"))
+
+    def test_parked_face_rejoins_with_its_moving_person(self):
+        from unittest import mock
+        for _ in range(av.STILL_TICKS + 3):
+            self.tick(self.PERSON, self.FACE)
+        tracks = av._motion_state["D"]["tracks"]
+        old = {tid for tid, tr in tracks.items() if tr["objectType"] == "face"}
+        with mock.patch.object(av, "_moved_since", return_value=True), \
+                mock.patch.object(av, "_parked_spot_unchanged", return_value=False):
+            self.tick(self.PERSON, self.FACE)
+        self.assertEqual({tid for tid, tr in tracks.items() if tr["objectType"] == "face"}, old)
+
     def test_car_passing_a_parked_person_gets_its_own_event(self):
         for _ in range(av.STILL_TICKS + 3):
             self.tick(self.PERSON, self.FACE)

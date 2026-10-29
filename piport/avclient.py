@@ -2309,6 +2309,12 @@ def _face_similarity(a, b):
     return dot / norm if norm else None
 
 
+def _person_moving(tracks, face):
+    """Whether a face track's person is tracked and not parked."""
+    person = tracks.get(face.get("person_tid"))
+    return person is not None and not person.get("stationary_coord")
+
+
 def _event_face(dev, d, event):
     """(index in dev["recent"], tracker_id, track, "event") of the face track that closed
     in `event` nearest face detection d, or None."""
@@ -3037,6 +3043,17 @@ def _motion_tick(ws, device_id):
                         # someone walking past): it stays where it parked.
                         tr["coord"] = list(tr["stationary_coord"])
                         tr["moved_ticks"] = 0
+                    elif tr["objectType"] == "face" and not _person_moving(tracks, tr):
+                        # A face moves with its person. Live 15:43 on Driveway faces parked
+                        # since 12:36 and 12:39 took a passing face at their spot and rejoined
+                        # as faces of their own: the parked face goes, and the read starts or
+                        # resumes a track like any other.
+                        log.info("real motion tick: parked face tracker_id=%s dropped, its "
+                                 "person isn't moving; the face at its spot is someone else's "
+                                 "for deviceID=%s", tracker_id, device_id)
+                        unclaimed.append(matches.pop(tracker_id))
+                        del tracks[tracker_id]
+                        continue
                     else:
                         # A stationary object moved again: it rejoins as a fresh participant.
                         log.info("real motion tick: stationary %s tracker_id=%s moved, rejoining "

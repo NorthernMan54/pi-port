@@ -179,14 +179,25 @@ class TestPushManager(unittest.TestCase):
         self.m.set_source("CAM", "rtsp://cam/101")
         self.assertEqual([p.args[1:4] for p in self.started], [("video1", "rtsp://cam/101", "S1")])
 
-    def test_idempotent_and_replaces_changed(self):
-        self.m.set_source("CAM", "rtsp://cam/101")
-        self.m.configure("CAM", _settings("video1", "S1"))
-        self.m.configure("CAM", _settings("video1", "S1"))  # Protect re-sends every ~10 s
-        self.assertEqual(len(self.started), 1)
-        self.m.configure("CAM", _settings("video1", "S2"))
-        self.assertEqual(len(self.started), 2)
-        self.started[0].stop.assert_called_once()
+    def test_repeat_reconnects_at_most_every_10_s_and_change_replaces(self):
+        # Protect re-sends a channel's settings when it lost the stream and waits for a
+        # fresh connection (live: video3 "Timed out waiting for ..._2 to open" every 30 s).
+        clock = [100.0]
+        with mock.patch.object(onvif_push.time, "monotonic", lambda: clock[0]):
+            self.m.set_source("CAM", "rtsp://cam/101")
+            self.m.configure("CAM", _settings("video1", "S1"))
+            self.m.configure("CAM", _settings("video1", "S1"))   # the repeat: reconnect
+            self.assertEqual(len(self.started), 2)
+            self.started[0].stop.assert_called_once()
+            clock[0] += 5
+            self.m.configure("CAM", _settings("video1", "S1"))   # within 10 s: kept
+            self.assertEqual(len(self.started), 2)
+            clock[0] += 5
+            self.m.configure("CAM", _settings("video1", "S1"))   # 10 s on: reconnect
+            self.assertEqual(len(self.started), 3)
+            self.m.configure("CAM", _settings("video1", "S2"))   # a new name replaces it
+            self.assertEqual(len(self.started), 4)
+            self.started[2].stop.assert_called_once()
 
     def test_channels_accumulate_and_dev_null_stops(self):
         self.m.set_source("CAM", "rtsp://cam/101")

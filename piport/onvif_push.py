@@ -700,6 +700,14 @@ def retry_delay(retry_s, failed):
     return min(PUSH_RETRY_MAX_S, base * 2 ** max(0, failed - 3)) if failed else base
 
 
+# Protect re-sends a channel's ChangeVideoSettings (same streamName) when its media server
+# has lost that stream: it rebuilds its ingest point and waits ~10 s for a fresh connection.
+# Live 2026-10-29: ignoring the repeat left video3 in "Timed out waiting for 80BEAF928356_2
+# to open" every 30 s and the low-quality view stuttering; unifi-cam-proxy reconnects on a
+# repeat. At most one reconnect per channel per RECONNECT_MIN_S, so a burst doesn't churn it.
+RECONNECT_MIN_S = 10
+
+
 class PushManager:
     """Per-device ONVIF source URL plus the channel pushes Protect asked for."""
 
@@ -711,6 +719,7 @@ class PushManager:
         self._sources = {}   # device_id -> {"url", "audio", "width", "height", "fps"}
         self._wanted = {}    # device_id -> {channel: (stream_name, destination)}
         self._pushes = {}    # (device_id, channel) -> FlvPush
+        self._reconnected = {}  # (device_id, channel) -> monotonic time of the last reconnect
         self._pool = PullPool(ffmpeg_bin)  # channels on the same stream share one pull
         self._subs = {}      # main url -> substream profile dict, or None (none/failed)
         self._looking_up = set()  # main urls whose profiles are being fetched
@@ -807,6 +816,7 @@ class PushManager:
         encoder-only settings (fps, bitrate mode), which stopped the push."""
         with self._lock:
             wanted = self._wanted.setdefault(device_id, {})
+            again = set()
             for channel, settings in (video_settings or {}).items():
                 serializer = (settings or {}).get("avSerializer")
                 if serializer is None:
@@ -817,7 +827,18 @@ class PushManager:
                 if not dests or any("/dev/null" in d for d in dests):
                     wanted.pop(channel, None)
                 elif name and dests[0].startswith("tcp://"):
+                    if wanted.get(channel) == (name, dests[0]):
+                        again.add(channel)
                     wanted[channel] = (name, dests[0])
+            now = time.monotonic()
+            for channel in again:
+                key = (device_id, channel)
+                if key in self._pushes and now - self._reconnected.get(key, -RECONNECT_MIN_S) \
+                        >= RECONNECT_MIN_S:
+                    log.info("push %s/%s: Protect re-sent its settings, reconnecting",
+                             device_id, channel)
+                    self._reconnected[key] = now
+                    self._pushes.pop(key).stop()
             self._sync(device_id)
 
     def stop_all(self):

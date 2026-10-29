@@ -295,6 +295,49 @@ def _is_keyframe(tag_header, payload):
     return tag_header[0] == _TAG_VIDEO and len(payload) > 1 and payload[0] >> 4 == 1
 
 
+class _DeliveryStats:
+    """How evenly ffmpeg hands over video frames, logged once a minute: Protect's
+    player stutters and lags when frames arrive in clumps or late against their
+    own timestamps (ffmpeg stamps them on arrival: -use_wallclock_as_timestamps)."""
+
+    INTERVAL_S = 60.0
+
+    def __init__(self, name, clock=time.monotonic):
+        self.name = name
+        self.clock = clock
+        self.started = clock()
+        self.first = None
+        self._reset(self.started)
+
+    def _reset(self, now):
+        self.since = now
+        self.delays = []      # wall - stream time, per frame (s)
+        self.gaps = []        # wall time between frames (s)
+        self.last = None
+
+    def frame(self, timestamp_ms):
+        now = self.clock()
+        if self.first is None:
+            self.first = now
+            log.info("pull %s: first frame %.2f s after ffmpeg started", self.name,
+                     now - self.started)
+        self.delays.append(now - timestamp_ms / 1000.0)
+        if self.last is not None:
+            self.gaps.append(now - self.last)
+        self.last = now
+        if now - self.since >= self.INTERVAL_S and len(self.delays) > 2:
+            base = min(self.delays)
+            late = sorted(d - base for d in self.delays)
+            clumped = sum(g < 0.005 for g in self.gaps)
+            log.info("pull %s over %.0f s: %d frames (%.1f/s), late vs own timestamp "
+                     "p50 %.0f ms p95 %.0f ms max %.0f ms, longest gap %.0f ms, %d%% clumped",
+                     self.name, now - self.since, len(self.delays),
+                     len(self.delays) / (now - self.since), late[len(late) // 2] * 1000,
+                     late[int(len(late) * 0.95)] * 1000, late[-1] * 1000,
+                     max(self.gaps) * 1000, 100 * clumped // max(1, len(self.gaps)))
+            self._reset(now)
+
+
 class SharedPull:
     """One ffmpeg reading a camera stream, fanned out to every push of it.
 
@@ -370,6 +413,7 @@ class SharedPull:
                 names = ", ".join(sorted(f"{s.device_id}/{s.channel}" for s in self._sinks))
             log.info("pull %s started for %s (attempt %d, pid %d)",
                      _describe(self.source_url), names or "no push", attempt, proc.pid)
+            stats = _DeliveryStats(_describe(self.source_url))
             self._header = read_flv_header(proc.stdout.read)
             self._config = {}
             for tag_header, body in read_tags(proc.stdout.read):
@@ -386,6 +430,8 @@ class SharedPull:
                         (tag_header, body)
                 else:
                     frames += 1
+                    if tag_header[0] == _TAG_VIDEO:
+                        stats.frame(_tag_timestamp(tag_header))
                     self._deliver(tag_header, body, _is_keyframe(tag_header, payload))
             reason = "ffmpeg output ended"
         except UnsupportedCodec as exc:

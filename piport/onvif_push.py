@@ -159,23 +159,29 @@ class ExtendedFlvWriter:
     """Protect's extendedFlv to write(bytes): header flags 7, a timing trailer
     after every tag, onClockSync/onMpma every 5 s. One per connection."""
 
-    def __init__(self, write, clock=time.time):
+    def __init__(self, write, clock=time.time, early_sync=False):
         self.write = write
         self.clock = clock
         self.now = self.start = self.last_sync = None
+        # Sync right after the first video frame, not 5 s in: Protect's ms drops a
+        # recording file that closes before its first sync ("no last known clock sync
+        # - dropping"), which lost the first ~5 s after every reconnect (live 2026-10-28).
+        self.early_sync = early_sync
+        self._sync_next = False
 
     def header(self, header):
         self.write(header[:4] + b"\x07" + header[5:9])
         self.write(header[9:13])  # PreviousTagSize0
-        # First sync only after 5 s, as clock_sync.py does: Protect closes the
-        # connection when an onClockSync arrives ahead of the first frames.
+        # Never before the first frames, as clock_sync.py has it: Protect closes the
+        # connection when an onClockSync arrives ahead of them.
         self.last_sync = self.clock()
         self.start = self.clock()  # read separately, as clock_sync.py does
 
     def sync_if_due(self, timestamp):
         """Once per tag, before it: the clock sync when it is due."""
         now = self.now = self.clock()
-        if now - self.last_sync >= CLOCK_SYNC_INTERVAL_S:
+        if self._sync_next or now - self.last_sync >= CLOCK_SYNC_INTERVAL_S:
+            self._sync_next = False
             self.last_sync = now
             self.write(script_tag("onClockSync", {"streamClock": int(timestamp),
                                                   "streamClockBase": 0,
@@ -188,6 +194,9 @@ class ExtendedFlvWriter:
         """A whole tag (body = payload + PreviousTagSize) and its trailer."""
         self.write(tag_header + body)
         self.write(timing_trailer(tag_header[0] == _TAG_VIDEO, self.now - self.start))
+        if self.early_sync and tag_header[0] == _TAG_VIDEO and len(body) > 5 and body[1] == 1:
+            self.early_sync = False  # the first video frame (AVC NALU, not its config)
+            self._sync_next = True
 
 
 def read_tags(read):
@@ -288,6 +297,18 @@ _COPYABLE_AUDIO = (2, 7, 8, 10)
 
 class _AudioNotCopyable(ValueError):
     """The camera's audio came out of a copy in a format Protect won't take."""
+
+
+def _metadata_numbers(payload):
+    """{key: number} of an onMetaData payload's AMF0 numbers (framerate, width, ...)."""
+    out = {}
+    for key in (b"width", b"height", b"framerate", b"videodatarate", b"videocodecid",
+                b"audiocodecid", b"audiosamplerate", b"audiodatarate"):
+        at = payload.find(struct.pack(">H", len(key)) + key + b"\x00")
+        if at >= 0:
+            start = at + 2 + len(key) + 1
+            out[key.decode()] = round(struct.unpack(">d", payload[start:start + 8])[0], 2)
+    return out
 
 
 def _describe(url):
@@ -444,6 +465,8 @@ class SharedPull:
                     raise _AudioNotCopyable(f"FLV sound format {payload[0] >> 4}")
                 if tag_header[0] == _TAG_SCRIPT and b"onMetaData" in payload[:16]:
                     self._config["meta"] = (tag_header, body)
+                    log.info("pull %s onMetaData: %s", _describe(self.source_url),
+                             _metadata_numbers(payload))
                 elif _is_config_tag(tag_header, payload):
                     self._config["video" if tag_header[0] == _TAG_VIDEO else "audio"] = \
                         (tag_header, body)
@@ -636,7 +659,7 @@ class FlvPush:
                 sock.sendall(data)
                 sent += len(data)
 
-            writer = ExtendedFlvWriter(write)
+            writer = ExtendedFlvWriter(write, early_sync=True)
             writer.header(header)
             for tag_header, body in config:
                 tag_header, body = set_stream_name(tag_header, body, self.stream_name)

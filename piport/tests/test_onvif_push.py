@@ -323,6 +323,31 @@ def _parse_extended(data):
     return tags
 
 
+class TestEarlySync(unittest.TestCase):
+    def _write(self, tags, early_sync):
+        out = io.BytesIO()
+        writer = onvif_push.ExtendedFlvWriter(out.write, _clock(0.01), early_sync=early_sync)
+        writer.header(_flv([])[:13])
+        for tag_type, ts, payload in tags:
+            tag = onvif_push._flv_tag(tag_type, payload, ts)
+            writer.sync_if_due(ts)
+            writer.tag(tag[:11], tag[11:])
+        return [t[2] for t in _parse_extended(out.getvalue())]
+
+    def test_first_sync_right_after_the_first_frame(self):
+        # Never ahead of the frames (Protect closes that push), but not 5 s late either:
+        # ms drops a recording file that closes before its first sync.
+        payloads = self._write([(9, 0, _AVC_CONFIG), (8, 0, _AAC_CONFIG), (9, 0, _KEY),
+                                (8, 10, _AAC), (9, 50, _INTER), (9, 100, _INTER)], True)
+        syncs = [i for i, p in enumerate(payloads) if b"onClockSync" in p]
+        self.assertEqual(syncs, [3])
+        self.assertEqual(payloads[2], _KEY)
+
+    def test_rewrite_keeps_waiting_5_s(self):
+        payloads = self._write([(9, 0, _KEY), (9, 50, _INTER)], False)
+        self.assertFalse(any(b"onClockSync" in p for p in payloads))
+
+
 class TestStreamName(unittest.TestCase):
     def test_replaced_and_tag_resized(self):
         tag = onvif_push._flv_tag(18, _meta("piport"), 0)
@@ -509,7 +534,10 @@ class TestSharedPushes(unittest.TestCase):
             self.assertEqual(tags[0], (18, 0, _meta(name)))
             self.assertEqual(tags[1:3], [(9, 0, _AVC_CONFIG), (8, 0, _AAC_CONFIG)])
             self.assertEqual(tags[3], (9, 0, _KEY))  # rebased to the key frame it joined at
-            self.assertEqual([t[1] for t in tags[4:]], [10, 40, 1000])
+            # The first clock sync right after the first frame, so ms keeps the recording.
+            self.assertIn(b"onClockSync", tags[4][2])
+            self.assertIn(b"onMpma", tags[5][2])
+            self.assertEqual([t[1] for t in tags[6:]], [10, 40, 1000])
 
 
 if __name__ == "__main__":

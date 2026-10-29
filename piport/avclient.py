@@ -2283,11 +2283,53 @@ def _resume_recent(dev, d, event):
         else:
             continue
         found, best_iou = (i, tid, tr, how), iou
+    if found is None and d["objectType"] == "face" and event is not None:
+        found = _event_face(dev, d, event)
     if found is None:
         return None
     i, tid, tr, how = found
     del dev["recent"][i]
     return tid, tr, how
+
+
+# A face that turns up again in an open event continues the nearest face track that closed in
+# that event, wherever its person went: each face track is a face in Protect's list, and live
+# 15:44 on Driveway two people loading bikes, ducking behind a car, made 10 face tracks. A face
+# the embeddings show to be someone else (similarity under FACE_RESUME_MIN_SIM) starts its own,
+# and a named face is continued only by a read whose embedding shows the same person.
+FACE_RESUME_MIN_SIM = 0.3
+
+
+def _face_similarity(a, b):
+    """Cosine similarity of two embeddings, or None without both."""
+    if not a or not b:
+        return None
+    dot = sum(x * y for x, y in zip(a, b))
+    norm = math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b))
+    return dot / norm if norm else None
+
+
+def _event_face(dev, d, event):
+    """(index in dev["recent"], tracker_id, track, "event") of the face track that closed
+    in `event` nearest face detection d, or None."""
+    emb = ((d.get("scored") or {}).get("faceEmbed") or (None,))[0]
+    cx, cy = d["coord"][0] + d["coord"][2] / 2, d["coord"][1] + d["coord"][3] / 2
+    best, best_dist = None, None
+    for i, (tid, tr, _closed_ms) in enumerate(dev.get("recent", ())):
+        if (tr["objectType"] != "face" or tr.get("event_id") != event["id"]
+                or tr.get("stationary_coord")):
+            continue
+        extra = tr.get("extra") or {}
+        sim = _face_similarity(emb, extra.get("faceEmbed"))
+        if sim is not None and sim < FACE_RESUME_MIN_SIM:
+            continue
+        if extra.get("matchedId") is not None and sim is None:
+            continue  # a named face takes only a read shown to be the same person
+        x, y, w, h = tr["coord"]
+        dist = math.hypot(x + w / 2 - cx, y + h / 2 - cy)
+        if best_dist is None or dist < best_dist:
+            best, best_dist = (i, tid, tr, "event"), dist
+    return best
 
 
 def _update_still(tr, now_ms):

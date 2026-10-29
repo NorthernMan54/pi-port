@@ -100,6 +100,51 @@ class TestGeometry(unittest.TestCase):
         self.assertFalse(av._segment_crosses_line((900, 100), (900, 900), (0, 500), (100, 500)))
 
 
+class TestEventFaceResume(unittest.TestCase):
+    """A face back in an open event continues the nearest face track that closed in it."""
+    EVENT = {"id": 7}
+
+    def face(self, coord, emb=None, event_id=7, **kw):
+        tr = {"objectType": "face", "coord": coord, "event_id": event_id, "extra": {}}
+        if emb is not None:
+            tr["extra"]["faceEmbed"] = emb
+        tr["extra"].update(kw)
+        return tr
+
+    def read(self, coord, emb=None):
+        d = {"objectType": "face", "coord": coord, "score": 0.9}
+        if emb is not None:
+            d["scored"] = {"faceEmbed": (emb, 0.9)}
+        return d
+
+    def test_moved_face_continues_the_nearest_closed_face(self):
+        dev = {"recent": [(5, self.face([100, 100, 40, 40]), 0),
+                          (9, self.face([600, 300, 40, 40]), 0)]}
+        tid, _tr, how = av._resume_recent(dev, self.read([500, 320, 45, 45]), self.EVENT)
+        self.assertEqual((tid, how), (9, "event"))
+        self.assertEqual([r[0] for r in dev["recent"]], [5])
+
+    def test_other_event_or_no_event_opens_a_new_track(self):
+        dev = {"recent": [(5, self.face([100, 100, 40, 40], event_id=6), 0)]}
+        self.assertIsNone(av._resume_recent(dev, self.read([400, 100, 40, 40]), self.EVENT))
+        self.assertIsNone(av._resume_recent(dev, self.read([400, 100, 40, 40]), None))
+
+    def test_a_different_person_by_embedding_is_skipped(self):
+        dev = {"recent": [(5, self.face([100, 100, 40, 40], emb=[1.0, 0.0]), 0),
+                          (9, self.face([900, 100, 40, 40], emb=[0.6, 0.8]), 0)]}
+        tid, _tr, _how = av._resume_recent(dev, self.read([200, 100, 40, 40], emb=[0.0, 1.0]),
+                                           self.EVENT)
+        self.assertEqual(tid, 9)
+
+    def test_named_face_needs_an_embedding_that_agrees(self):
+        named = self.face([100, 100, 40, 40], emb=[1.0, 0.0], matchedId=196, matchedName="A")
+        dev = {"recent": [(5, named, 0)]}
+        self.assertIsNone(av._resume_recent(dev, self.read([300, 100, 40, 40]), self.EVENT))
+        tid, _tr, _how = av._resume_recent(dev, self.read([300, 100, 40, 40], emb=[0.9, 0.1]),
+                                           self.EVENT)
+        self.assertEqual(tid, 5)
+
+
 class TestLateDetector(Base):
     """A detector that loads after the pull started takes a different input size: its
     detect() resizes the frame, so detection doesn't stop (upstream 256ff57)."""

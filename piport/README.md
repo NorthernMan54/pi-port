@@ -372,6 +372,15 @@ median, for tuning the threshold per type. A face or plate confirms as soon as a
 person or vehicle is there, since it's only looked for inside that box and only once per
 snapshot.
 
+**One object, two labels.** Per-class NMS keeps a person box and an animal box drawn on the
+same person, and the animal box could confirm and join the event as an animal (seen live on a
+person walking up a drive, IoU ~0.6). An animal box overlapping a person box in the same
+frame, or a person track seen within the last second, by `AIPORT_CROSS_TYPE_IOU` (default
+0.5; 0 turns this off) is taken as that person. The person always wins: letting the score or
+an animal track decide, a replay of two people crossing boxed the second person as an animal
+at 0.9 and gave every later box of theirs to the animal. A dog beside its walker overlaps far
+less. Vehicles are left out: a rider on a motorcycle overlaps it as much, and both count.
+
 **Resuming tracks.** A track that closed within `AIPORT_RESUME_S` (default 60 s) is picked
 up again by a same-type detection overlapping its last or first box (IoU >= 0.4): it rejoins
 its event if that is still open, and a vehicle that never moved (centre within a quarter of

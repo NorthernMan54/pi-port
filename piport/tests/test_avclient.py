@@ -622,6 +622,23 @@ class TestCameraEvent(Base):
                   if tr["objectType"] == "person"]
         self.assertEqual(len(people), 1)
 
+    def test_person_also_boxed_as_animal_stays_a_person(self):
+        # Live 19:02 on Driveway: a person, also boxed "animal" on a few frames (IoU ~0.6),
+        # joined the event as an animal too.
+        walk = [[569 - 10 * i, 419, 166, 560] for i in range(8)]
+        for i, coord in enumerate(walk):
+            objs = [dict(self.PERSON, coord=coord)]
+            if 2 <= i <= 5:
+                objs.append({"objectType": "animal", "score": 0.82,
+                             "coord": [coord[0] + 24, 460, 189, 524]})
+                if i % 2:
+                    objs.pop(0)          # some frames: only the animal box
+            self.tick(*objs)
+        types = {tr["objectType"] for tr in av._motion_state["D"]["tracks"].values()}
+        self.assertEqual(types, {"person"})
+        self.assertNotIn("animal", [d["objectType"] for fn, p in self.sent
+                                    if fn == "EventSmartDetect" for d in p["descriptors"]])
+
     def test_size_ref_is_the_median_of_recent_boxes(self):
         tr = {"coord": [526, 109, 34, 55], "sizes": [(32, 124), (31, 122), (34, 120), (34, 55)]}
         self.assertEqual(av._size_ref(tr)[2:], [33.0, 121.0])
@@ -2364,13 +2381,74 @@ class TestDetectionDedupe(Base):
         ]
         self.assertEqual(len(av._dedupe_detections(dets)), 2)
 
-    def test_different_types_not_merged(self):
-        # A person box overlapping an animal box is genuinely two objects.
+    def test_vehicle_and_person_not_merged(self):
+        # A rider on a motorcycle: both count.
         dets = [
-            {"objectType": "person", "score": 0.67, "coord": [100, 100, 200, 400]},
-            {"objectType": "animal", "score": 0.51, "coord": [110, 110, 195, 390]},
+            {"objectType": "vehicle", "score": 0.67, "coord": [100, 100, 200, 400]},
+            {"objectType": "person", "score": 0.51, "coord": [110, 110, 195, 390]},
         ]
         self.assertEqual(len(av._dedupe_detections(dets)), 2)
+
+    def test_person_and_animal_kept_apart(self):
+        # The pre-tracking dedupe is per type; _animal_on_person settles such a pair.
+        dets = [
+            {"objectType": "animal", "score": 0.82, "coord": [593, 460, 189, 524]},
+            {"objectType": "person", "score": 0.57, "coord": [569, 419, 166, 560]},
+        ]
+        self.assertEqual(len(av._dedupe_detections(dets)), 2)
+
+
+class TestAnimalOnPerson(Base):
+    # Live 19:02 on Driveway: one person, boxed as person and as animal.
+    PERSON = [569, 419, 166, 560]
+    ANIMAL = [593, 460, 189, 524]
+
+    def tracks(self, seen_ms=1000, object_type="person"):
+        return {7: {"objectType": object_type, "coord": list(self.PERSON), "seen_ms": seen_ms}}
+
+    def types(self, out):
+        return sorted(d["objectType"] for d in out)
+
+    def test_higher_scoring_animal_box_on_a_person_box_is_the_person(self):
+        dets = [{"objectType": "animal", "score": 0.82, "coord": list(self.ANIMAL)},
+                {"objectType": "person", "score": 0.57, "coord": list(self.PERSON)},
+                {"objectType": "face", "score": 0.9, "coord": [600, 430, 40, 50]}]
+        out = av._animal_on_person({}, dets, 1200)
+        self.assertEqual(self.types(out), ["face", "person"])
+        self.assertEqual([d["score"] for d in out if d["objectType"] == "person"], [0.82])
+
+    def test_animal_box_over_a_person_track_is_the_person(self):
+        dets = [{"objectType": "animal", "score": 0.82, "coord": list(self.ANIMAL)}]
+        self.assertEqual(self.types(av._animal_on_person(self.tracks(), dets, 1200)), ["person"])
+
+    def test_person_box_over_an_animal_track_stays_a_person(self):
+        # Replay 13:33 on Driveway: the second person, boxed "animal" at 0.9 first, took every
+        # person box after it while an animal track could claim them.
+        dets = [{"objectType": "person", "score": 0.6, "coord": list(self.ANIMAL)}]
+        out = av._animal_on_person(self.tracks(object_type="animal"), dets, 1200)
+        self.assertEqual(self.types(out), ["person"])
+
+    def test_an_old_person_track_takes_nothing(self):
+        dets = [{"objectType": "animal", "score": 0.82, "coord": list(self.ANIMAL)}]
+        out = av._animal_on_person(self.tracks(seen_ms=0), dets, 5000)
+        self.assertEqual(self.types(out), ["animal"])
+
+    def test_dog_beside_its_walker_stays_an_animal(self):
+        dets = [{"objectType": "person", "score": 0.9, "coord": [400, 300, 150, 600]},
+                {"objectType": "animal", "score": 0.8, "coord": [480, 750, 150, 120]}]
+        self.assertEqual(self.types(av._animal_on_person({}, dets, 1200)), ["animal", "person"])
+
+    def test_vehicles_left_alone(self):
+        dets = [{"objectType": "vehicle", "score": 0.8, "coord": list(self.ANIMAL)},
+                {"objectType": "person", "score": 0.6, "coord": list(self.PERSON)}]
+        self.assertEqual(self.types(av._animal_on_person({}, dets, 1200)), ["person", "vehicle"])
+
+    def test_off(self):
+        dets = [{"objectType": "animal", "score": 0.82, "coord": list(self.ANIMAL)},
+                {"objectType": "person", "score": 0.57, "coord": list(self.PERSON)}]
+        with mock.patch.object(av, "CROSS_TYPE_IOU", 0):
+            out = av._animal_on_person(self.tracks(), dets, 1200)
+        self.assertEqual(self.types(out), ["animal", "person"])
 
 
 class TestMotionLoopLifecycle(Base):

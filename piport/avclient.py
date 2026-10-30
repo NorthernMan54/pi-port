@@ -2099,7 +2099,7 @@ def _dedupe_detections(detections, iou_thresh=0.4):
     Left alone, each unmatched detection opens its own track, so one object
     produces two tracks, two event streams, and no clean matched pair -- which
     is fatal for line crossing (it needs a matched pair to get a movement
-    segment)."""
+    segment). An animal box on a person is _animal_on_person's."""
     out = []
     for d in sorted(detections, key=lambda d: -d["score"]):
         if any(d["objectType"] == k["objectType"] and _iou(d["coord"], k["coord"]) >= iou_thresh
@@ -2107,6 +2107,46 @@ def _dedupe_detections(detections, iou_thresh=0.4):
             continue
         out.append(d)
     return out
+
+
+# One object, two labels: per-class NMS keeps a person box and an animal box drawn on the same
+# person. Live 19:02 on Driveway a person walking up the drive was also "animal" on a few
+# frames (box IoU ~0.6 with the person's), confirmed and joined the event as an animal. An
+# animal box over a person box in the same frame, or over a person track seen within
+# CROSS_TYPE_RECENT_MS, is taken as that person, so the person's track keeps its frames.
+# Person always wins: letting the higher score or an existing animal track decide, the 13:33
+# Driveway replay (two people crossing) boxed the second person as an animal at 0.9, and every
+# person box after that went to the animal track. A dog beside its walker is a far smaller
+# box, so overlaps far less. Vehicles stay out: a rider on a motorcycle can overlap it this
+# much and both count. AIPORT_CROSS_TYPE_IOU sets the overlap; 0 turns this off.
+CROSS_TYPE_IOU = float(os.environ.get("AIPORT_CROSS_TYPE_IOU") or 0.5)
+CROSS_TYPE_RECENT_MS = 1000
+
+
+def _animal_on_person(tracks, detections, now_ms, device_id=None):
+    """Relabel as person each animal detection overlapping (IoU >= CROSS_TYPE_IOU) a person
+    detection in this frame or a person track seen within CROSS_TYPE_RECENT_MS, then dedupe
+    the people. Returns the detections left."""
+    if CROSS_TYPE_IOU <= 0:
+        return detections
+    people = [d["coord"] for d in detections if d["objectType"] == "person"]
+    people += [tr["coord"] for tr in tracks.values() if tr["objectType"] == "person"
+               and now_ms - tr.get("seen_ms", now_ms) <= CROSS_TYPE_RECENT_MS]
+    changed = False
+    for d in detections:
+        if d["objectType"] != "animal":
+            continue
+        overlap = max((_iou(d["coord"], c) for c in people), default=0.0)
+        if overlap >= CROSS_TYPE_IOU:
+            log.debug("real motion tick: animal box over a person (IoU %.2f) taken as the "
+                      "person for deviceID=%s", overlap, device_id)
+            d["objectType"] = "person"
+            changed = True
+    if not changed:
+        return detections
+    # Only the people need it; faces and plates (added after the dedupe) keep every read.
+    return (_dedupe_detections([d for d in detections if d["objectType"] == "person"])
+            + [d for d in detections if d["objectType"] != "person"])
 
 
 _scene_ref = {}  # deviceID -> (downsampled grayscale reference frame, monotonic ms taken)
@@ -2989,8 +3029,9 @@ def _motion_tick(ws, device_id):
         if dev.get("started_ms") is None and device_id in _analysed_frame_time:
             dev["started_ms"] = now_ms
         starting = dev.get("started_ms") is None or now_ms - dev["started_ms"] <= STARTUP_WINDOW_MS  # {"id", "started_ms", "finished": [(tid, tr)]} or None
-        unclaimed = list(range(len(detections)))
         joining = []  # tracks that start (or resume) taking part in the event this tick
+        detections = _animal_on_person(tracks, detections, now_ms, device_id)
+        unclaimed = list(range(len(detections)))
         # Zones decide what's reported, not what's tracked (as Frigate): every detection is
         # tracked; a track joins the event only once its feet have been in a zone listing its
         # type, and stays in it until it's gone. Live 11:38 on Camera B a walk to the front door

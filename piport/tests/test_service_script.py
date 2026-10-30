@@ -61,10 +61,16 @@ class TestServiceScript(unittest.TestCase):
                                      stderr=subprocess.STDOUT)
 
     def tearDown(self):
+        # SIGINT, as Ctrl-C: SIGKILL left the script's pi-port (in its own process group)
+        # and log writer running, one more after every suite run.
         for p in (self.proc, self.orphan):
             if p is not None and p.poll() is None:
-                p.kill()
-                p.wait()
+                p.send_signal(signal.SIGINT)
+                try:
+                    p.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                    p.wait()
         if self.proc is not None:
             self.proc.stdout.close()
 

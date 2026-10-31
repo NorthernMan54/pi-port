@@ -41,7 +41,8 @@ class TestRewrite(unittest.TestCase):
         return out.getvalue()
 
     def test_header_flags_and_trailers(self):
-        out = self._run(_flv([(9, 0, _AVC), (8, 40, b"aud")]))
+        mulaw = b"\x82\x7f"  # sound format 8: G.711 mu-law
+        out = self._run(_flv([(9, 0, _AVC), (8, 40, mulaw)]))
         self.assertEqual(out[:9], b"FLV\x01\x07\x00\x00\x00\x09")
         tag1 = onvif_push._flv_tag(9, _AVC, 0)
         body = out[13:]
@@ -50,9 +51,9 @@ class TestRewrite(unittest.TestCase):
         self.assertEqual(len(trailer), 16)
         self.assertEqual(trailer[:4], b"\x00\x01\x5f\x90")  # video: 90000
         rest = body[len(tag1) + 16:]
-        tag2 = onvif_push._flv_tag(8, b"aud", 40)
+        tag2 = onvif_push._flv_tag(8, mulaw, 40)
         self.assertEqual(rest[:len(tag2)], tag2)
-        self.assertEqual(rest[len(tag2) + 1:len(tag2) + 4], b"\x00\x2b\x11")  # non-video
+        self.assertEqual(rest[len(tag2) + 1:len(tag2) + 4], b"\x00\x1f\x40")  # G.711: 8000
         self.assertEqual(len(rest), len(tag2) + 16)
 
     def test_trailer_elapsed_in_its_timescale(self):
@@ -64,6 +65,32 @@ class TestRewrite(unittest.TestCase):
         other = onvif_push.timing_trailer(False, 1.5)
         self.assertEqual(int.from_bytes(other[1:4], "big"), 11025)
         self.assertEqual(struct.unpack(">Q", other[8:])[0], 16537)
+
+    def _scales(self, tags):
+        """Trailer timescale after each tag of a rewrite."""
+        out = self._run(_flv(tags))[13:]
+        scales = []
+        for tag_type, ts, payload in tags:
+            out = out[11 + len(payload) + 4:]
+            scales.append(int.from_bytes(out[1:4], "big"))
+            out = out[16:]
+        return scales
+
+    def test_audio_trailers_in_the_sample_rate(self):
+        # yi-protect, whose audio plays in Protect: 0x3E80 for its 16 kHz AAC, 0xBB80 for Opus.
+        self.assertEqual(self._scales([(8, 0, b"\xaf\x00\x14\x08"), (8, 64, b"\xaf\x01raw"),
+                                       (10, 70, onvif_push._OPUS_CONFIG), (10, 90, b"\xf8op"),
+                                       (18, 0, b"\x02\x00\x00")]),
+                         [16000, 16000, 48000, 48000, 11025])
+        # AAC before its config: 11025, as before; MP3 by its rate bits (3 = 44.1 kHz).
+        self.assertEqual(self._scales([(8, 0, b"\xaf\x01raw"), (8, 0, b"\x2f\xff")]),
+                         [11025, 44100])
+
+    def test_audio_trailer_is_the_tag_time(self):
+        # Not write time: its jitter garbled Protect's live audio (yi-protect stamps media time).
+        out = self._run(_flv([(10, 1500, b"\xf8op")]), step=0.37)[13:]
+        trailer = out[11 + 3 + 4:][:16]
+        self.assertEqual(struct.unpack(">Q", trailer[8:])[0], 72000)  # 1.5 s at 48 kHz
 
     def test_trailer_no_wrap_after_13h(self):
         t = onvif_push.timing_trailer(True, 20 * 3600)
@@ -125,10 +152,12 @@ class TestDestination(unittest.TestCase):
         # Re-encoding the camera's G.711 to AAC made live view stop and start every second.
         cmd = onvif_push.ffmpeg_push_cmd("ffmpeg", "rtsp://cam/1", "ABC")
         self.assertEqual(cmd[cmd.index("-c:v") + 1], "copy")
-        self.assertEqual(cmd[cmd.index("-c:a") + 1], "copy")
-        self.assertIn("0:a:0", cmd)
+        self.assertEqual(cmd[cmd.index("-c:a:0") + 1], "copy")
+        self.assertEqual(cmd.count("0:a:0"), 2)  # copied, and again as the Opus track
+        self.assertEqual(cmd[cmd.index("-c:a:1") + 1], "libopus")
+        self.assertEqual(cmd[cmd.index("-ar:a:1") + 1], "48000")
         reencoded = onvif_push.ffmpeg_push_cmd("ffmpeg", "rtsp://cam/1", "ABC", copy_audio=False)
-        self.assertEqual(reencoded[reencoded.index("-c:a") + 1], "aac")
+        self.assertEqual(reencoded[reencoded.index("-c:a:0") + 1], "aac")
         self.assertNotIn("lavfi", cmd)
         self.assertIn("streamName=ABC", cmd)
         self.assertEqual(cmd[-3:], ["-f", "flv", "-"])
@@ -136,8 +165,22 @@ class TestDestination(unittest.TestCase):
     def test_ffmpeg_cmd_silent_track_without_camera_audio(self):
         cmd = onvif_push.ffmpeg_push_cmd("ffmpeg", "rtsp://cam/1", "ABC", camera_audio=False)
         self.assertIn("anullsrc=r=32000:cl=mono", cmd)
-        self.assertIn("1:a:0", cmd)
+        self.assertEqual(cmd.count("1:a:0"), 2)
         self.assertNotIn("0:a:0", cmd)
+
+    def test_opus_track_becomes_type_10(self):
+        # ffmpeg 8's multitrack Opus: 0x95, layout/packet type, FourCC, track id, data.
+        def conv(payload, ts=0):
+            tag = onvif_push._flv_tag(8, payload, ts)
+            self.assertTrue(onvif_push._is_opus_track(tag[:11], payload))
+            return onvif_push.opus_tag(tag[:11], payload)
+        header, body = conv(b"\x95\x00Opus\x01OpusHead\x01\x01")
+        self.assertEqual(header + body, onvif_push._flv_tag(10, b"\xcf\x00\x03\x02", 0))
+        header, body = conv(b"\x95\x01Opus\x01\xf8\xb4\xaf", 93)
+        self.assertEqual(header + body, onvif_push._flv_tag(10, b"\xf8\xb4\xaf", 93))
+        self.assertIsNone(conv(b"\x95\x04Opus\x01\x01\x01"))  # multichannel config
+        aac = b"\xaf\x01raw"
+        self.assertFalse(onvif_push._is_opus_track(onvif_push._flv_tag(8, aac, 0)[:11], aac))
 
 
 def _settings(channel, name, dest="tcp://10.0.0.1:7550?retryInterval=1&connectTimeout=5"):
@@ -256,12 +299,12 @@ class TestPushManager(unittest.TestCase):
     def _pushed(self):
         return {p.args[1]: p.args[2] for p in self.started if not p.stop.called}
 
-    def test_video3_carries_substream(self):
+    def test_video2_and_video3_carry_substream(self):
         self._two_profiles()
         self.m.configure("CAM", {**_settings("video1", "S1"), **_settings("video2", "S2"),
                                  **_settings("video3", "S3")})
         self.m.set_source("CAM", "rtsp://cam/101")
-        self.assertEqual(self._pushed(), {"video1": "rtsp://cam/101", "video2": "rtsp://cam/101",
+        self.assertEqual(self._pushed(), {"video1": "rtsp://cam/101", "video2": "rtsp://cam/102",
                                           "video3": "rtsp://cam/102"})
         self.assertEqual(self.m.substream("CAM"), {"width": 640, "height": 360, "fps": 20})
 
@@ -410,6 +453,42 @@ class _Sink:
         return self.accept
 
 
+class TestAudioClock(unittest.TestCase):
+    def _run(self, arrivals):
+        """(track, arrival ms, duration ms) -> [(track, stamp)] released, in order."""
+        clock = onvif_push.AudioClock()
+        out = []
+        for track, ts, dur in arrivals:
+            tag = onvif_push._flv_tag(track, b"\x00", ts)
+            out += [(h[0], onvif_push._tag_timestamp(h)) for h, _ in clock.add(tag[:11], tag[11:], dur)]
+        return out
+
+    def test_bunched_arrivals_become_a_grid(self):
+        out = self._run([(10, ts, 20) for ts in (1000, 1000, 1001, 1090, 1091)]
+                        + [(10, 1400 + i * 20, 20) for i in range(20)])
+        self.assertEqual(out[:5], [(10, 1000), (10, 1020), (10, 1040), (10, 1060), (10, 1080)])
+
+    def test_reanchors_after_a_gap(self):
+        out = self._run([(10, 1000, 20), (10, 1020, 20), (10, 2000, 20), (10, 2010, 20)]
+                        + [(10, 3000 + i * 20, 20) for i in range(20)])
+        self.assertEqual(out[:4], [(10, 1000), (10, 1020), (10, 2000), (10, 2020)])
+
+    def test_tracks_interleave_in_stamp_order(self):
+        # AAC handed over ahead of the Opus covering the same time: released by stamp,
+        # with no Opus packet pinned to another's stamp.
+        out = self._run([(8, 1000, 64), (8, 1064, 64)]
+                        + [(10, 1000 + i * 20, 20) for i in range(30)])
+        stamps = [t for _, t in out]
+        self.assertEqual(stamps, sorted(stamps))
+        opus = [t for track, t in out if track == 10]
+        self.assertEqual(opus, list(range(1000, 1000 + 20 * len(opus), 20)))
+        self.assertEqual([t for track, t in out if track == 8], [1000, 1064])
+
+    def test_holds_audio_for_hold_ms(self):
+        out = self._run([(10, 1000 + i * 20, 20) for i in range(14)])
+        self.assertEqual([t for _, t in out][:1], [1000])  # released once 1150 is in
+
+
 class TestFanOut(unittest.TestCase):
     def setUp(self):
         self.pull = onvif_push.SharedPull("rtsp://cam/101")
@@ -548,7 +627,8 @@ class TestSharedPushes(unittest.TestCase):
             # The first clock sync right after the first frame, so ms keeps the recording.
             self.assertIn(b"onClockSync", tags[4][2])
             self.assertIn(b"onMpma", tags[5][2])
-            self.assertEqual([t[1] for t in tags[6:]], [10, 40, 1000])
+            # The AAC frame at 10 is still held: audio waits HOLD_MS for later audio.
+            self.assertEqual([t[1] for t in tags[6:]], [40, 1000])
 
 
 if __name__ == "__main__":

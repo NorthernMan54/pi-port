@@ -299,12 +299,12 @@ class TestPushManager(unittest.TestCase):
     def _pushed(self):
         return {p.args[1]: p.args[2] for p in self.started if not p.stop.called}
 
-    def test_video3_carries_substream(self):
+    def test_video2_and_video3_carry_substream(self):
         self._two_profiles()
         self.m.configure("CAM", {**_settings("video1", "S1"), **_settings("video2", "S2"),
                                  **_settings("video3", "S3")})
         self.m.set_source("CAM", "rtsp://cam/101")
-        self.assertEqual(self._pushed(), {"video1": "rtsp://cam/101", "video2": "rtsp://cam/101",
+        self.assertEqual(self._pushed(), {"video1": "rtsp://cam/101", "video2": "rtsp://cam/102",
                                           "video3": "rtsp://cam/102"})
         self.assertEqual(self.m.substream("CAM"), {"width": 640, "height": 360, "fps": 20})
 

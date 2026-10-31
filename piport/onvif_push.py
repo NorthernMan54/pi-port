@@ -8,9 +8,11 @@ ChangeVideoSettings asks for each channel (video1/2/3) as an "extendedFlv"
 stream pushed to tcp://<console>:7550 under a given streamName. Without that
 push the camera shows no video and records nothing.
 
-OnvifStreamControl names only the camera's main profile. video3, the low channel
-on a UniFi camera, gets the camera's substream instead when its ONVIF Media service
-lists a smaller H.264 profile (onvif_media.py); video1/video2 stay on the main one.
+OnvifStreamControl names only the camera's main profile. video2 and video3, the
+medium (720p) and low channels on a UniFi camera, get the camera's substream
+instead when its ONVIF Media service lists a smaller H.264 profile
+(onvif_media.py); video1 stays on the main one. Both share one pull, so the
+camera sees no extra RTSP session.
 
 Each push is `ffmpeg -c:v copy -f flv -` (no re-encode) piped through
 rewrite_flv() into a TCP socket. The rewrite mirrors unifi-cam-proxy's
@@ -43,8 +45,10 @@ from procutil import start_stderr_drain
 
 log = logging.getLogger("aiport-onvif")
 
-# The channel that carries the camera's substream when it has one.
-SUB_CHANNEL = "video3"
+# The channels that carry the camera's substream when it has one: UniFi's medium
+# and low channels are 720p and 360p, and video2 on the main stream made grids and
+# the app pull full resolution.
+SUB_CHANNELS = ("video2", "video3")
 
 CLOCK_SYNC_INTERVAL_S = 5.0
 _TAG_AUDIO = 8
@@ -910,21 +914,21 @@ class PushManager:
 
     def _find_substream(self, url):
         """Look up the camera's profiles once per main url, then start the waiting
-        SUB_CHANNEL pushes (on the substream, or the main stream if there is none)."""
+        SUB_CHANNELS pushes (on the substream, or the main stream if there is none)."""
         host = urlsplit(url).hostname
         try:
             sub = onvif_media.pick_substream(self._fetch_profiles(url))
         except Exception as e:
-            log.warning("ONVIF profiles of %s unavailable (%s): %s carries the main stream",
-                        host, e, SUB_CHANNEL)
+            log.warning("ONVIF profiles of %s unavailable (%s): %s carry the main stream",
+                        host, e, "/".join(SUB_CHANNELS))
             sub = None
         else:
             if sub:
-                log.info("ONVIF camera %s: %s carries substream %s (%sx%s @%s fps)", host,
-                         SUB_CHANNEL, sub["token"], sub["width"], sub["height"], sub["fps"])
+                log.info("ONVIF camera %s: %s carry substream %s (%sx%s @%s fps)", host,
+                         "/".join(SUB_CHANNELS), sub["token"], sub["width"], sub["height"], sub["fps"])
             else:
-                log.info("ONVIF camera %s has no smaller H.264 profile: %s carries the main "
-                         "stream", host, SUB_CHANNEL)
+                log.info("ONVIF camera %s has no smaller H.264 profile: %s carry the main "
+                         "stream", host, "/".join(SUB_CHANNELS))
         with self._lock:
             self._subs[url] = sub
             self._looking_up.discard(url)
@@ -933,17 +937,17 @@ class PushManager:
                     self._sync(device_id)
 
     def substream(self, device_id):
-        """{width, height, fps} of the substream SUB_CHANNEL carries, or None if it
-        carries the main stream."""
+        """{width, height, fps} of the substream SUB_CHANNELS carry, or None if they
+        carry the main stream."""
         with self._lock:
             src = self._sources.get(device_id)
             sub = self._subs.get(src["url"]) if src else None
             return {k: sub[k] for k in ("width", "height", "fps")} if sub else None
 
     def _channel_url(self, src, channel):
-        """The url `channel` pushes; None while SUB_CHANNEL waits for the profiles."""
+        """The url `channel` pushes; None while SUB_CHANNELS wait for the profiles."""
         url = src["url"]
-        if channel != SUB_CHANNEL:
+        if channel not in SUB_CHANNELS:
             return url
         if url in self._looking_up:
             return None

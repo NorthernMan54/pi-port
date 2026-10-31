@@ -383,6 +383,29 @@ Verified on a Raspberry Pi 5 (Docker, Coral) with a Hikvision 4K camera and
 Protect 7.2: live view in the app and browser, recording, and smart-detect
 events.
 
+Tested with audio (2026-10-30), on a MacBook Pro (M1 Pro, macOS 27.0.1, native,
+ffmpeg 8.0.1) as an AI Port X, Protect 7.3.70 on a UCG-Max: browser live view
+plays video and audio smoothly on High and Low. The test camera, a Hikvision
+ECI-T24F2, was set up as follows:
+
+| Setting | Main stream (`video1`) | Sub-stream (`video2`/`video3`) |
+|---|---|---|
+| Video Type | Video and Audio Stream | Video and Audio Stream |
+| Resolution | 2560×1440 | 1280×720 |
+| Bit Rate Type | Variable | Variable |
+| Picture Quality | Medium | Medium |
+| Frame Rate | 20 fps | 20 fps |
+| Max. Bit Rate | 3072 kbps | 2048 kbps |
+| Video Encoding | H.264 | H.264 |
+| H.264+ | Off | – |
+| Profile | Medium | Medium |
+| I-Frame Interval | 20 (1 s) | 20 (1 s) |
+| Smoothing | 50 | 25 |
+| Audio Encoding | AAC, 16 kHz (shared by both streams) | |
+
+The camera's audio should be AAC or G.711: ffmpeg can't copy G.722.1, G.726, PCM
+or MP2 into FLV, and the pull then fails.
+
 Limits:
 
 - **If the AI Port stops, the camera stops recording.** Protect no longer pulls
@@ -393,9 +416,10 @@ Limits:
   retried every second. Set the camera's stream to H.264. UniFi's own HEVC
   framing (FLV codec id 8 with a `0x68 0x01` VPS/SPS/PPS tag) is not
   implemented; such a stream is now refused with one clear error.
-- `video1`/`video2` carry the camera's main stream; `video3` carries its
-  substream when the camera's ONVIF Media service lists a smaller H.264 profile
-  (looked up with the RTSP URL's login; otherwise the main stream). The resolution
+- `video1` carries the camera's main stream; `video2` and `video3` (UniFi's
+  medium and low channels) carry its substream when the camera's ONVIF Media
+  service lists a smaller H.264 profile (looked up with the RTSP URL's login;
+  otherwise the main stream). The resolution
   reported to Protect is probed from the main stream, and the substream's is its
   ONVIF profile's.
 - The camera's audio is copied as it is (G.711, AAC or MP3), like unifi-cam-proxy
@@ -409,7 +433,7 @@ Limits:
   trailers carry the tag's time in the track's sample rate.
 - Channels carrying the same stream share one RTSP session (one ffmpeg, fanned
   out); the detector opens its own. With a substream that is three sessions:
-  main (`video1`/`video2`), sub (`video3`) and detection. Cameras limit
+  main (`video1`), sub (`video2`/`video3`) and detection. Cameras limit
   concurrent sessions: a Hikvision answers `500` to RTSP SETUP past three, or
   `401` past its login limit.
 - On a Pi 5 the camera's H.264 is decoded in software for detection (~half a

@@ -568,10 +568,11 @@ Protect's own ingest for that camera stops; without the push the camera has no v
 
 `OnvifStreamControl` names only the main profile. `onvif_media.py` asks the camera's
 ONVIF Media service (GetCapabilities, GetProfiles, GetStreamUri, WS-Security digest
-with the RTSP URL's login) for the rest, once per URL, and `video3` carries the
-smallest H.264 profile below the main one's resolution; until that answer `video3`
-waits, so it doesn't open a main-stream session only to restart on the substream.
-`video1`/`video2`, and detection, use the main stream.
+with the RTSP URL's login) for the rest, once per URL, and `video2`/`video3` carry the
+smallest H.264 profile below the main one's resolution (a UniFi camera's medium and
+low channels are 720p and 360p; `video2` on the main stream made grids and the app
+pull full resolution); until that answer they wait, so they don't open a main-stream
+session only to restart on the substream. `video1`, and detection, use the main stream.
 
 Channels on the same stream share one ffmpeg (`SharedPull`, kept per URL by
 `PullPool`): a camera allows few RTSP sessions, and a Hikvision answered `500` to a

@@ -2684,7 +2684,7 @@ class TestStreamControlUsedPoints(unittest.TestCase):
 
 class TestOnvifChannelGeometry(unittest.TestCase):
     """The ChangeVideoSettings reply sizes each ONVIF channel by what it carries:
-    the main stream, or the camera's substream on video3."""
+    the main stream, or the camera's substream on video2/video3."""
 
     def setUp(self):
         import onvif_push
@@ -2703,10 +2703,10 @@ class TestOnvifChannelGeometry(unittest.TestCase):
         ws = _FakeWS()
         av.handle_function(ws, {"functionName": "ChangeVideoSettings", "messageId": "m",
                                 "payload": {"deviceID": "CAMX", "video": {
-                                    "video1": dest, "video3": dest}}}, {})
+                                    "video1": dest, "video2": dest, "video3": dest}}}, {})
         return json.loads(ws.sent[-1])["payload"]["video"]
 
-    def test_video3_reports_substream(self):
+    def test_video2_and_video3_report_substream(self):
         self.profiles = [
             {"token": "P1", "encoding": "H264", "width": 2560, "height": 1440, "fps": 20,
              "url": "rtsp://cam/101"},
@@ -2715,12 +2715,14 @@ class TestOnvifChannelGeometry(unittest.TestCase):
         av._onvif.set_source("CAMX", "rtsp://cam/101", width=2560, height=1440, fps=20)
         video = self._reply()
         self.assertEqual((video["video1"]["width"], video["video1"]["height"]), (2560, 1440))
-        self.assertEqual((video["video3"]["width"], video["video3"]["height"],
-                          video["video3"]["fps"]), (640, 360, 15))
+        for channel in ("video2", "video3"):
+            self.assertEqual((video[channel]["width"], video[channel]["height"],
+                              video[channel]["fps"]), (640, 360, 15))
 
     def test_main_stream_everywhere_without_substream(self):
         av._onvif.set_source("CAMX", "rtsp://cam/101", width=2560, height=1440, fps=20)
         video = self._reply()
+        self.assertEqual(video["video1"], video["video2"])
         self.assertEqual(video["video1"], video["video3"])
 
 

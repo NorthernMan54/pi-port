@@ -61,6 +61,16 @@ FACE_MATCH_MIN_PX = int(os.environ.get("AIPORT_FACE_MATCH_MIN_PX") or 40)
 # (length 3.9) sits 0.3-0.4 from many faces; good reads of him are 8.5-11.6.
 FACE_EMBED_MIN_NORM = float(os.environ.get("AIPORT_FACE_EMBED_MIN_NORM") or 7.0)
 
+# A face whose vector is shorter still isn't a face to show at all: the back of a head or a face
+# turned away (live 12:36-12:40 on Driveway: backs of heads 3.3 and 4.3, turned away 5.9; faces
+# 6.7-8.8, in profile too). Dropped once at least FACE_MATCH_MIN_PX, where the length means
+# something. AIPORT_FACE_DROP_NORM=0 keeps them all.
+FACE_DROP_NORM = float(os.environ.get("AIPORT_FACE_DROP_NORM") or 6.0)
+
+
+def embedding_norm(embedding):
+    return 0.0 if embedding is None else float(np.linalg.norm(np.asarray(embedding, dtype=np.float64)))
+
 
 def weak_embedding(embedding):
     """True if an SFace vector is too short (a poor face) to send or match."""
@@ -321,6 +331,11 @@ class Enricher:
                     fx, fy, fw, fh = [float(v) for v in f[:4]]
                     emb = sface.feature(sface.alignCrop(crop, f)) if sface is not None else None
                     size_px = int(min(fw, fh))
+                    if (emb is not None and size_px >= FACE_MATCH_MIN_PX
+                            and embedding_norm(emb) < FACE_DROP_NORM):
+                        log.info("face dropped: %d px, vector length %.1f (back of a head or "
+                                 "turned away)", size_px, embedding_norm(emb))
+                        continue
                     name, sim = (self._match(sface, emb)
                                  if size_px >= FACE_MATCH_MIN_PX and not weak_embedding(emb)
                                  else ("", 0.0))

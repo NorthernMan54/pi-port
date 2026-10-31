@@ -401,9 +401,12 @@ Limits:
 - The camera's audio is copied as it is (G.711, AAC or MP3), like unifi-cam-proxy
   with `-c:a copy`: re-encoding G.711 to AAC made live view stop and start every
   second. Other audio (e.g. Opus) is re-encoded to AAC 32 kHz mono, and a camera
-  without audio gets a silent AAC track. Protect asks for Opus, which plain FLV
-  cannot carry. **Audio does not play in Protect yet:** G.711 is accepted but
-  Protect's browser player has no audio, and the camera's AAC plays in stutters.
+  without audio gets a silent AAC track. The same audio also goes out as 48 kHz
+  Opus in UniFi's FLV tag type 10, the only audio Protect's browser live view
+  plays (as yi-protect sends it); this needs ffmpeg 8's multitrack FLV. Audio
+  plays smoothly in live view (Hikvision, AAC 16 kHz, Protect 7.3.70): both tracks
+  are restamped on a steady frame grid and sent in timestamp order, and audio
+  trailers carry the tag's time in the track's sample rate.
 - Channels carrying the same stream share one RTSP session (one ffmpeg, fanned
   out); the detector opens its own. With a substream that is three sessions:
   main (`video1`/`video2`), sub (`video3`) and detection. Cameras limit

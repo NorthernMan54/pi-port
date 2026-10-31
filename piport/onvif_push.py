@@ -17,11 +17,18 @@ rewrite_flv() into a TCP socket. The rewrite mirrors unifi-cam-proxy's
 clock_sync.py (MIT, keshavdv/unifi-cam-proxy): header flags byte 7, a 16-byte
 timing trailer after every tag, and onClockSync/onMpma script tags every 5s.
 One deliberate difference: the trailer's elapsed time is written in the
-timescale the trailer itself declares (90 kHz video, 11025 otherwise).
-clock_sync.py writes 10-microsecond units for both, which Protect 7.x reads as
-video running 11% and audio 9x too fast; its media server then drops the frames
-as "from the future" and the web player never starts.
+timescale the trailer itself declares (90 kHz video, the sample rate for audio,
+11025 otherwise). clock_sync.py writes 10-microsecond units for both, which
+Protect 7.x reads as video running 11% and audio 9x too fast; its media server
+then drops the frames as "from the future" and the web player never starts.
+
+Audio goes out as two tracks, as UniFi cameras send it (and yi-protect, which
+gets audio playing in Protect, copies): the camera's audio (or AAC) as FLV
+audio, which serves recording and the app, plus 48 kHz Opus as UniFi's own tag
+type 10, the only audio Protect's browser live view plays.
 """
+import heapq
+import itertools
 import logging
 import queue
 import socket
@@ -43,10 +50,19 @@ CLOCK_SYNC_INTERVAL_S = 5.0
 _TAG_AUDIO = 8
 _TAG_VIDEO = 9
 _TAG_SCRIPT = 18
+_TAG_OPUS = 10   # UniFi's Opus tag: the raw packet as payload
 # Trailer timescales as captured from real cameras by unifi-cam-proxy:
-# 0x015F90 = 90000 (video clock), 0x2B11 = 11025 for everything else.
+# 0x015F90 = 90000 (video clock), 0x2B11 = 11025 for everything else. Audio
+# trailers carry the track's sample rate (yi-protect: 0x3E80 AAC, 0xBB80 Opus).
 _TIMESCALE_VIDEO = 90000
 _TIMESCALE_OTHER = 11025
+_TIMESCALE_OPUS = 48000
+_AAC_RATES = (96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000,
+              11025, 8000, 7350)
+_FLV_SOUND_RATES = (5512, 11025, 22050, 44100)
+OPUS_FRAME_MS = 20
+# Opus config tag at the start of a connection, byte for byte as yi-protect sends it.
+_OPUS_CONFIG = b"\xcf\x00\x03\x02"
 
 
 # --- AMF0 / FLV encoding (just what the two script tags need) ----------------
@@ -75,11 +91,11 @@ def script_tag(name, data, timestamp=0):
     return _flv_tag(_TAG_SCRIPT, b"\x02" + _amf_string(name) + _amf_value(data), timestamp)
 
 
-def timing_trailer(is_video, elapsed_s):
+def timing_trailer(is_video, elapsed_s, scale=None):
     """16 bytes: 0, the 24-bit timescale, 4 zero bytes, then elapsed time in
     that timescale as 64-bit big-endian (identical to the 32-bit layout below
     2**32 ticks, ~13 h of video; no wrap after that)."""
-    scale = _TIMESCALE_VIDEO if is_video else _TIMESCALE_OTHER
+    scale = scale or (_TIMESCALE_VIDEO if is_video else _TIMESCALE_OTHER)
     return (b"\x00" + scale.to_bytes(3, "big") + b"\x00" * 4
             + struct.pack(">Q", int(elapsed_s * scale)))
 
@@ -168,6 +184,7 @@ class ExtendedFlvWriter:
         # - dropping"), which lost the first ~5 s after every reconnect (live 2026-10-28).
         self.early_sync = early_sync
         self._sync_next = False
+        self._aac_rate = None  # from the AudioSpecificConfig, once seen
 
     def header(self, header):
         self.write(header[:4] + b"\x07" + header[5:9])
@@ -190,10 +207,31 @@ class ExtendedFlvWriter:
             self.write(script_tag("onMpma", _MPMA, 0))
             self.write(timing_trailer(False, now - self.start))
 
+    def _scale(self, tag_type, payload):
+        """The trailer timescale: 90 kHz video, the sample rate for audio."""
+        if tag_type == _TAG_VIDEO:
+            return _TIMESCALE_VIDEO
+        if tag_type == _TAG_OPUS:
+            return _TIMESCALE_OPUS
+        if tag_type != _TAG_AUDIO or not payload:
+            return _TIMESCALE_OTHER
+        fmt = payload[0] >> 4
+        if fmt == 10:  # AAC: the header's rate bits are always 44.1 kHz
+            self._aac_rate = aac_config_rate(payload) or self._aac_rate
+            return self._aac_rate or _TIMESCALE_OTHER
+        if fmt in (7, 8):  # G.711
+            return 8000
+        return _FLV_SOUND_RATES[payload[0] >> 2 & 3]
+
     def tag(self, tag_header, body):
         """A whole tag (body = payload + PreviousTagSize) and its trailer."""
         self.write(tag_header + body)
-        self.write(timing_trailer(tag_header[0] == _TAG_VIDEO, self.now - self.start))
+        elapsed = self.now - self.start
+        if tag_header[0] in (_TAG_AUDIO, _TAG_OPUS):
+            # Audio trailers carry the tag's own time, as yi-protect's do: write-time
+            # jitter in them garbles Protect's live audio.
+            elapsed = _tag_timestamp(tag_header) / 1000
+        self.write(timing_trailer(False, elapsed, self._scale(tag_header[0], body)))
         if self.early_sync and tag_header[0] == _TAG_VIDEO and len(body) > 5 and body[1] == 1:
             self.early_sync = False  # the first video frame (AVC NALU, not its config)
             self._sync_next = True
@@ -263,7 +301,7 @@ def parse_destination(dest):
 
 
 def ffmpeg_push_cmd(ffmpeg_bin, source_url, stream_name, camera_audio=True, copy_audio=True):
-    """Camera video copied (no re-encode) plus an audio track into FLV on stdout.
+    """Camera video copied (no re-encode) plus two audio tracks into FLV on stdout.
     Protect's ingest only marks a stream ready (live view, recording) with both
     tracks present -- the extendedFlv header always flags audio+video -- so a
     camera without audio gets a silent AAC track.
@@ -271,20 +309,28 @@ def ffmpeg_push_cmd(ffmpeg_bin, source_url, stream_name, camera_audio=True, copy
     The camera's audio is copied (FLV carries G.711 and AAC as they are), as
     unifi-cam-proxy runs here with -c:a copy. Re-encoding G.711 to AAC made
     Protect's live view stop and start every second (live 2026-10-28);
-    `copy_audio=False` re-encodes, for audio FLV can't hold (e.g. Opus)."""
+    `copy_audio=False` re-encodes, for audio FLV can't hold (e.g. Opus).
+
+    The second track is the same audio as 48 kHz 20 ms Opus, which ffmpeg 8 writes
+    as an Enhanced FLV multitrack tag (0x95) interleaved in timestamp order;
+    SharedPull turns it into Protect's type-10 tag."""
     cmd = [
         ffmpeg_bin, "-nostdin", "-loglevel", "error",
         "-avoid_negative_ts", "make_zero", "-fflags", "+genpts+discardcorrupt",
         "-use_wallclock_as_timestamps", "1", "-timeout", "15000000",
         "-rtsp_transport", "tcp", "-i", source_url,
     ]
-    aac = ["-c:a", "aac", "-ar", "32000", "-ac", "1", "-b:a", "32k"]
+    aac = ["-c:a:0", "aac", "-ar:a:0", "32000", "-ac:a:0", "1", "-b:a:0", "32k"]
     if camera_audio:
-        cmd += ["-map", "0:v:0", "-map", "0:a:0"] + (["-c:a", "copy"] if copy_audio else aac)
+        audio = "0:a:0"
+        cmd += ["-map", "0:v:0", "-map", audio] + (["-c:a:0", "copy"] if copy_audio else aac)
     else:
+        audio = "1:a:0"
         cmd += ["-f", "lavfi", "-i", "anullsrc=r=32000:cl=mono",
-                "-map", "0:v:0", "-map", "1:a:0", "-shortest"] + aac
+                "-map", "0:v:0", "-map", audio, "-shortest"] + aac
     return cmd + [
+        "-map", audio, "-c:a:1", "libopus", "-ar:a:1", "48000", "-ac:a:1", "1",
+        "-b:a:1", "64k", "-frame_duration", "20", "-application", "audio",
         "-c:v", "copy",
         "-metadata", f"streamName={stream_name}", "-f", "flv", "-",
     ]
@@ -295,8 +341,104 @@ def ffmpeg_push_cmd(ffmpeg_bin, source_url, stream_name, camera_audio=True, copy
 _COPYABLE_AUDIO = (2, 7, 8, 10)
 
 
+def aac_config_rate(payload):
+    """Sample rate of an AAC sequence header's AudioSpecificConfig, else None."""
+    if payload[:1] and payload[0] >> 4 == 10 and payload[1:2] == b"\x00" and len(payload) >= 4:
+        index = (payload[2] & 0x07) << 1 | payload[3] >> 7
+        return _AAC_RATES[index] if index < len(_AAC_RATES) else None
+    return None
+
+
+class AudioClock:
+    """Steady audio timestamps for one pull. ffmpeg stamps the camera's packets on
+    arrival (-use_wallclock_as_timestamps), so they come in bunches, which made
+    Protect's live audio stutter; yi-protect, whose audio plays smoothly, puts its
+    Opus on a 20 ms grid. Each track advances by its frame duration and re-anchors
+    when it strays REANCHOR_MS from the arrival stamp. Protect reads AAC and Opus as
+    one audio sequence that a step back ends (yi-protect), so tags are held for
+    HOLD_MS and released in stamp order: arrivals stray up to ~140 ms from the
+    grids, and holding stamps back instead pinned a third of the Opus packets to
+    one stamp (live 2026-10-30)."""
+
+    REANCHOR_MS = 250
+    HOLD_MS = 150
+    INTERVAL_S = 60.0
+
+    def __init__(self, name="", clock=time.monotonic):
+        self._next = {}   # track -> its next stamp (ms, float)
+        self._last = 0
+        self._held = []   # heap of (stamp, seq, tag_header, body)
+        self._seq = itertools.count()
+        self.name, self.clock = name, clock
+        self._reset(clock())
+
+    def _reset(self, now):
+        self.since = now
+        self.counts = {}  # track -> [frames, re-anchored, held back, max |arrival - grid| ms]
+
+    def add(self, tag_header, body, duration_ms):
+        """Hold one audio tag; returns the (tag_header, body) now due, restamped."""
+        stamp = self._grid(tag_header[0], _tag_timestamp(tag_header), duration_ms)
+        heapq.heappush(self._held, (stamp, next(self._seq), tag_header, body))
+        due = []
+        while self._held and self._held[0][0] <= stamp - self.HOLD_MS:
+            stamp_due, _, header, body_due = heapq.heappop(self._held)
+            if stamp_due < self._last:
+                self.counts[header[0]][2] += 1
+            self._last = max(self._last, stamp_due)
+            due.append((_retime(header, self._last), body_due))
+        self._log_if_due()
+        return due
+
+    def _grid(self, track, timestamp, duration_ms):
+        expected = self._next.get(track)
+        count = self.counts.setdefault(track, [0, 0, 0, 0])
+        count[0] += 1
+        if expected is not None:
+            count[3] = max(count[3], abs(timestamp - expected))
+        if expected is None or abs(timestamp - expected) > self.REANCHOR_MS:
+            count[1] += expected is not None
+            expected = timestamp
+        self._next[track] = expected + duration_ms
+        return int(expected)
+
+    def _log_if_due(self):
+        now = self.clock()
+        if now - self.since < self.INTERVAL_S:
+            return
+        names = {_TAG_AUDIO: "aac", _TAG_OPUS: "opus"}
+        parts = [f"{names.get(t, t)} {c[0]} frames, {c[1]} re-anchored, {c[2]} held back, "
+                 f"arrival off grid max {c[3]:.0f} ms" for t, c in sorted(self.counts.items())]
+        lead = ""
+        if _TAG_AUDIO in self._next and _TAG_OPUS in self._next:
+            lead = f"; opus grid {self._next[_TAG_OPUS] - self._next[_TAG_AUDIO]:+.0f} ms vs aac"
+        log.info("audio %s over %.0f s: %s%s", self.name, now - self.since, "; ".join(parts), lead)
+        self._reset(now)
+
+
 class _AudioNotCopyable(ValueError):
     """The camera's audio came out of a copy in a format Protect won't take."""
+
+
+def opus_tag(tag_header, payload):
+    """ffmpeg's multitrack Opus tag as Protect's type 10: (tag_header, body), or
+    None for a tag to drop (its multichannel config). Byte 1: track layout and
+    packet type (0 sequence start, 1 coded frames); then FourCC and track id."""
+    packet_type = payload[1] & 0x0F
+    if packet_type == 0:
+        payload = _OPUS_CONFIG
+    elif packet_type == 1:
+        payload = payload[7:]
+    else:
+        return None
+    tag = _flv_tag(_TAG_OPUS, payload, _tag_timestamp(tag_header))
+    return tag[:11], tag[11:]
+
+
+def _is_opus_track(tag_header, payload):
+    """Our Opus track: an Enhanced FLV multitrack audio tag (the camera's own
+    audio, the first track, is never multitrack)."""
+    return tag_header[0] == _TAG_AUDIO and payload[:1] == b"\x95" and payload[2:6] == b"Opus"
 
 
 def _metadata_numbers(payload):
@@ -318,7 +460,10 @@ def _describe(url):
 
 
 def _is_config_tag(tag_header, payload):
-    """AVC sequence header or AAC AudioSpecificConfig: needed before any frame."""
+    """AVC sequence header, AAC AudioSpecificConfig or the Opus config: needed
+    before any frame."""
+    if tag_header[0] == _TAG_OPUS:
+        return payload == _OPUS_CONFIG
     if tag_header[0] == _TAG_VIDEO:
         return len(payload) > 1 and payload[1] == 0
     if tag_header[0] == _TAG_AUDIO:
@@ -349,14 +494,16 @@ class _DeliveryStats:
         self.delays = []      # wall - stream time, per frame (s)
         self.gaps = []        # wall time between frames (s)
         self.last = None
+        self.keys = 0
 
-    def frame(self, timestamp_ms):
+    def frame(self, timestamp_ms, keyframe=False):
         now = self.clock()
         if self.first is None:
             self.first = now
             log.info("pull %s: first frame %.2f s after ffmpeg started", self.name,
                      now - self.started)
         self.delays.append(now - timestamp_ms / 1000.0)
+        self.keys += keyframe
         if self.last is not None:
             self.gaps.append(now - self.last)
         self.last = now
@@ -365,11 +512,13 @@ class _DeliveryStats:
             late = sorted(d - base for d in self.delays)
             clumped = sum(g < 0.005 for g in self.gaps)
             log.info("pull %s over %.0f s: %d frames (%.1f/s), late vs own timestamp "
-                     "p50 %.0f ms p95 %.0f ms max %.0f ms, longest gap %.0f ms, %d%% clumped",
+                     "p50 %.0f ms p95 %.0f ms max %.0f ms, longest gap %.0f ms, %d%% clumped, "
+                     "a key frame every %.1f s",
                      self.name, now - self.since, len(self.delays),
                      len(self.delays) / (now - self.since), late[len(late) // 2] * 1000,
                      late[int(len(late) * 0.95)] * 1000, late[-1] * 1000,
-                     max(self.gaps) * 1000, 100 * clumped // max(1, len(self.gaps)))
+                     max(self.gaps) * 1000, 100 * clumped // max(1, len(self.gaps)),
+                     (now - self.since) / max(1, self.keys))
             self._reset(now)
 
 
@@ -453,6 +602,8 @@ class SharedPull:
             stats = _DeliveryStats(_describe(self.source_url))
             self._header = read_flv_header(proc.stdout.read)
             self._config = {}
+            audio_clock = AudioClock(_describe(self.source_url))
+            aac_frame_ms = None
             for tag_header, body in read_tags(proc.stdout.read):
                 if self._stop.is_set():
                     break
@@ -460,6 +611,12 @@ class SharedPull:
                 if len(body) < int.from_bytes(tag_header[1:4], "big") + 4:
                     break
                 check_video_codec(tag_header, body)
+                if _is_opus_track(tag_header, payload):
+                    converted = opus_tag(tag_header, payload)
+                    if converted is None:
+                        continue
+                    tag_header, body = converted
+                    payload = body[:-4]
                 if (self._copy_audio and tag_header[0] == _TAG_AUDIO and payload
                         and payload[0] >> 4 not in _COPYABLE_AUDIO):
                     raise _AudioNotCopyable(f"FLV sound format {payload[0] >> 4}")
@@ -468,12 +625,22 @@ class SharedPull:
                     log.info("pull %s onMetaData: %s", _describe(self.source_url),
                              _metadata_numbers(payload))
                 elif _is_config_tag(tag_header, payload):
-                    self._config["video" if tag_header[0] == _TAG_VIDEO else "audio"] = \
-                        (tag_header, body)
+                    self._config[{_TAG_VIDEO: "video", _TAG_AUDIO: "audio"}.get(
+                        tag_header[0], "opus")] = (tag_header, body)
+                    rate = aac_config_rate(payload)
+                    aac_frame_ms = 1024000 / rate if rate else aac_frame_ms
                 else:
+                    duration = (OPUS_FRAME_MS if tag_header[0] == _TAG_OPUS else
+                                aac_frame_ms if tag_header[0] == _TAG_AUDIO
+                                and payload[0] >> 4 == 10 else None)
+                    if duration:
+                        for held in audio_clock.add(tag_header, body, duration):
+                            self._deliver(*held, False)
+                        frames += 1
+                        continue
                     frames += 1
                     if tag_header[0] == _TAG_VIDEO:
-                        stats.frame(_tag_timestamp(tag_header))
+                        stats.frame(_tag_timestamp(tag_header), _is_keyframe(tag_header, payload))
                     self._deliver(tag_header, body, _is_keyframe(tag_header, payload))
             reason = "ffmpeg output ended"
         except _AudioNotCopyable as exc:
@@ -520,7 +687,7 @@ class SharedPull:
                 if waiting:
                     if not keyframe or "video" not in self._config:
                         continue
-                    config = [self._config[k] for k in ("meta", "video", "audio")
+                    config = [self._config[k] for k in ("meta", "video", "audio", "opus")
                               if k in self._config]
                     if not sink.put(("start", self._header, config,
                                      _tag_timestamp(tag_header))):
@@ -674,6 +841,8 @@ class FlvPush:
                 if item[0] != "tag":
                     reason = item[1] if item[0] == "end" else "restarted"
                     break
+                if _tag_timestamp(item[1]) < base_ts:
+                    continue  # audio held from before the key frame this push joined at
                 tag_header = _retime(item[1], _tag_timestamp(item[1]) - base_ts)
                 writer.sync_if_due(_tag_timestamp(tag_header))
                 writer.tag(tag_header, item[2])

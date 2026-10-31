@@ -583,8 +583,14 @@ no frames) as long as a push uses it.
 
 Each channel is `ffmpeg -c:v copy -c:a copy` into FLV (audio FLV or Protect can't
 take -- any sound format but MP3, G.711 or AAC -- is re-encoded to AAC; a camera
-without audio gets a silent AAC track; known issue: no audio plays in Protect
-yet -- G.711 gives none in the browser, AAC stutters), rewritten by
+without audio gets a silent AAC track), plus the same audio as 48 kHz Opus,
+which ffmpeg 8 writes as a multitrack tag and `opus_tag()` turns into UniFi's
+type 10 for the browser live view. `AudioClock` restamps both audio tracks on
+their frame grid (ffmpeg stamps packets on arrival, in bunches, which stuttered)
+and holds them 150 ms to send them in timestamp order: Protect reads AAC and Opus
+as one sequence, and pinning stamps to keep that order garbled it. Audio trailers
+carry the tag's time in the track's sample rate. The pull logs audio stats and
+the key frame interval once a minute. All of it is then rewritten by
 `rewrite_flv()` and sent over TCP. **H.264 only:** an HEVC source is muxed by
 ffmpeg as Enhanced RTMP (an `hvc1` FourCC), which `ms` refuses (live view resets,
 the push is closed after a few hundred bytes); `rewrite_flv()` raises

@@ -384,8 +384,8 @@ Protect 7.2: live view in the app and browser, recording, and smart-detect
 events.
 
 Tested with audio (2026-10-30), on a MacBook Pro (M1 Pro, macOS 27.0.1, native,
-ffmpeg 8.0.1) as an AI Port X, Protect 7.3.70 on a UCG-Max: browser live view
-plays video and audio smoothly on High and Low. The test camera, a Hikvision
+ffmpeg 8.0.1) as an AI Port X, Protect 7.3.70 on a UCG-Max: video and audio play
+smoothly in browser live view (High and Low), the mobile app and recordings. The test camera, a Hikvision
 ECI-T24F2, was set up as follows:
 
 | Setting | Main stream (`video1`) | Sub-stream (`video2`/`video3`) |

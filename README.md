@@ -1,15 +1,15 @@
-# pi-port — a DIY UniFi Protect "AI Port" (Orange Pi · Raspberry Pi · x86 · Mac)
+# diy-port - a DIY UniFi Protect "AI Port" (Orange Pi · Raspberry Pi · x86 · Mac)
 
 <div align="center">
 
 <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License: AGPL-3.0-or-later"></a>
-<a href="https://github.com/hutchx86/pi-port/actions/workflows/ci.yml"><img src="https://github.com/hutchx86/pi-port/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+<a href="https://github.com/hutchx86/diy-port/actions/workflows/ci.yml"><img src="https://github.com/hutchx86/diy-port/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
 
 **A reverse-engineering / interoperability proof of concept that makes a stock
 SBC or PC present itself to a real UniFi Protect console as genuine AI Port
 hardware (catalog model `UVC AI Port`, sysid `0xa5f1`).**
-**It speaks the vendor wire protocol only — discovery, adoption, camera pairing,
-video relay, pluggable object detection and detection events with thumbnails —
+**It speaks the vendor wire protocol only - discovery, adoption, camera pairing,
+video relay, pluggable object detection and detection events with thumbnails -
 with no firmware modification, no controller database writes and no Ubiquiti
 code or binaries.**
 
@@ -25,12 +25,12 @@ code or binaries.**
 > Not affiliated with, endorsed by, or connected to Ubiquiti Inc. "UniFi",
 > "UniFi Protect" and "AI Port" are trademarks of Ubiquiti Inc. No Ubiquiti
 > firmware or binaries are distributed here. Built with AI assistance under
-> human review — verify anything you rely on. See [Legal](#legal).
+> human review - verify anything you rely on. See [Legal](#legal).
 
 ## Quick start
 
 ```bash
-git clone https://github.com/hutchx86/pi-port && cd pi-port
+git clone https://github.com/hutchx86/diy-port && cd diy-port
 
 # Orange Pi 5 Plus (RK3588, NPU):
 sudo scripts/install.sh --console <console-ip> [--parent-iface <iface>]
@@ -55,7 +55,7 @@ AIPORT_CONSOLE_HOST=<console-ip> docker compose up -d --build
 |  |  |
 | --- | --- |
 | **What** | Emulates the UniFi Protect AI Port device role |
-| **Hardware** | Orange Pi 5 Plus (RK3588 NPU) — verified live; Raspberry Pi 5 + Coral (Docker bridge) — verified; x86_64 + Raspberry Pi 4/5 (CPU, Docker); Apple-silicon Mac (bare metal) |
+| **Hardware** | Orange Pi 5 Plus (RK3588 NPU) - verified live; Raspberry Pi 5 + Coral (Docker bridge) - verified; x86_64 + Raspberry Pi 4/5 (CPU, Docker); Apple-silicon Mac (bare metal) |
 | **Protocol / interface** | UBNT discovery UDP/10001; mTLS WSS :7442 (`ucp4` + classic avclient); RTSP relay :7447; ONVIF video push to :7550 |
 | **Detection** | Pluggable COCO detectors: RKNN (RK3588 NPU), Edge TPU (Coral), or `onnxruntime` on CPU/Core ML |
 | **Language** | Python 3 |
@@ -63,11 +63,11 @@ AIPORT_CONSOLE_HOST=<console-ip> docker compose up -d --build
 
 ## How it compares
 
-|  | Real AI Port | Pi Port |
+|  | Real AI Port | DIY Port |
 | --- | --- | --- |
 | **What it is** | Ubiquiti AI Port appliance (Ambarella) | This repo's Python, on an SBC/PC |
-| **Firmware** | Ubiquiti, signed | None — the emulator itself |
-| **Detection model** | Ubiquiti's own classifier | Stock COCO model mapped to person/vehicle/animal: YOLOv5 on the RK3588 NPU, SSDLite MobileDet on a Coral, or YOLOv5n on CPU/Core ML |
+| **Firmware** | Ubiquiti, signed | None - the emulator itself |
+| **Detection model** | Ubiquiti's own classifier | Stock COCO model mapped to person/vehicle/animal (YOLOv5 on the RK3588 NPU, SSDLite MobileDet on a Coral, YOLOv5n on CPU/Core ML), plus optional plates, faces and vehicle attributes |
 | **Output** | Full Ubiquiti product behaviour | The subset this project implements |
 
 It is a protocol-compatible stand-in built on the same shared camera/chime
@@ -77,7 +77,7 @@ middleware, not a clone of the device.
 
 The host answers the console's L2 discovery, then adopts like a classic camera
 (`POST /api/1.2/manage` on HTTPS :443). It keeps two mTLS WebSocket connections
-to the console — the generic `ucp4` channel for management RPCs, and the classic
+to the console - the generic `ucp4` channel for management RPCs, and the classic
 avclient channel for camera pairing and detection events. When a camera is
 paired, the console hands the host an RTSP URL on its own internal relay
 (`:7447`); the host pulls that stream, runs the configured detector, and pushes
@@ -87,7 +87,7 @@ An assigned third-party (ONVIF) camera is handled the other way round: Protect
 stops ingesting it and asks the AI Port to push its video to `tcp://<console>:7550`
 as `extendedFlv`, while the AI Port also pulls the camera's RTSP for detection.
 
-<img src="docs/images/architecture.svg" width="760" alt="Pi Port data path: cameras to Protect console to emulated AI Port">
+<img src="docs/images/architecture.svg" width="760" alt="DIY Port data path: cameras to Protect console to emulated AI Port">
 
 | Component | Role |
 | --- | --- |
@@ -96,7 +96,11 @@ as `extendedFlv`, while the AI Port also pulls the camera's RTSP for detection.
 | `ucp4_client.py` | Generic `ucp4` device-management WebSocket |
 | `avclient.py` | Pairing, streaming and smart-detect WebSocket + detection loop |
 | `detectors/` | Pluggable detector backends: `rknn` NPU, `edgetpu` Coral, `cpu` (onnxruntime/Core ML) |
+| `enrich.py`, `facedb.py` | Optional vehicle attributes, plates and faces (Protect's face DB) |
+| `motion.py`, `regions.py`, `stationary.py`, `norfair_match.py` | Frigate-derived motion gate, region crops, parked-object check, Norfair matching |
+| `replay.py` | Offline clip replay and scenario checks |
 | `onvif_push.py` | ONVIF camera video push to Protect (`extendedFlv`) |
+| `onvif_media.py` | ONVIF camera's media profiles (substream for `video3`) |
 | `sysinfo_server.py` | Dev-box CPU/mem/GPU/NPU/Coral status page (`webui.html`) |
 | `instance_manager.py`, `run_all.py` | Multi-instance orchestration |
 
@@ -112,30 +116,42 @@ as `extendedFlv`, while the AI Port also pulls the camera's RTSP for detection.
 | Apple-silicon Mac | M-series | Verified | Bare metal only (Docker Desktop has no LAN L2); Core ML on the Neural Engine |
 | Any Linux CPU host | `onnxruntime` | Untested | `--accel cpu`; fine for a camera or two |
 
-The detector is pluggable (`piport/detectors/`, `[hardware] detector` in
+The detector is pluggable (`diyport/detectors/`, `[hardware] detector` in
 `aiport.cfg`): `rknn`, `edgetpu`, `cpu`, or `auto`, which takes the first one
 whose runtime, hardware and model are present. A new accelerator is a
 `base.Detector` subclass registered in `BACKENDS` (and `AUTO_ORDER` for `auto`)
-in `piport/detectors/__init__.py`.
+in `diyport/detectors/__init__.py`.
 
 ## Features
 
-- **Emulated AI Port device role** — L2 discovery, adoption, and both WebSocket
+- **Emulated AI Port device role** - L2 discovery, adoption, and both WebSocket
   connections a real console expects.
-- **Camera pairing and video relay** — pairs real cameras and pulls their stream
+- **Camera pairing and video relay** - pairs real cameras and pulls their stream
   from Protect's internal RTSP relay.
-- **Third-party (ONVIF) cameras** — pushes their video to Protect for live view
+- **Third-party (ONVIF) cameras** - pushes their video to Protect for live view
   and recording, and runs detection on the same stream.
-- **Pluggable real object detection** — RKNN on the RK3588 NPU, SSDLite
+- **Pluggable real object detection** - RKNN on the RK3588 NPU, SSDLite
   MobileDet (or a YOLOv5 Edge TPU export) on a Coral, and onnxruntime on CPU or
   the Apple-silicon Neural Engine (Core ML).
-- **Detection events with thumbnails** — `EventSmartDetect` with per-object
-  snapshots and Full-FoV images, plus the overview/timeline thumbnails.
-- **Multi-instance** — one reboot-surviving systemd unit and macvlan interface
+- **Detection events with thumbnails** - `EventSmartDetect` with per-object
+  snapshots and Full-FoV images, plus the overview/timeline thumbnails. One event
+  per camera, with batched leaves, real zone ids and per-camera box timing.
+- **Frigate-derived detection quality** - motion gate, native-size region crops,
+  true-positive score gating, parked-object pixel checks and an optional Norfair
+  tracker; all off or unchanged unless enabled.
+- **Optional enrichment** - license plates (`fast-alpr`), faces (YuNet/SFace,
+  matched against Protect's known-faces DB) and vehicle type/colour (Apple's model
+  on macOS, YOLO class + HSV elsewhere).
+- **Replay harness** - recorded clips run through the full pipeline with `--check`
+  expectations, so detection changes are tested before going live.
+- **Observability** - per-camera frames/inference lines and a host load line
+  (CPU per process group, GPU, NPU, power where readable); a launchd service on
+  macOS.
+- **Multi-instance** - one reboot-surviving systemd unit and macvlan interface
   per instance on the board, or one container per host. Board/macvlan instances
   are distinct L2 devices; a host-network container shares the host's IP. A
   small web UI manages the board's instances.
-- **Honest state handling** — reflects real adopted state and clears local state
+- **Honest state handling** - reflects real adopted state and clears local state
   on the console's reset.
 
 ## Requirements
@@ -151,30 +167,44 @@ in `piport/detectors/__init__.py`.
   same-host Docker bridge setup).
 - For model conversion: an x86_64 Linux host with `rknn-toolkit2` (the RKNN
   converter does not run on the board).
+- Optional enrichment: `opencv-python-headless` for the motion gate, stationary
+  checks and faces; `fast-alpr[onnx]` for plates; `norfair` for the Kalman
+  tracker. Recipes and extras are in `diyport/requirements.txt`; every stage
+  degrades cleanly when absent.
 
 ## Repository layout
 
 ```
-piport/               the emulator
+diyport/               the emulator
   discovery.py          UDP/10001 UBNT discovery responder
   http_api.py           HTTPS :443 adopt/control API
   ucp4_client.py        generic ucp4 device-management websocket
   avclient.py           pairing/streaming/smart-detect websocket + detection
   detectors/            pluggable detector backends (rknn / edgetpu / cpu)
+  enrich.py / facedb.py optional plates, faces and vehicle attributes
+  motion.py / regions.py / stationary.py / norfair_match.py   Frigate-derived detection
+  replay.py             offline clip replay and scenario checks
+  hoststats.py / camera_clock.py / apple_fm.py   host load, RTSP clock, macOS vehicle model
+  apple/                Swift helper for the macOS vehicle model
   onvif_push.py         ONVIF camera video push (extendedFlv)
+  onvif_media.py        ONVIF camera media profiles (substream lookup)
   sysinfo_server.py     dev-box CPU/mem/GPU/NPU/Coral status page (+ webui.html)
   models/               anchors + COCO labels (model binaries fetched, not stored)
+  tests/                unit suite
+  requirements.txt      Python dependencies (optional extras documented inline)
   instance_manager.py / run_all.py   multi-instance orchestration
 compose.yaml          CPU stack / Komodo Stack (host net; x86_64 + arm64)
 compose.macvlan.yaml  same, but a dedicated LAN IP/MAC per container
+compose.macos.yaml    macOS container (NAT + pf; see docker/README.md)
 docker/               Dockerfile (CPU/Coral), bridge compose, smoke test + notes
-scripts/              install.sh (board installer), fetch_models.py, helpers
+scripts/              install.sh, fetch_models.py, record_clip.py, log_writer.py;
+                      diyport_service.sh + macos_launchd.sh / macos_move_host.sh (macOS)
 rknn_convert/         YOLOv5s -> RKNN conversion recipe (x86 build host)
-docs/images/          README diagram
+docs/                 protocol notes and design records (docs/images/ holds the diagram)
 ```
 
 Model binaries (`.onnx`/`.rknn`/`.tflite`) and all Ubiquiti firmware are **not**
-stored here; see [Model assets](#model-assets-not-tracked). `piport/README.md`
+stored here; see [Model assets](#model-assets-not-tracked). `diyport/README.md`
 has the protocol detail and per-component notes.
 
 ## Install / Usage
@@ -197,7 +227,7 @@ sudo scripts/install.sh --console <UNVR-IP> [--parent-iface <iface>]
   `--accel none`.
 - The NPU model cannot be built on the Pi; build it on an x86 host
   (`scripts/fetch_models.py --convert`) or let the installer fetch it from
-  `--rknn-url` / `PIPORT_RKNN_URL` / its default URL. `--rknn <path>` takes a
+  `--rknn-url` / `DIYPORT_RKNN_URL` / its default URL. `--rknn <path>` takes a
   local build, and a local `models-rknn/` copy (e.g. a checkout of
   `hutchx86/pi-port-models`) is also detected.
 - Opens the web UI on `:8090` (`--webui-port` to change) for board stats and
@@ -243,7 +273,7 @@ detector backend is selected at build time (`ACCEL=cpu` by default, or
 networking) and the **Komodo** Stack file:
 
 ```bash
-docker build -f docker/Dockerfile -t piport-cpu .
+docker build -f docker/Dockerfile -t diyport-cpu .
 AIPORT_CONSOLE_HOST=<console-ip> docker compose up -d --build
 ./docker/run-smoke-test.sh   # no console/camera needed
 ```
@@ -259,20 +289,20 @@ The Docker stack above is the recommended Pi path and is the same command as
 x86. Run bare metal only if you want the Pi 4's hardware H.264 decode (it stalls
 inside a container) or no Docker. Differences from the RK3588 board: **no NPU**,
 so install `onnxruntime` instead of `rknn-toolkit-lite2`, and there is **no
-`.rknn`** — the CPU `yolov5n.onnx` is used.
+`.rknn`** - the CPU `yolov5n.onnx` is used.
 
 ```bash
 sudo apt-get install -y ffmpeg python3-venv
 python3 -m venv venv
-venv/bin/pip install -r piport/requirements.txt onnxruntime
+venv/bin/pip install -r diyport/requirements.txt onnxruntime
 python3 scripts/fetch_models.py --backend cpu    # downloads yolov5n.onnx
-$EDITOR piport/aiport.cfg                        # set [console] host (+ identity)
-sudo venv/bin/python piport/run_all.py --iface <iface> [--state-dir <dir>]
+$EDITOR diyport/aiport.cfg                        # set [console] host (+ identity)
+sudo venv/bin/python diyport/run_all.py --iface <iface> [--state-dir <dir>]
 ```
 
 `detectors/__init__.py` selects onnxruntime automatically. On a **Pi 4**,
 `avclient.py` also enables `h264_v4l2m2m` hardware decode; on a **Pi 5** it does
-not (no H.264 hardware decoder — it software-decodes, which the faster CPU
+not (no H.264 hardware decoder - it software-decodes, which the faster CPU
 handles). For reboot survival, wrap `run_all.py` in a systemd unit with
 `KillMode=control-group`:
 
@@ -283,7 +313,7 @@ After=network-online.target
 Wants=network-online.target
 [Service]
 Type=simple
-ExecStart=/opt/pi-port/venv/bin/python /opt/pi-port/piport/run_all.py --iface <iface> --state-dir /var/lib/pi-port
+ExecStart=/opt/diy-port/venv/bin/python /opt/diy-port/diyport/run_all.py --iface <iface> --state-dir /var/lib/diy-port
 Restart=on-failure
 KillMode=control-group
 [Install]
@@ -293,7 +323,7 @@ WantedBy=multi-user.target
 ### macOS (bare metal)
 
 Verified on an Apple-silicon Mac (M1 Pro): adopted by a Protect console, 3 cameras
-paired and streamed, person/vehicle detections with thumbnails. Run it on the host —
+paired and streamed, person/vehicle detections with thumbnails. Run it on the host -
 Docker Desktop's Linux VM can't put a container on the LAN as its own L2 device, so
 discovery and adoption fail there. With no `/sys`, `/proc` or `ip`, `config.py` finds
 the interface, MAC and IP through `route`, `networksetup` and `ifconfig` (`--iface en0`
@@ -306,15 +336,21 @@ it (and warns, then uses CPU, if onnxruntime has no Core ML provider).
 ```bash
 brew install ffmpeg
 python3 -m venv venv
-venv/bin/pip install -r piport/requirements.txt onnxruntime
-venv/bin/pip install fast-alpr opencv-python-headless      # optional: plates + faces (enrich.py)
+venv/bin/pip install -r diyport/requirements.txt onnxruntime
+venv/bin/pip install "fast-alpr[onnx]" opencv-python-headless   # optional: plates + faces
 venv/bin/python scripts/fetch_models.py --backend cpu      # downloads yolov5n.onnx
 venv/bin/python scripts/fetch_models.py --face-models-only # optional: YuNet/SFace face models
-$EDITOR piport/aiport.cfg                                   # set [console] host + device_id
-sudo caffeinate -is venv/bin/python piport/run_all.py --iface en0 --state-dir ~/.piport-state
+$EDITOR diyport/aiport.cfg                                   # set [console] host + device_id
+caffeinate -is venv/bin/python diyport/run_all.py --iface en0 --state-dir ~/.diyport-state
 ```
 
-`sudo` is needed for UDP/10001 and TCP/443.
+No sudo is needed on macOS: since 10.14 a normal user can bind ports below 1024. Running it
+with sudo leaves the state dir and log root-owned, and the launchd agent then refuses to start.
+
+To run it as a service instead, install the launchd agent (no sudo):
+`scripts/macos_launchd.sh install` starts it at login, restarts it on exit, and re-reads
+`~/.diyport.env` on `touch ~/.diyport-restart`; logs rotate in `~/diyport.log`.
+`scripts/diyport_service.sh` does the work and can also run in a terminal. See `diyport/README.md`.
 
 - `caffeinate -is` stops the Mac sleeping while it runs (a sleeping Mac drops off the console).
 - `--iface` is the default-route interface (`route -n get default`); the MAC is derived from it,
@@ -352,20 +388,20 @@ or `none` to build a CPU image instead. Device identity and state persist in the
 
 ```bash
 python3 scripts/fetch_models.py --backend cpu    # or --backend edgetpu / rknn assets
-pip install -r piport/requirements.txt           # + rknn-toolkit-lite2 / ai-edge-litert / onnxruntime
-$EDITOR piport/aiport.cfg                        # identity, console IP, [hardware] detector
-sudo python3 piport/run_all.py --iface <iface>
+pip install -r diyport/requirements.txt           # + rknn-toolkit-lite2 / ai-edge-litert / onnxruntime
+$EDITOR diyport/aiport.cfg                        # identity, console IP, [hardware] detector
+sudo python3 diyport/run_all.py --iface <iface>
 ```
 
 ### Multiple instances (board)
 
 `instance_manager.py` creates one systemd unit per instance, each with its own
-macvlan sub-interface, MAC, and DHCP lease — a distinct L2 device:
+macvlan sub-interface, MAC, and DHCP lease - a distinct L2 device:
 
 ```bash
-sudo python3 piport/instance_manager.py create lab2 --parent-iface <iface>
-python3 piport/instance_manager.py list
-sudo python3 piport/instance_manager.py destroy lab2
+sudo python3 diyport/instance_manager.py create lab2 --parent-iface <iface>
+python3 diyport/instance_manager.py list
+sudo python3 diyport/instance_manager.py destroy lab2
 ```
 
 ### ONVIF cameras
@@ -373,13 +409,72 @@ sudo python3 piport/instance_manager.py destroy lab2
 Assigning a third-party (ONVIF) camera to the AI Port hands that camera's video
 ingest to the AI Port: Protect sends the camera's RTSP URL (`OnvifStreamControl`)
 and asks for each channel to be pushed to `tcp://<console>:7550` in Ubiquiti's
-`extendedFlv` format (`ChangeVideoSettings`). `piport/onvif_push.py` does that
-with one `ffmpeg -c:v copy` per channel (no re-encode), and the AI Port runs
-detection on the camera's stream like on a UniFi camera's.
+`extendedFlv` format (`ChangeVideoSettings`). `diyport/onvif_push.py` does that,
+and the AI Port runs detection on the camera's stream like on a UniFi camera's.
+
+There are three ways to run this video, set by `AIPORT_ONVIF_MODE`: a default, then any
+per-camera exceptions by device ID (MAC), such as `isolated,AABBCCDDEEFF=copy`.
+
+| Mode | What it does | Pushes run in | Camera sessions | Sizes sent to Protect |
+|---|---|---|---|---|
+| `copy` (default) | `ffmpeg` copies the camera's main stream and substream | `avclient.py` | 3, with detection | The camera's own |
+| `transcode` | One `gst-launch` decodes the main stream once and encodes each channel with VideoToolbox, as the real AI Port does | `avclient.py` | 2, with detection | `video1` main size at 4000 kbps, `video2` substream size at 2000 kbps, `video3` 360 lines at 500 kbps |
+| `isolated` | As `transcode` | A process per camera | 2, with detection | As `transcode` |
+
+`transcode` and `isolated` need macOS and `brew install gstreamer`. On an M1 Pro a transcoded
+camera used about 11% of one core and up to about 290 MB, against about 1% and 11 MB for
+`copy`. On a machine without them, the camera logs an error and uses `copy`.
+
+In `isolated`, a crash in the push costs that camera's video for a few seconds and leaves
+detection running, and the process is replaced. It doesn't help the other way round: if
+detection's process dies, the push stops with it.
+
+Protect doesn't always tell diy-port it was removed: it just closes each connection without
+a message. An adopted instance logs `was this AI Port removed in Protect?` once this has
+gone on for `AIPORT_REFUSED_WARN_S` seconds (default 180, `0` turns this off). It doesn't
+clear the adoption itself, since a console problem could look the same.
+
+The video and detection restart separately: each has its own camera pull, so losing
+one leaves the other running. A transcoded camera's pipeline is replaced when a channel
+has produced no video for `AIPORT_ONVIF_STALL_S` seconds (default 30, `0` turns this
+off). A settings re-send from Protect reconnects only that channel's push, unless a
+channel has been silent for 5 s. In every mode, the log warns
+`restream: no video to Protect` when a channel has delivered nothing for
+`AIPORT_STREAM_STALL_S` seconds.
+
+`AIPORT_ONVIF_AUDIO_OFF` (empty or `0` for none, `1` for all, or a list of device IDs) is an experiment: the listed cameras' replies tell
+Protect audio is off, while their pushes keep the audio track.
+
+If the camera's ONVIF profiles can't be read, diy-port tries again: twice within a few
+seconds, then every 30 s, 2 minutes and 10 minutes. Until it succeeds, `video2` and
+`video3` use the main stream.
 
 Verified on a Raspberry Pi 5 (Docker, Coral) with a Hikvision 4K camera and
 Protect 7.2: live view in the app and browser, recording, and smart-detect
 events.
+
+Tested with audio (2026-10-30), on a MacBook Pro (M1 Pro, macOS 27.0.1, native,
+ffmpeg 8.0.1) as an AI Port X, Protect 7.3.70 on a UCG-Max: browser live view
+plays video and audio smoothly on High and Low. The test camera, a Hikvision
+ECI-T24F2, was set up as follows:
+
+| Setting | Main stream (`video1`) | Sub-stream (`video2`/`video3`) |
+|---|---|---|
+| Video Type | Video and Audio Stream | Video and Audio Stream |
+| Resolution | 2560×1440 | 1280×720 |
+| Bit Rate Type | Variable | Variable |
+| Picture Quality | Medium | Medium |
+| Frame Rate | 20 fps | 20 fps |
+| Max. Bit Rate | 3072 kbps | 2048 kbps |
+| Video Encoding | H.264 | H.264 |
+| H.264+ | Off | – |
+| Profile | Medium | Medium |
+| I-Frame Interval | 20 (1 s) | 20 (1 s) |
+| Smoothing | 50 | 25 |
+| Audio Encoding | AAC, 16 kHz (shared by both streams) | |
+
+The camera's audio should be AAC or G.711: ffmpeg can't copy G.722.1, G.726, PCM
+or MP2 into FLV, and the pull then fails.
 
 Limits:
 
@@ -391,12 +486,23 @@ Limits:
   retried every second. Set the camera's stream to H.264. UniFi's own HEVC
   framing (FLV codec id 8 with a `0x68 0x01` VPS/SPS/PPS tag) is not
   implemented; such a stream is now refused with one clear error.
-- Every channel carries the camera's main stream (no lower-resolution
-  channels); the resolution reported to Protect is probed from the stream.
-- Audio is AAC 32 kHz mono (silent if the camera has none). Protect asks for
-  Opus, which plain FLV cannot carry.
-- Each channel and the detector open their own RTSP session to the camera; some
-  cameras limit concurrent logins (Hikvision answers `401` past its limit).
+- `video1` carries the camera's main stream; `video2` and `video3` (UniFi's
+  medium and low channels) carry its substream when the camera's ONVIF Media
+  service lists a smaller H.264 profile (looked up with the RTSP URL's login;
+  otherwise the main stream). The resolution
+  reported to Protect is probed from the main stream, and the substream's is its
+  ONVIF profile's.
+- The camera's audio is copied as it is (G.711, AAC or MP3), like unifi-cam-proxy
+  with `-c:a copy`: re-encoding G.711 to AAC made live view stop and start every
+  second. Other audio (e.g. Opus) is re-encoded to AAC 32 kHz mono, and a camera
+  without audio gets a silent AAC track. Protect asks for Opus, which plain FLV
+  cannot carry. **Audio does not play in Protect yet:** G.711 is accepted but
+  Protect's browser player has no audio, and the camera's AAC plays in stutters.
+- Channels carrying the same stream share one RTSP session (one ffmpeg, fanned
+  out); the detector opens its own. With a substream that is three sessions:
+  main (`video1`), sub (`video2`/`video3`) and detection. Cameras limit
+  concurrent sessions: a Hikvision answers `500` to RTSP SETUP past three, or
+  `401` past its login limit.
 - On a Pi 5 the camera's H.264 is decoded in software for detection (~half a
   core for 4K at 12 fps).
 
@@ -419,11 +525,11 @@ Frigate's `yolov9-s-320.onnx` (all three layouts are auto-detected; the input si
 from the model). The
 Dockerfile downloads and sha256-verifies the CPU model at build time.
 The `edgetpu` backend also takes an Ultralytics YOLOv5 Edge TPU export via `[hardware]
-detector_model` / `AIPORT_MODEL_PATH`. `piport/models/coco_90_labels.txt` (the MobileDet
+detector_model` / `AIPORT_MODEL_PATH`. `diyport/models/coco_90_labels.txt` (the MobileDet
 class ids) is Google's `coco_labels.txt`, Apache-2.0.
 
 `yolov5s_relu.rknn` is produced on an x86_64 machine with `rknn-toolkit2`
-(see `rknn_convert/convert.py` and `piport/README.md`):
+(see `rknn_convert/convert.py` and `diyport/README.md`):
 
 ```bash
 python3 scripts/fetch_models.py --convert
@@ -432,7 +538,7 @@ python3 scripts/fetch_models.py --convert
 `scripts/install.sh` resolves the prebuilt `.rknn` in order: `--rknn <path>`, a
 local `models-rknn/` copy (e.g. a checkout of `hutchx86/pi-port-models`) or
 `rknn_convert/` copy, then a download from
-`--rknn-url` / `PIPORT_RKNN_URL` / `DEFAULT_RKNN_URL`. The digest is verified
+`--rknn-url` / `DIYPORT_RKNN_URL` / `DEFAULT_RKNN_URL`. The digest is verified
 when you pass `--rknn-sha256`, or always for the default URL; a custom URL or
 local copy without the flag is installed unverified and logged as such.
 The default source is the separate AGPL-3.0 model repo
@@ -449,7 +555,7 @@ text and attribution if you redistribute them; the corresponding source for the
 ## Configuration
 
 Device identity, network mode, the console address and the detector live in
-`piport/aiport.cfg`; CLI flags on each script override it, and a small set of
+`diyport/aiport.cfg`; CLI flags on each script override it, and a small set of
 `AIPORT_*` environment variables override it too (container-friendly).
 
 | Key | Default | Meaning |
@@ -461,14 +567,14 @@ Device identity, network mode, the console address and the detector live in
 | `[identity] sysid` | `0xa5f1` | Hardware/model id |
 | `[identity] guid` | fixed catalog GUID | AI Port SKU GUID; must not be random |
 | `[identity] device_id` | UUID in `aiport.cfg` | Persistent device UUID; `instance_manager.py`/the container entrypoint generate a unique one per instance |
-| `[network] iface` / `mode` / `ip` | auto / `dhcp` / — | Interface to bind, and `dhcp` or `static` addressing |
-| `[console] host` / `port` | — / `7442` | The Protect console to dial when not yet adopted |
+| `[network] iface` / `mode` / `ip` | auto / `dhcp` / - | Interface to bind, and `dhcp` or `static` addressing |
+| `[console] host` / `port` | - / `7442` | The Protect console to dial when not yet adopted |
 | `[hardware] detector` | `auto` | `auto`, `rknn`, `edgetpu`, `cpu` or `none` (env `AIPORT_DETECTOR`) |
-| `[hardware] detector_model` | — | Model file for that backend; blank = its default in `models/` (env `AIPORT_MODEL_PATH`) |
+| `[hardware] detector_model` | - | Model file for that backend; blank = its default in `models/` (env `AIPORT_MODEL_PATH`) |
 
 Detector/runtime environment overrides: `AIPORT_DETECTOR`, `AIPORT_MODEL_PATH`,
-`AIPORT_OBJ_THRESH`, `AIPORT_HWDEC`, `AIPORT_HW_SCALE`, `AIPORT_FRAME_JPEG_FPS`, `AIPORT_ORT_INTRA_THREADS`, `AIPORT_ORT_PROVIDER`, `AIPORT_TICK_S`, `AIPORT_DETECT_FPS`, `AIPORT_CONFIRM_MS`, `AIPORT_MISS_S`, `AIPORT_TRUE_THRESH`, `AIPORT_RESUME_S`, `AIPORT_BOX_DELAY_MS`, `AIPORT_LPR`, `AIPORT_FACE`,
-`AIPORT_MOTION_GATE` / `AIPORT_MOTION_THRESHOLD` / `AIPORT_MOTION_CONTOUR_AREA`, `AIPORT_REGIONS` / `AIPORT_DETECT_SIZE`, `AIPORT_TRACKER`, `AIPORT_LENS_FILTER` / `AIPORT_LENS_MIN_HEIGHT` (see `piport/README.md`).
+`AIPORT_OBJ_THRESH`, `AIPORT_HWDEC`, `AIPORT_HW_SCALE`, `AIPORT_FRAME_JPEG_FPS`, `AIPORT_ORT_INTRA_THREADS`, `AIPORT_ORT_PROVIDER`, `AIPORT_TICK_S`, `AIPORT_DETECT_FPS`, `AIPORT_CONFIRM_MS`, `AIPORT_MISS_S`, `AIPORT_TRUE_THRESH`, `AIPORT_CROSS_TYPE_IOU`, `AIPORT_RESUME_S`, `AIPORT_BOX_DELAY_MS`, `AIPORT_LPR`, `AIPORT_FACE`,
+`AIPORT_MOTION_GATE` / `AIPORT_MOTION_THRESHOLD` / `AIPORT_MOTION_CONTOUR_AREA`, `AIPORT_REGIONS` / `AIPORT_DETECT_SIZE`, `AIPORT_TRACKER`, `AIPORT_LENS_FILTER` / `AIPORT_LENS_MIN_HEIGHT` (see `diyport/README.md`), `AIPORT_MIN_INITIALIZED`, `AIPORT_MOTION_GATE_THRESH`, `AIPORT_VEHICLE_ATTRS`, `AIPORT_VEHICLE_FM`, `AIPORT_LPR_MIN_PX`, `AIPORT_LPR_THRESH`, `AIPORT_FACE_THRESH`, `AIPORT_FACE_DB_THRESH`, `AIPORT_FACES_DIR`, `AIPORT_FACES_SEEN_DIR`, `AIPORT_HOST_STATS`, `AIPORT_POINTS_SCALE`, `AIPORT_STREAM_STALL_S`, `AIPORT_RTSP_TIMEOUT_S`, `AIPORT_ADVERTISE_IP`, `AIPORT_CAMERA_CLOCK`, `AIPORT_CLOCK_WALL_SKEW_MS`.
 The old `AIPORT_BACKEND=auto|rknn|onnx` name is still accepted (`onnx` = `cpu`).
 `AIPORT_ORT_PROVIDER` is `auto` by default (Core ML when onnxruntime offers it, else
 CPU); `cpu` forces CPU and `coreml` requests Core ML (CPU with a warning if absent).
@@ -478,7 +584,7 @@ CPU); `cpu` forces CPU and `coreml` requests Core ML (CPU with a warning if abse
 - Unit suite (no hardware required):
 
   ```bash
-  cd piport && python3 -m unittest discover -s tests
+  cd diyport && python3 -m unittest discover -s tests
   ```
 
   Tests needing OpenCV, ffmpeg, Norfair or macOS skip without them. The enrichment check
@@ -491,24 +597,29 @@ CPU); `cpu` forces CPU and `coreml` requests Core ML (CPU with a warning if abse
   ./docker/run-smoke-test.sh
   ```
 
+- Replay harness (tracking, faces, regions): record a clip with
+  `scripts/record_clip.py`, then run `python3 diyport/replay.py <clip> --check <dir>`.
+  This is the pre-change check for detection/tracking work; see `diyport/README.md`.
+
 - On-device: run the stack and watch it discover, adopt and pair (see
-  `piport/README.md` and `scripts/live_watch.py`).
+  `diyport/README.md` and `scripts/live_watch.py`).
 
 ## Roadmap / known limitations
 
 - **Known:** detection is a stock COCO model (person/vehicle/animal), not Ubiquiti's
-  classifier. Vehicle type/colour, license plates and faces (`enrich.py`, optional) use
-  open models and a **best-guess wire format** not yet confirmed against Protect; faces
-  match a local gallery, not Protect's own face enrolment.
+  classifier. Optional enrichment (`enrich.py`) adds vehicle type/colour, plates and
+  faces; faces are matched against Protect's known-faces DB (`UpdateFaceDBRequest`), but
+  the attribute and plate field mapping is a **best-guess wire format** not confirmed
+  against a real AI Port capture.
 - **Gap: no motion events for paired cameras.** While a camera is paired, Protect
   ignores the camera's own motion events (`EventSmartMotion`/`EventAnalytics`) and
-  takes them from the AI Port, but pi-port doesn't send any yet. Paired cameras show
+  takes them from the AI Port, but diy-port doesn't send any yet. Paired cameras show
   no motion-only events, motion-triggered recording only follows smart detections,
-  and motion alerts don't fire. pi-port already runs a motion detector on every
+  and motion alerts don't fire. diy-port already runs a motion detector on every
   frame; the missing piece is the exact `EventSmartMotion` start/pulse/stop payload
   Protect expects. See `docs/protect-aiport-controller.md`.
 - **Gap: no audio detection for paired cameras.** Protect also drops a paired camera's
-  own `EventSmartAudio` (smoke/CO alarm, glass break, etc.), and pi-port's feature
+  own `EventSmartAudio` (smoke/CO alarm, glass break, etc.), and diy-port's feature
   flags list no audio types, so those detections are turned off while the camera is
   paired.
 - **Known:** an assigned ONVIF camera depends on the AI Port for its video (no
@@ -518,7 +629,7 @@ CPU); `cpu` forces CPU and `coreml` requests Core ML (CPU with a warning if abse
   its own host, so it only suits a console running on that host.
 - **Known:** on the Raspberry Pi 4 the H.264 hardware decoder is instance-limited
   and known-flaky; the Pi 5 has no H.264 hardware decoder at all. See
-  `docker/README.md` and `piport/README.md`.
+  `docker/README.md` and `diyport/README.md`.
 - **Known:** the Pi 5 `install.sh` path is untested against a console (the Docker
   path is verified); the CPU container has been verified live on a Pi 4 and the
   smoke test covers x86_64 (macOS bare metal is verified live).
@@ -528,7 +639,17 @@ CPU); `cpu` forces CPU and `coreml` requests Core ML (CPU with a warning if abse
 
 ## Changelog
 
-- **Unreleased** — pluggable detector backends (`piport/detectors/`): RK3588
+<details>
+<summary><b>Changelog</b></summary>
+
+- **2026-10-29** - PR #4 (NorthernMan54): Frigate-style detection (motion gate,
+  region crops, true-positive gating, parked objects, optional Norfair), optional
+  enrichment (plates, faces against Protect's face DB, vehicle attributes incl.
+  Apple's model on macOS), one event per camera with batched leaves and real zone
+  ids, per-camera box timing, stream recovery/backoff, replay harness, per-camera
+  frames and host load lines, macOS launchd service. Fixes: track timers follow
+  the analysed-frame rate, and the auto-hwdec tests pass on an RK3588 host.
+- **Unreleased** - pluggable detector backends (`diyport/detectors/`): RK3588
   NPU, Coral Edge TPU (Raspberry Pi 5) and CPU/Core ML, chosen by `[hardware]
   detector` / `install.sh --accel`; ONVIF cameras (video push to Protect plus
   detection); a Docker bridge setup for a console on the same host; credentials
@@ -537,13 +658,15 @@ CPU); `cpu` forces CPU and `coreml` requests Core ML (CPU with a warning if abse
   tuning; hardened HTTPS API (per-connection TLS, request limits), supervised
   `run_all.py`, drained ffmpeg stderr, real per-zone IDs, localhost-only web
   instance management, and persistent `/data` state in the LAN Compose stacks.
-- **2026-10** — firmware-update faking; optional sysinfo web UI; Pi 4 hardware
+- **2026-10** - firmware-update faking; optional sysinfo web UI; Pi 4 hardware
   decode and detector tuning; Docker CPU image/Komodo stack.
-- **2026-09** — Line Crossing; paired-camera snapshot retrieval over UCP4; the
+- **2026-09** - Line Crossing; paired-camera snapshot retrieval over UCP4; the
   `connectionHost` upload fix; event/feature-flag dedupe; multi-instance systemd
   units; one-shot `install.sh`.
-- **2026-08** — initial protocol stack: discovery, adoption, both WebSocket
+- **2026-08** - initial protocol stack: discovery, adoption, both WebSocket
   connections, NPU detection and `EventSmartDetect` with thumbnails.
+
+</details>
 
 ## Troubleshooting
 
@@ -581,8 +704,8 @@ driver install fixes it.
 ## Credits
 
 Special thanks to
-[dciancu/unifi-protect-unvr-docker-arm64](https://github.com/dciancu/unifi-protect-unvr-docker-arm64)
-— the inspiration for getting into UniFi tinkering, and whose methods helped in
+[dciancu/unifi-protect-unvr-docker-arm64](https://github.com/dciancu/unifi-protect-unvr-docker-arm64),
+the inspiration for getting into UniFi tinkering, and whose methods helped in
 learning how parts of it work. Modular detector backends, Coral Edge TPU support
 and the ONVIF video push were contributed by [@issue](https://github.com/issue);
 macOS support (interface/MAC/IP detection and the Core ML detector) by
@@ -611,7 +734,7 @@ Third-party components and licenses are listed in [CREDITS.md](CREDITS.md).
 
 **This is a proof-of-concept project, not a production-ready system.** Large
 parts were produced with LLMs under human supervision, review, and real-hardware
-testing — review and verify everything yourself. **This software is provided "as
+testing - review and verify everything yourself. **This software is provided "as
 is", without warranty of any kind.** It binds privileged ports, manipulates
 network interfaces (macvlan/DHCP), and runs detection hardware; misconfiguration
 can disrupt your network or device. By using it you accept full responsibility for
@@ -622,8 +745,8 @@ not responsible or liable for any loss or damage arising from its use.**
 
 ## Security
 
-Report vulnerabilities privately via GitHub Security Advisories. Runtime state —
-the adoption token and the mTLS client certificate/key — is written to the
+Report vulnerabilities privately via GitHub Security Advisories. Runtime state -
+the adoption token and the mTLS client certificate/key - is written to the
 instance state directory (`--state-dir`) and excluded by `.gitignore`; never
 commit it. No secrets are stored in this repository. Logged payloads are passed
 through a redaction filter for camera RTSP credentials, the console's login

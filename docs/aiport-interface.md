@@ -1,8 +1,8 @@
 # How an AI Port talks to UniFi Protect
 
-This explains the interface between an AI Port (real or emulated by pi-port) and a
+This explains the interface between an AI Port (real or emulated by diy-port) and a
 UniFi Protect console: what goes over the wire, in what order, and where each piece
-lives in `piport/`. It is written from the code; where the code marks a field as
+lives in `diyport/`. It is written from the code; where the code marks a field as
 unconfirmed against a real AI Port, this doc says so. For what the controller does
 with each message, see [protect-aiport-controller.md](protect-aiport-controller.md).
 
@@ -15,10 +15,10 @@ hands it an RTSP stream, and it pushes smart-detect events back.
 
 | # | Interface | Direction | Transport | Code |
 |---|-----------|-----------|-----------|------|
-| 1 | UBNT discovery | console → device, reply back | UDP/10001 (multicast `233.89.188.1`) | [discovery.py](../piport/discovery.py) |
-| 2 | Device control API | console → device | HTTPS :443 (self-signed) | [http_api.py](../piport/http_api.py) |
-| 3 | `ucp4` management channel | device → console | mTLS WebSocket `wss://<console>:7442/`, subprotocol `ucp4` | [ucp4_client.py](../piport/ucp4_client.py) |
-| 4 | Classic avclient channel | device → console | mTLS WebSocket `wss://<console>:7442/camera/1.0/ws`, subprotocol `secure_transfer` | [avclient.py](../piport/avclient.py) |
+| 1 | UBNT discovery | console → device, reply back | UDP/10001 (multicast `233.89.188.1`) | [discovery.py](../diyport/discovery.py) |
+| 2 | Device control API | console → device | HTTPS :443 (self-signed) | [http_api.py](../diyport/http_api.py) |
+| 3 | `ucp4` management channel | device → console | mTLS WebSocket `wss://<console>:7442/`, subprotocol `ucp4` | [ucp4_client.py](../diyport/ucp4_client.py) |
+| 4 | Classic avclient channel | device → console | mTLS WebSocket `wss://<console>:7442/camera/1.0/ws`, subprotocol `secure_transfer` | [avclient.py](../diyport/avclient.py) |
 | 5 | Video in | device → console | RTSP `rtsp://<console>:7447/<uri>` (TCP) | `avclient._start_stream` |
 | 6 | Snapshot upload / face DB | device → console | HTTPS POST/GET to a URL the console supplies, mTLS | `avclient._upload_snapshot`, `_download_face_db` |
 
@@ -29,7 +29,7 @@ only routes camera commands (pairing, streaming, detection) to connections that 
 ```mermaid
 sequenceDiagram
     participant C as Protect console
-    participant D as AI Port (pi-port)
+    participant D as AI Port (diy-port)
     C->>D: UDP 10001 discovery probe (multicast)
     D-->>C: TLV reply: platform, sysid 0xa5f1, MAC, IP, isManaged...
     D->>C: avclient WSS (pre-adopt, no token) + ubnt_avclient_hello
@@ -82,7 +82,7 @@ also needs the unsolicited pre-adopt avclient connection (section 4).
 ## 2. Device control API (HTTPS :443)
 
 The device's local `ubnt_ctlserver`. The console doesn't validate the certificate;
-pi-port generates a self-signed EC P-256 cert on first run (`server.crt`/`server.key`
+diy-port generates a self-signed EC P-256 cert on first run (`server.crt`/`server.key`
 in the state dir). The **same cert/key is reused as the client cert** for both
 outbound WebSockets, and the console pins its fingerprint at adoption.
 
@@ -118,7 +118,7 @@ cert, server cert not verified. Headers:
 | `X-Mode` | `0` |
 | `X-Adopted` | `true` / `false` |
 | `X-Ip`, `X-Device-Id`, `X-Version`, `X-Guid` | identity |
-| `X-Token` | adoption token — **sent only the first time a token is seen** (tokens are single-use; later reconnects rely on the pinned cert) |
+| `X-Token` | adoption token - **sent only the first time a token is seen** (tokens are single-use; later reconnects rely on the pinned cert) |
 
 **Framing:** binary frames only. Each message is two records, head then body:
 
@@ -218,7 +218,7 @@ URLs from it, and the device's own IP left paired cameras without thumbnails.
 | `GetStreamList` | Asked on every connect. A non-empty list makes the console send `ResetAIPortStreams` before re-issuing `UiStreamControl`. | `{"list": [{"deviceID", "points"}]}` for each active stream |
 | `GetUiStreamPoints` | Cost of proposed streams: `list` of `{deviceID, width, height, fps}`. | `{"list": [{"deviceID", "points"}]}`; invalid entries skipped |
 | `ResetAIPortStreams` | Stop every stream (console, firmware ≥ 4.75.6). | Stops all pulls and detectors but keeps track state, since `UiStreamControl` follows straight away; reply `{}` |
-| `ChangeVideoSettings` | A query, not a push. | `{video:{video1:{enabled,width,height,fps,bitrate},video2,video3}, audio:{...}}` — `{}` blocks provisioning. |
+| `ChangeVideoSettings` | A query, not a push. | `{video:{video1:{enabled,width,height,fps,bitrate},video2,video3}, audio:{...}}` - `{}` blocks provisioning. |
 | `ChangeIspSettings` | Query. | `{irLedMode:"auto", wdr:1}` |
 | `ChangeSmartDetectSettings` | Zones for a paired camera: `zones`, `excludeZones`, `lines` (vertices 0–1000), and `eventStartMSec`. | Stored per `deviceID`; detections outside detect zones / inside exclude zones are dropped; lines drive Line Crossing; `eventStartMSec` is how long a new track must be seen before it joins the event (section 5). Per-zone sensitivity isn't applied. |
 | `ChangeSmartMotionSettings` | Includes `eventMaxDurationMSec` (default 5 min). | Stored; the device ends long events itself. |
@@ -233,22 +233,22 @@ URLs from it, and the device's own IP left paired cameras without thumbnails.
 
 ### 4.3 Device → console events
 
-**`EventAIPortStatus`** — per paired camera, deduplicated:
+**`EventAIPortStatus`** - per paired camera, deduplicated:
 `{deviceID, isPlug, isStreaming, isSmartDetectReady, isAudioEventReady}`.
-`isSmartDetectReady` appears to gate the console dispatching AI work. pi-port sends it when a stream starts,
+`isSmartDetectReady` appears to gate the console dispatching AI work. diy-port sends it when a stream starts,
 then again whenever a camera's health changes: `isStreaming` goes false after 30 s with no frame
 from its stream, `isSmartDetectReady` after 30 s with no detection pass (its loop crashed or
 hung), and both return to true when it recovers (checked every 5 s, with 30 s of grace after the
 stream starts). What Protect's UI does with a false value hasn't been seen yet.
 
-**`EventFeatureFlagsUpdated`** — the real capability mechanism (not `/api/1.2/status`).
+**`EventFeatureFlagsUpdated`** - the real capability mechanism (not `/api/1.2/status`).
 The console **replaces** the paired camera's feature flags wholesale with this, so
 every key must be present:
 `{deviceID, smartDetect:[...], motionDetect:["enhanced"], privacyMask, privacyMasks, squareEventThumbnail, mic, speaker, ledStatus}`.
 `smartDetect` gains `licensePlate`, `lprEnhancedByAiKey`, `face`, `faceEnhancedByAiKey`
 only when `enrich.py` can produce them. Sent once per camera per connection.
 
-**`EventSmartDetect`** — the detection stream. Shape (zone event):
+**`EventSmartDetect`** - the detection stream. Shape (zone event):
 
 ```json
 {
@@ -321,7 +321,7 @@ within 4 s, the device resends a proven single-tracker leave (priority face > pe
 its leave's `trackerIDAttrMap` names `line` instead of `zone`. Line events stay per
 track. Implemented but not yet verified against a live console.
 
-**`EventUpdateFirmwareStatus`** — `{status: "FW_DOWNLOADING" | "FW_UPDATING"}` during
+**`EventUpdateFirmwareStatus`** - `{status: "FW_DOWNLOADING" | "FW_UPDATING"}` during
 the faked update.
 
 ## 5. Video in (RTSP :7447)
@@ -331,7 +331,7 @@ console's own relay (it never talks to the camera directly). One ffmpeg process 
 camera decodes once and splits:
 
 - a full-resolution JPEG written in place to `<stream dir>/<deviceID>.jpg` (every 2 s,
-  or every 1 s when plate/face enrichment is on) — the snapshot source;
+  or every 1 s when plate/face enrichment is on) - the snapshot source;
 - 640×640 RGB raw frames to stdout for the detector, at the detection rate.
 
 The stream dir is RAM-backed (`config.stream_dir`) and shared with `http_api.py` and
@@ -376,7 +376,7 @@ best-scoring frame; `..._fullfov.jpg` names get the whole frame.
    `UiStreamControl`, and detection events start flowing.
 5. **Un-adopt.** `ResetToDefaults` clears `adopt_state.json`; everything drops back to 1.
 
-All four processes are started together by [run_all.py](../piport/run_all.py) and
+All four processes are started together by [run_all.py](../diyport/run_all.py) and
 share the state dir (`--state-dir`):
 
 | File | Written by | Read by |

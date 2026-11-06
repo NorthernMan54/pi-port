@@ -2,15 +2,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 hutchx86
 #
-# Build the CPU image, run a no-hardware smoke test on host networking, and check
-# all four components are up (binds :443/:10001, broadcasts discovery -- lab LAN only).
+# Build the CPU image and run the no-hardware smoke test on host networking.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$HERE")"
 cd "$ROOT"
 
-IMAGE="${IMAGE:-piport-cpu}"
-NAME="${NAME:-piport-cpu-smoke}"
+IMAGE="${IMAGE:-diyport-cpu}"
+NAME="${NAME:-diyport-cpu-smoke}"
 WAIT="${WAIT:-12}"
 LOG="$(mktemp)"
 BUILD_ARGS=()
@@ -26,7 +25,7 @@ trap cleanup EXIT
 command -v docker >/dev/null 2>&1 || { echo "ERROR: docker not found" >&2; exit 1; }
 
 echo "== docker build -t $IMAGE . (context $ROOT) =="
-docker build "${BUILD_ARGS[@]}" --build-arg ACCEL=cpu -f docker/Dockerfile -t "$IMAGE" .
+docker build ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} --build-arg ACCEL=cpu -f docker/Dockerfile -t "$IMAGE" .
 
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 echo "== starting $NAME (host networking) =="

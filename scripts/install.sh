@@ -2,62 +2,16 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Copyright (C) 2026 hutchx86
 #
-# One-shot installer for the Pi Port AI-Port emulator. Targets an Orange Pi 5
-# Plus (RK3588 NPU) or a Raspberry Pi 5 with a Coral Edge TPU; any other Linux
-# box can run the CPU backend. Does, in order:
-#
-#   1. apt prerequisites (python3-venv/pip, ffmpeg, iproute2, isc-dhcp-client,
-#      curl, ca-certificates, diffutils, git)
-#   2. a venv at piport/.venv + piport/requirements.txt + the detector
-#      backend's runtime (rknn-toolkit-lite2 / ai-edge-litert / onnxruntime)
-#   3. that backend's model (scripts/fetch_models.py; the .rknn as below)
-#   4. its system library: the librknnrt.so upgrade (rknn) or libedgetpu
-#      (edgetpu); backed up / idempotent
-#   5. a macvlan systemd instance via instance_manager.py (survives reboot)
-#   6. a systemd unit for the web UI (sysinfo_server.py) and starts it
-#
-# Run as root (it installs packages, writes /etc/systemd/system and creates a
-# network interface):
-#
-#   sudo scripts/install.sh --console <UNVR-IP> [--parent-iface <iface>]
-#
-# Options:
-#   --name NAME            instance name (default: main)
-#   --parent-iface IFACE   physical NIC the macvlan instance is built on
-#                          (alias: --iface; default: auto-detected)
-#   --console HOST[:PORT]  UniFi Protect console address; written to aiport.cfg
-#   --accel BACKEND        detector backend: auto (default) | rknn | edgetpu |
-#                          cpu | none. auto picks rknn on an RK3588, edgetpu
-#                          when a Coral is plugged in, else cpu. Written to
-#                          aiport.cfg [hardware] detector.
-#   --rknn PATH            prebuilt yolov5s_relu.rknn to install (see below)
-#   --rknn-url URL         download the .rknn from URL (overrides PIPORT_RKNN_URL)
-#   --rknn-sha256 HEX      verify a downloaded/supplied .rknn against this sha256
-#   --webui-port N         web UI listen port (default: 8090)
-#   --no-npu               same as --accel none: no detector runtime or model
-#                          (protocol stack still installs)
-#   -h, --help
-#
-# Edge TPU: installs feranick's libedgetpu1-std build (Google's apt repo is
-# unmaintained) for this distro, plus Google's SSDLite MobileDet model. Only
-# the USB Coral is handled; a PCIe/M.2 Coral additionally needs the gasket
-# kernel driver, which this script does not install.
-#
-# The NPU model is deliberately not shipped in the repo (binary). It can come
-# from, in order: --rknn PATH, a local copy (models-rknn/ or
-# rknn_convert/), --rknn-url URL, PIPORT_RKNN_URL, or the DEFAULT_RKNN_URL set
-# below (published as a separate AGPL-3.0 model repo/release -- see README.md).
-# rknn-toolkit2 can only convert ONNX -> RKNN on an x86_64 host, so a copy built
-# elsewhere (fetch_models.py --convert) is the alternative.
-#
+# One-shot installer: apt deps, venv + backend, model assets, librknnrt, systemd
+# instance and web UI. Run with --help; see README.md.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PIPORT_DIR="$REPO_ROOT/piport"
-VENV="$PIPORT_DIR/.venv"
+DIYPORT_DIR="$REPO_ROOT/diyport"
+VENV="$DIYPORT_DIR/.venv"
 PY="$VENV/bin/python"
-CFG="$PIPORT_DIR/aiport.cfg"
-RKNN_DEST="$PIPORT_DIR/models/yolov5s_relu.rknn"
+CFG="$DIYPORT_DIR/aiport.cfg"
+RKNN_DEST="$DIYPORT_DIR/models/yolov5s_relu.rknn"
 SYSTEMD_DIR="/etc/systemd/system"
 RKNNRT_URL="https://raw.githubusercontent.com/airockchip/rknn-toolkit2/v2.3.2/rknpu2/runtime/Linux/librknn_api/aarch64/librknnrt.so"
 # Pin the runtime blob too; the URL is a mutable tag on a third-party repo.
@@ -68,9 +22,8 @@ RKNNRT_SHA256="d31fc19c85b85f6091b2bd0f6af9d962d5264a4e410bfb536402ec92bac738e8"
 DEFAULT_RKNN_URL="https://raw.githubusercontent.com/hutchx86/pi-port-models/v1/yolov5s_relu.rknn"
 DEFAULT_RKNN_SHA256="f4fd0122ecca3117323b8268d270e6cc293e364d6a9dda8e83293d64c8377a3c"
 
-# libedgetpu1-std from feranick/libedgetpu (built against TF 2.19.1; verified
-# with ai-edge-litert 2.3.0 on Pi OS trixie). sha256 per <distro>_<arch>, from
-# the release's published asset digests.
+# libedgetpu1-std from feranick/libedgetpu (TF 2.19.1, verified with ai-edge-litert
+# 2.3.0); sha256 per <distro>_<arch> from the release digests.
 LIBEDGETPU_TAG="16.0TF2.19.1-1"
 LIBEDGETPU_VER="16.0tf2.19.1-1"
 declare -A LIBEDGETPU_SHA256=(
@@ -116,7 +69,7 @@ Usage: sudo scripts/install.sh --console <UNVR-IP> [options]
   --accel BACKEND         detector backend: auto|rknn|edgetpu|cpu|none
                           (auto: rknn on RK3588, edgetpu with a Coral, else cpu)
   --rknn PATH             prebuilt yolov5s_relu.rknn to install
-  --rknn-url URL          download the .rknn from URL (overrides PIPORT_RKNN_URL)
+  --rknn-url URL          download the .rknn from URL (overrides DIYPORT_RKNN_URL)
   --rknn-sha256 HEX       verify a downloaded/supplied .rknn
   --webui-port N          web UI listen port (default: 8090)
   --no-npu                same as --accel none: no detector runtime or model
@@ -142,7 +95,7 @@ while [ $# -gt 0 ]; do
 done
 
 [ "$(id -u)" -eq 0 ] || die "run as root: sudo $0 ${ORIG_ARGS[*]}"
-[ -f "$PIPORT_DIR/run_all.py" ] || die "piport/ not found under $REPO_ROOT -- run this from the repo"
+[ -f "$DIYPORT_DIR/run_all.py" ] || die "diyport/ not found under $REPO_ROOT -- run this from the repo"
 case "$NAME" in *[!a-zA-Z0-9_-]*|"") die "invalid --name '$NAME' (letters/digits/-/_ only, max 12)" ;; esac
 [ "${#NAME}" -le 12 ] || die "--name must be <= 12 characters (becomes a Linux interface name)"
 
@@ -197,7 +150,7 @@ if [ ! -x "$PY" ]; then
 fi
 log "installing Python dependencies"
 "$PY" -m pip install --quiet --upgrade pip
-"$PY" -m pip install --quiet -r "$PIPORT_DIR/requirements.txt"
+"$PY" -m pip install --quiet -r "$DIYPORT_DIR/requirements.txt"
 case "$ACCEL" in
     rknn)    log "installing rknn-toolkit-lite2"; "$PY" -m pip install --quiet rknn-toolkit-lite2 ;;
     edgetpu) log "installing ai-edge-litert";     "$PY" -m pip install --quiet ai-edge-litert ;;
@@ -242,8 +195,8 @@ if [ "$ACCEL" = "rknn" ]; then
     "$PY" "$REPO_ROOT/scripts/fetch_models.py" --no-cpu-model
 
     # Source precedence: --rknn file > local copy > download, where
-    # the download URL is --rknn-url > PIPORT_RKNN_URL > DEFAULT_RKNN_URL.
-    rknn_url="${RKNN_URL:-${PIPORT_RKNN_URL:-$DEFAULT_RKNN_URL}}"
+    # the download URL is --rknn-url > DIYPORT_RKNN_URL > DEFAULT_RKNN_URL.
+    rknn_url="${RKNN_URL:-${DIYPORT_RKNN_URL:-$DEFAULT_RKNN_URL}}"
     verified=0
 
     # (a) explicit local build
@@ -316,15 +269,15 @@ if [ "$ACCEL" = "rknn" ]; then
 
     if [ ! -f "$RKNN_DEST" ]; then
         cat >&2 <<'EOF'
-ERROR: piport/models/yolov5s_relu.rknn is missing.
+ERROR: diyport/models/yolov5s_relu.rknn is missing.
 
 The .rknn cannot be built on the Pi -- rknn-toolkit2 (the converter) is
 x86_64-only. On an x86_64 Linux box:
 
     python3 scripts/fetch_models.py --convert
 
-then copy piport/models/yolov5s_relu.rknn to this Pi, or re-run with
-  --rknn <path>   /   --rknn-url <url>   /   PIPORT_RKNN_URL=<url> ...
+then copy diyport/models/yolov5s_relu.rknn to this Pi, or re-run with
+  --rknn <path>   /   --rknn-url <url>   /   DIYPORT_RKNN_URL=<url> ...
 
 To install the protocol stack now and add NPU detection later, re-run with
   --accel none
@@ -402,7 +355,7 @@ if [ -n "$PARENT_IFACE" ]; then
     log "set [network] parent_iface=$PARENT_IFACE in aiport.cfg"
 fi
 
-cfg_host="$("$PY" -c "import sys; sys.path.insert(0, '$PIPORT_DIR'); import config; print(config.load_config()['host'])")"
+cfg_host="$("$PY" -c "import sys; sys.path.insert(0, '$DIYPORT_DIR'); import config; print(config.load_config()['host'])")"
 if [ -z "$cfg_host" ]; then
     die "no console host configured; pass --console <UNVR-IP> or set [console] host in $CFG"
 fi
@@ -412,14 +365,14 @@ INSTANCE_IFACE="ap-${NAME}"
 INSTANCE_IFACE="${INSTANCE_IFACE:0:15}"
 if [ -f "$INSTANCE_UNIT" ]; then
     log "instance '$NAME' already exists; refreshing unit + restarting"
-    "$PY" "$PIPORT_DIR/instance_manager.py" refresh "$NAME"
+    "$PY" "$DIYPORT_DIR/instance_manager.py" refresh "$NAME"
 else
     log "creating macvlan instance '$NAME' (systemd unit: aiport-instance-${NAME}.service)"
     im_args=(create "$NAME")
     if [ -n "$PARENT_IFACE" ]; then
         im_args+=(--parent-iface "$PARENT_IFACE")
     fi
-    "$PY" "$PIPORT_DIR/instance_manager.py" "${im_args[@]}"
+    "$PY" "$DIYPORT_DIR/instance_manager.py" "${im_args[@]}"
 fi
 
 # dhclient exits 0 on timeout, so poll for a real IP instead of trusting
@@ -433,17 +386,17 @@ for _ in $(seq 1 20); do
     sleep 0.5
 done
 
-log "writing web UI unit (piport-webui.service), port $WEBUI_PORT"
-cat > "$SYSTEMD_DIR/piport-webui.service" <<EOF
+log "writing web UI unit (diyport-webui.service), port $WEBUI_PORT"
+cat > "$SYSTEMD_DIR/diyport-webui.service" <<EOF
 [Unit]
-Description=Pi Port web UI (sysinfo + instance manager)
+Description=DIY Port web UI (sysinfo + instance manager)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=$PIPORT_DIR
-ExecStart=$PY $PIPORT_DIR/sysinfo_server.py --bind-ip 0.0.0.0 --port $WEBUI_PORT
+WorkingDirectory=$DIYPORT_DIR
+ExecStart=$PY $DIYPORT_DIR/sysinfo_server.py --bind-ip 0.0.0.0 --port $WEBUI_PORT
 Restart=on-failure
 RestartSec=5
 
@@ -452,15 +405,15 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now piport-webui.service
-systemctl restart piport-webui.service
+systemctl enable --now diyport-webui.service
+systemctl restart diyport-webui.service
 
 box_ip="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1 || true)"
 sleep 1
 if curl -fsS "http://127.0.0.1:${WEBUI_PORT}/api/stats" >/dev/null 2>&1; then
     webui_state="up"
 else
-    webui_state="NOT responding (check: journalctl -u piport-webui -n 50)"
+    webui_state="NOT responding (check: journalctl -u diyport-webui -n 50)"
 fi
 
 if [ -n "$inst_ip" ]; then
@@ -472,13 +425,13 @@ fi
 cat <<EOF
 
 ============================================================
-Pi Port installed.
+DIY Port installed.
 
   console        : $cfg_host
   instance unit  : aiport-instance-${NAME}.service  ($instance_state)
   web UI         : http://${box_ip:-<box-ip>}:${WEBUI_PORT}   [$webui_state]
   logs           : journalctl -u aiport-instance-${NAME} -f
-                   journalctl -u piport-webui -f
+                   journalctl -u diyport-webui -f
 
 Next: adopt "AI Port" from the Protect console UI, then pair a camera.
 Re-run safely any time to reinstall/update; the instance identity is preserved.
